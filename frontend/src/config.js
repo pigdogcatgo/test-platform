@@ -1,0 +1,1 @@
+export const API_URL = 'https://test-platform-api-tji7.onrender.com';
