@@ -23,6 +23,7 @@ const App = () => {
   const [timeRemaining, setTimeRemaining] = useState(null);
   
   const [editingProblem, setEditingProblem] = useState(null);
+  const [problemToDelete, setProblemToDelete] = useState(null);
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
 
@@ -203,16 +204,23 @@ const App = () => {
   };
 
   const saveProblem = async () => {
-    if (!editingProblem.question || editingProblem.answer === undefined) {
-      alert('Please fill in all fields');
+    if (!editingProblem.question || (editingProblem.answer !== 0 && !editingProblem.answer)) {
+      alert('Please fill in question and answer');
       return;
     }
 
+    const payload = {
+      question: editingProblem.question,
+      answer: Number(editingProblem.answer),
+      topic: editingProblem.topic ?? '',
+      image_url: editingProblem.image_url || null
+    };
+
     try {
       if (editingProblem.id) {
-        await api.put(`/api/problems/${editingProblem.id}`, editingProblem);
+        await api.put(`/api/problems/${editingProblem.id}`, payload);
       } else {
-        await api.post('/api/problems', editingProblem);
+        await api.post('/api/problems', payload);
       }
       setEditingProblem(null);
       loadUserData();
@@ -221,14 +229,13 @@ const App = () => {
     }
   };
 
-  const deleteProblem = async (id) => {
-    if (!window.confirm('Delete this problem?')) return;
-    
+  const confirmDeleteProblem = async (id) => {
+    setProblemToDelete(null);
     try {
       await api.delete(`/api/problems/${id}`);
       loadUserData();
     } catch (error) {
-      alert('Error deleting problem');
+      alert(error.response?.data?.error || 'Error deleting problem');
     }
   };
 
@@ -363,6 +370,13 @@ if (view === 'taking-test' && activeTest) {
                 <h3 className="text-base font-semibold text-gray-800 mt-1">
                   <RenderLatex text={problem.question} />
                 </h3>
+                {problem.image_url && (
+                  <img
+                    src={API_URL + problem.image_url}
+                    alt="Problem"
+                    className="mt-3 max-w-full max-h-64 rounded-lg border object-contain bg-gray-50"
+                  />
+                )}
               </div>
 
               <input
@@ -668,7 +682,7 @@ if (view === 'create-test' && user) {
 
           <div className="max-h-64 overflow-y-auto border rounded-lg p-4 space-y-2">
             {problems.map(p => (
-              <label key={p.id} className="flex gap-2 text-sm">
+              <label key={p.id} className="flex gap-2 text-sm items-start">
                 <input
                   type="checkbox"
                   checked={newTest.problemIds.includes(p.id)}
@@ -680,8 +694,18 @@ if (view === 'create-test' && user) {
                         : newTest.problemIds.filter(id => id !== p.id)
                     })
                   }
+                  className="mt-1"
                 />
-                <RenderLatex text={p.question} />
+                <span className="flex-1 min-w-0">
+                  <RenderLatex text={p.question} />
+                  {p.image_url && (
+                    <img
+                      src={API_URL + p.image_url}
+                      alt=""
+                      className="mt-1 max-h-16 rounded border object-contain"
+                    />
+                  )}
+                </span>
               </label>
             ))}
           </div>
@@ -713,11 +737,134 @@ if (view === 'admin-dashboard' && user) {
         </div>
 
         <button
-          onClick={() => setEditingProblem({ question: '', answer: '', topic: '' })}
+          onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '' })}
           className="mb-6 bg-[#007f8f] text-white px-6 py-3 rounded-lg"
         >
           Add Problem
         </button>
+
+        {editingProblem && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+              <h4 className="text-xl font-bold mb-4 text-center">
+                {editingProblem.id ? 'Edit' : 'Add'} Problem
+              </h4>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Question (LaTeX: $inline$ or $$display$$)</label>
+                  <textarea
+                    value={editingProblem.question}
+                    onChange={(e) =>
+                      setEditingProblem({ ...editingProblem, question: e.target.value })
+                    }
+                    className="w-full px-4 py-2 border rounded-lg min-h-[80px]"
+                    placeholder="e.g. What is $x^2 + 1$ when $x = 2$?"
+                    rows={3}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Image / screenshot (optional)</label>
+                  {editingProblem.image_url ? (
+                    <div className="flex items-start gap-2">
+                      <img
+                        src={API_URL + editingProblem.image_url}
+                        alt="Problem"
+                        className="max-h-32 rounded border object-contain bg-gray-50"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setEditingProblem({ ...editingProblem, image_url: '' })}
+                        className="text-sm text-red-600 hover:underline"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : (
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/gif,image/webp"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const formData = new FormData();
+                        formData.append('image', file);
+                        try {
+                          const { data } = await api.post('/api/upload', formData, {
+                            headers: { 'Content-Type': 'multipart/form-data' }
+                          });
+                          setEditingProblem({ ...editingProblem, image_url: data.url });
+                        } catch (err) {
+                          alert(err.response?.data?.error || 'Upload failed');
+                        }
+                        e.target.value = '';
+                      }}
+                      className="w-full text-sm text-gray-600"
+                    />
+                  )}
+                </div>
+                <input
+                  type="number"
+                  step="any"
+                  value={editingProblem.answer ?? ''}
+                  onChange={(e) =>
+                    setEditingProblem({ ...editingProblem, answer: e.target.value === '' ? '' : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2 border rounded-lg"
+                  placeholder="Answer"
+                />
+                <input
+                  type="text"
+                  value={editingProblem.topic ?? ''}
+                  onChange={(e) =>
+                    setEditingProblem({ ...editingProblem, topic: e.target.value })
+                  }
+                  className="w-full px-4 py-2 border rounded-lg"
+                  placeholder="Topic"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={saveProblem}
+                    className="flex-1 bg-[#007f8f] text-white py-2 rounded-lg"
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={() => setEditingProblem(null)}
+                    className="flex-1 bg-gray-200 py-2 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {problemToDelete != null && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" role="dialog" aria-modal="true">
+            <div className="bg-white rounded-xl p-6 max-w-sm w-full shadow-xl">
+              <p className="text-gray-800 font-medium mb-4">Delete this problem?</p>
+              <div className="flex gap-3 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setProblemToDelete(null)}
+                  className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => confirmDeleteProblem(problemToDelete)}
+                  className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700"
+                >
+                  Yes, delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="bg-white rounded-xl shadow overflow-x-auto"></div>
 
         <div className="bg-white rounded-xl shadow overflow-x-auto">
           <table className="w-full text-sm">
@@ -733,15 +880,36 @@ if (view === 'admin-dashboard' && user) {
             <tbody>
               {problems.map(p => (
                 <tr key={p.id} className="border-t">
-                  <td className="px-4 py-3">
-                    <RenderLatex text={p.question} />
+                  <td className="px-4 py-3 max-w-md">
+                    <div>
+                      <RenderLatex text={p.question} />
+                      {p.image_url && (
+                        <img
+                          src={API_URL + p.image_url}
+                          alt=""
+                          className="mt-2 max-h-20 rounded border object-contain"
+                        />
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3">{p.answer}</td>
                   <td className="px-4 py-3">{p.topic}</td>
                   <td className="px-4 py-3">{p.elo}</td>
                   <td className="px-4 py-3 space-x-2">
-                    <button onClick={() => setEditingProblem(p)}>Edit</button>
-                    <button onClick={() => deleteProblem(p.id)}>Delete</button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '' })}
+                      className="text-[#007f8f] hover:underline font-medium"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setProblemToDelete(p.id)}
+                      className="text-red-600 hover:underline font-medium"
+                    >
+                      Delete
+                    </button>
                   </td>
                 </tr>
               ))}
