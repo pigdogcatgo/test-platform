@@ -36,6 +36,7 @@ export async function initDatabase() {
         question TEXT NOT NULL,
         answer NUMERIC NOT NULL,
         topic VARCHAR(100),
+        image_url TEXT,
         elo INTEGER DEFAULT 1500,
         times_used INTEGER DEFAULT 0,
         times_correct INTEGER DEFAULT 0,
@@ -86,6 +87,16 @@ export async function initDatabase() {
         was_correct BOOLEAN NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+
+    // Ensure problem_id FK cascades on delete (so sample problems can be deleted)
+    await client.query(`
+      ALTER TABLE elo_history DROP CONSTRAINT IF EXISTS elo_history_problem_id_fkey
+    `);
+    await client.query(`
+      ALTER TABLE elo_history
+      ADD CONSTRAINT elo_history_problem_id_fkey
+      FOREIGN KEY (problem_id) REFERENCES problems(id) ON DELETE CASCADE
     `);
     
     await client.query('COMMIT');

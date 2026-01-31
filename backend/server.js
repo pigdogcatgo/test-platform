@@ -1,8 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import multer from 'multer';
 import pool, { initDatabase, seedDatabase } from './db.js';
 
 dotenv.config();
@@ -10,9 +13,34 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Ensure uploads directory exists
+const uploadsDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Multer config for image uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const ext = (file.mimetype === 'image/png') ? '.png' : (file.mimetype === 'image/jpeg' || file.mimetype === 'image/jpg') ? '.jpg' : '.png';
+    cb(null, `problem-${Date.now()}${path.extname(file.originalname) || ext}`);
+  }
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const allowed = /image\/(jpeg|jpg|png|gif|webp)/;
+    if (allowed.test(file.mimetype)) cb(null, true);
+    else cb(new Error('Only images (JPEG, PNG, GIF, WebP) are allowed'));
+  }
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static(uploadsDir));
 
 // Auth middleware
 const authenticateToken = (req, res, next) => {
@@ -103,6 +131,18 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
   }
 });
 
+// Upload image (admin only)
+app.post('/api/upload', authenticateToken, upload.single('image'), (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  if (!req.file) {
+    return res.status(400).json({ error: 'No image file provided' });
+  }
+  const url = '/uploads/' + req.file.filename;
+  res.json({ url });
+});
+
 // Create problem (admin only)
 app.post('/api/problems', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
@@ -110,10 +150,10 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   }
   
   try {
-    const { question, answer, topic } = req.body;
+    const { question, answer, topic, image_url: imageUrl } = req.body;
     const result = await pool.query(
-      'INSERT INTO problems (question, answer, topic) VALUES ($1, $2, $3) RETURNING *',
-      [question, answer, topic]
+      'INSERT INTO problems (question, answer, topic, image_url) VALUES ($1, $2, $3, $4) RETURNING *',
+      [question, answer, topic, imageUrl || null]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -128,10 +168,10 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   }
   
   try {
-    const { question, answer, topic } = req.body;
+    const { question, answer, topic, image_url: imageUrl } = req.body;
     const result = await pool.query(
-      'UPDATE problems SET question = $1, answer = $2, topic = $3 WHERE id = $4 RETURNING *',
-      [question, answer, topic, req.params.id]
+      'UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4 WHERE id = $5 RETURNING *',
+      [question, answer, topic, imageUrl || null, req.params.id]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -144,12 +184,29 @@ app.delete('/api/problems/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: 'Invalid problem id' });
+  }
+  const client = await pool.connect();
   try {
-    await pool.query('DELETE FROM problems WHERE id = $1', [req.params.id]);
+    await client.query('BEGIN');
+    await client.query(
+      'UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids)',
+      [id]
+    );
+    const del = await client.query('DELETE FROM problems WHERE id = $1 RETURNING id', [id]);
+    await client.query('COMMIT');
+    if (del.rowCount === 0) {
+      return res.status(404).json({ error: 'Problem not found' });
+    }
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Delete problem error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
+  } finally {
+    client.release();
   }
 });
 
