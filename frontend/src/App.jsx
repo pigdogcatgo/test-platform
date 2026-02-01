@@ -25,6 +25,7 @@ const App = () => {
   const [editingProblem, setEditingProblem] = useState(null);
   const [problemToDelete, setProblemToDelete] = useState(null);
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
+  const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
 
   // Create axios instance with useMemo to prevent recreation on every render
@@ -245,6 +246,23 @@ const App = () => {
       setSelectedTestAnalytics({ testId, attempts: data });
     } catch (error) {
       alert('Error loading analytics');
+    }
+  };
+
+  const registerStudent = async () => {
+    const username = newStudent.username.trim();
+    const password = newStudent.password;
+    if (!username || !password) {
+      alert('Enter username and password');
+      return;
+    }
+    try {
+      await api.post('/api/students', { username, password });
+      setNewStudent({ username: '', password: '' });
+      const { data } = await api.get('/api/students');
+      setStudents(data);
+    } catch (error) {
+      alert(error.response?.data?.error || 'Failed to register student');
     }
   };
 
@@ -564,13 +582,20 @@ if (view === 'teacher-dashboard' && user) {
       </div>
 
       <div className="max-w-7xl mx-auto px-6 py-8">
-        {/* Create test */}
-        <button
-          onClick={() => setView('create-test')}
-          className="mb-6 bg-[#007f8f] hover:bg-[#006b78] text-white px-6 py-3 rounded-lg font-medium"
-        >
-          Create New Test
-        </button>
+        <div className="mb-6 flex gap-3">
+          <button
+            onClick={() => setView('register-students')}
+            className="bg-[#007f8f] hover:bg-[#006b78] text-white px-6 py-3 rounded-lg font-medium"
+          >
+            Register Students
+          </button>
+          <button
+            onClick={() => setView('create-test')}
+            className="bg-[#007f8f] hover:bg-[#006b78] text-white px-6 py-3 rounded-lg font-medium"
+          >
+            Create New Test
+          </button>
+        </div>
 
         <div className="grid lg:grid-cols-2 gap-6">
           {/* Tests */}
@@ -617,20 +642,97 @@ if (view === 'teacher-dashboard' && user) {
             )}
           </div>
 
-          {/* Leaderboard */}
+          {/* My students (only students you registered) */}
           <div>
             <h2 className="text-lg font-semibold mb-4 text-gray-800">
-              Student Leaderboard
+              My Students
             </h2>
-
+            <p className="text-sm text-gray-500 mb-3">
+              Only students you register can see your tests. Use the Register Students button to add students.
+            </p>
             <div className="bg-white rounded-xl shadow divide-y">
-              {students.map((s, i) => (
+              {students.length === 0 ? (
+                <div className="p-6 text-center text-gray-500 text-sm">
+                  No students yet. <button type="button" onClick={() => setView('register-students')} className="text-[#007f8f] font-medium hover:underline">Register students</button> to get started.
+                </div>
+              ) : (
+                students.map((s, i) => (
+                  <div key={s.id} className="flex justify-between p-4">
+                    <span className="font-medium">{i + 1}. {s.username}</span>
+                    <span className="text-[#007f8f] font-semibold">{s.elo}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+if (view === 'register-students' && user) {
+  return (
+    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
+      <div className="w-full max-w-2xl p-6">
+        <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
+          <button
+            onClick={() => setView('teacher-dashboard')}
+            className="text-sm text-[#007f8f] hover:underline"
+          >
+            ← Back to Dashboard
+          </button>
+          <h1 className="text-lg font-semibold text-gray-800">
+            Register Students
+          </h1>
+          <span />
+        </div>
+
+        <div className="bg-white rounded-xl shadow p-6 mb-6">
+          <h2 className="text-base font-semibold text-gray-800 mb-4">Add a student</h2>
+          <div className="flex flex-wrap gap-3 items-end">
+            <input
+              type="text"
+              placeholder="Username"
+              value={newStudent.username}
+              onChange={(e) => setNewStudent({ ...newStudent, username: e.target.value })}
+              className="border rounded-lg px-4 py-2 flex-1 min-w-[120px]"
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={newStudent.password}
+              onChange={(e) => setNewStudent({ ...newStudent, password: e.target.value })}
+              className="border rounded-lg px-4 py-2 flex-1 min-w-[120px]"
+            />
+            <button
+              type="button"
+              onClick={() => registerStudent()}
+              className="bg-[#007f8f] hover:bg-[#006b78] text-white px-5 py-2 rounded-lg font-medium"
+            >
+              Add student
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl shadow">
+          <h2 className="text-base font-semibold text-gray-800 p-4 pb-2">My students</h2>
+          <p className="text-sm text-gray-500 px-4 pb-4">
+            Only these students can see and take your tests.
+          </p>
+          <div className="divide-y">
+            {students.length === 0 ? (
+              <div className="p-6 text-center text-gray-500 text-sm">
+                No students yet. Add one above.
+              </div>
+            ) : (
+              students.map((s, i) => (
                 <div key={s.id} className="flex justify-between p-4">
                   <span className="font-medium">{i + 1}. {s.username}</span>
                   <span className="text-[#007f8f] font-semibold">{s.elo}</span>
                 </div>
-              ))}
-            </div>
+              ))
+            )}
           </div>
         </div>
       </div>

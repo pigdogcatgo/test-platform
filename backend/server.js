@@ -110,7 +110,7 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/me', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, username, role, elo FROM users WHERE id = $1',
+      'SELECT id, username, role, elo, teacher_id FROM users WHERE id = $1',
       [req.user.id]
     );
     res.json(result.rows[0]);
@@ -210,12 +210,29 @@ app.delete('/api/problems/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Get all tests
+// Get all tests (students see only their teacher's tests; teachers see only their own)
 app.get('/api/tests', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM tests ORDER BY created_at DESC'
-    );
+    if (req.user.role === 'student') {
+      const userRow = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
+      const teacherId = userRow.rows[0]?.teacher_id;
+      if (teacherId == null) {
+        return res.json([]);
+      }
+      const result = await pool.query(
+        'SELECT * FROM tests WHERE created_by = $1 ORDER BY created_at DESC',
+        [teacherId]
+      );
+      return res.json(result.rows);
+    }
+    if (req.user.role === 'teacher') {
+      const result = await pool.query(
+        'SELECT * FROM tests WHERE created_by = $1 ORDER BY created_at DESC',
+        [req.user.id]
+      );
+      return res.json(result.rows);
+    }
+    const result = await pool.query('SELECT * FROM tests ORDER BY created_at DESC');
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -253,7 +270,7 @@ app.get('/api/attempts', authenticateToken, async (req, res) => {
   }
 });
 
-// Get all attempts for a test (teacher only)
+// Get all attempts for a test (teacher only; only their students)
 app.get('/api/tests/:id/attempts', authenticateToken, async (req, res) => {
   if (req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Teacher access required' });
@@ -264,9 +281,10 @@ app.get('/api/tests/:id/attempts', authenticateToken, async (req, res) => {
       `SELECT ta.*, u.username 
        FROM test_attempts ta 
        JOIN users u ON ta.student_id = u.id 
-       WHERE ta.test_id = $1 
+       JOIN tests t ON t.id = ta.test_id
+       WHERE ta.test_id = $1 AND t.created_by = $2 AND u.teacher_id = $2
        ORDER BY ta.score DESC`,
-      [req.params.id]
+      [req.params.id, req.user.id]
     );
     res.json(result.rows);
   } catch (error) {
@@ -299,9 +317,18 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Test already submitted' });
     }
     
-    // Get test and problems
+    // Get test and ensure student can take it (only their teacher's tests)
     const testResult = await client.query('SELECT * FROM tests WHERE id = $1', [testId]);
     const test = testResult.rows[0];
+    if (!test) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Test not found' });
+    }
+    const studentRow = await client.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
+    if (studentRow.rows[0]?.teacher_id !== test.created_by) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You can only submit tests assigned by your teacher' });
+    }
     
     const problemsResult = await client.query(
       'SELECT * FROM problems WHERE id = ANY($1)',
@@ -382,7 +409,7 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
   }
 });
 
-// Get all students (teacher only)
+// Get all students (teacher only; only students they registered)
 app.get('/api/students', authenticateToken, async (req, res) => {
   if (req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Teacher access required' });
@@ -390,11 +417,36 @@ app.get('/api/students', authenticateToken, async (req, res) => {
   
   try {
     const result = await pool.query(
-      'SELECT id, username, elo FROM users WHERE role = $1 ORDER BY elo DESC',
-      ['student']
+      'SELECT id, username, elo FROM users WHERE role = $1 AND teacher_id = $2 ORDER BY elo DESC',
+      ['student', req.user.id]
     );
     res.json(result.rows);
   } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Register a student (teacher only)
+app.post('/api/students', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Teacher access required' });
+  }
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password required' });
+    }
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (username, password_hash, role, teacher_id) VALUES ($1, $2, $3, $4) RETURNING id, username, elo',
+      [username.trim(), passwordHash, 'student', req.user.id]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(400).json({ error: 'Username already taken' });
+    }
+    console.error('Register student error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

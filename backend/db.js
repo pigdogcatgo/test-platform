@@ -25,8 +25,12 @@ export async function initDatabase() {
         password_hash VARCHAR(255) NOT NULL,
         role VARCHAR(20) NOT NULL CHECK (role IN ('student', 'teacher', 'admin')),
         elo INTEGER DEFAULT 1500,
+        teacher_id INTEGER REFERENCES users(id),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS teacher_id INTEGER REFERENCES users(id)
     `);
     
     // Problems table
@@ -138,6 +142,10 @@ export async function seedDatabase() {
       ('student2', $3, 'student', 1450),
       ('student3', $3, 'student', 1520)
     `, [adminHash, teacherHash, studentHash]);
+    await client.query(`
+      UPDATE users SET teacher_id = (SELECT id FROM users WHERE username = 'teacher1' LIMIT 1)
+      WHERE role = 'student'
+    `);
     
     // Create sample problems
     await client.query(`
