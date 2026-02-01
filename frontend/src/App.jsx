@@ -10,7 +10,9 @@ const App = () => {
   const [user, setUser] = useState(null);
   const [view, setView] = useState('login');
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [signupForm, setSignupForm] = useState({ username: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
+  const [showSignupPassword, setShowSignupPassword] = useState(false);
   
   const [problems, setProblems] = useState([]);
   const [tests, setTests] = useState([]);
@@ -120,6 +122,27 @@ const App = () => {
       setUser(data.user);
     } catch (error) {
       alert('Invalid credentials');
+    }
+  };
+
+  const handleSignup = async (e) => {
+    e.preventDefault();
+    if (!signupForm.username.trim() || !signupForm.password) {
+      alert('Please enter username and password');
+      return;
+    }
+    if (signupForm.password.length < 6) {
+      alert('Password must be at least 6 characters');
+      return;
+    }
+    try {
+      const { data } = await axios.post(`${API_URL}/api/signup`, signupForm);
+      localStorage.setItem('token', data.token);
+      setToken(data.token);
+      setUser(data.user);
+      setSignupForm({ username: '', password: '' });
+    } catch (error) {
+      alert(error.response?.data?.error || 'Signup failed');
     }
   };
 
@@ -331,7 +354,76 @@ if (view === 'login') {
 
       {/* Sign up */}
       <div className="signup">
-        New to the platform? <a href="#">Sign up</a>
+        New teacher? <button type="button" onClick={() => setView('signup')} className="text-[#007f8f] hover:underline font-medium">Sign up</button>
+      </div>
+
+      {/* Footer */}
+      <footer className="footer">
+        <a href="#">Help</a>
+      </footer>
+    </div>
+  );
+}
+
+if (view === 'signup') {
+  return (
+    <div className="login-page">
+      {/* Logo */}
+      <div className="logo">
+        <span className="logo-text">DDMTP</span>
+        <div className="logo-icon">
+          <span />
+          <span />
+          <span />
+          <span />
+        </div>
+      </div>
+
+      {/* Signup Card */}
+      <div className="login-card">
+        <h1>Teacher Sign Up</h1>
+        <p className="subtitle">Create your teacher account</p>
+
+        <form onSubmit={handleSignup}>
+          <input
+            type="text"
+            placeholder="Username*"
+            value={signupForm.username}
+            onChange={(e) =>
+              setSignupForm({ ...signupForm, username: e.target.value })
+            }
+            required
+          />
+
+          <div className="password-wrapper">
+            <input
+              type={showSignupPassword ? 'text' : 'password'}
+              placeholder="Password (min 6 characters)*"
+              value={signupForm.password}
+              onChange={(e) =>
+                setSignupForm({ ...signupForm, password: e.target.value })
+              }
+              required
+            />
+            <button
+              type="button"
+              className="toggle-password"
+              onClick={() => setShowSignupPassword(!showSignupPassword)}
+              aria-label="Toggle password visibility"
+            >
+              👁
+            </button>
+          </div>
+
+          <button type="submit" className="login-btn">
+            Sign up
+          </button>
+        </form>
+      </div>
+
+      {/* Back to login */}
+      <div className="signup">
+        Already have an account? <button type="button" onClick={() => setView('login')} className="text-[#007f8f] hover:underline font-medium">Log in</button>
       </div>
 
       {/* Footer */}
