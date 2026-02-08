@@ -88,6 +88,8 @@ const App = () => {
     try {
       const { data } = await api.post(`/api/tests/${activeTest.id}/submit`, { answers: testAnswers });
       if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+      sessionStorage.removeItem('testInProgress');
+      sessionStorage.removeItem('testAnswers_' + activeTest.id);
       alert(`Test submitted! Score: ${data.attempt.score}/${data.attempt.total}\nELO Change: ${data.eloChange >= 0 ? '+' : ''}${data.eloChange}`);
       
       setActiveTest(null);
@@ -101,15 +103,75 @@ const App = () => {
 
   handleSubmitTestRef.current = handleSubmitTest;
 
-  // Timer effect with proper dependencies
+  // Timer: use persisted start time so reopening tab doesn't reset it
   useEffect(() => {
-    if (timeRemaining !== null && timeRemaining > 0 && activeTest) {
-      const timer = setTimeout(() => setTimeRemaining(timeRemaining - 1), 1000);
-      return () => clearTimeout(timer);
-    } else if (timeRemaining === 0 && activeTest) {
+    if (!activeTest || timeRemaining === null) return;
+    if (timeRemaining <= 0) {
       handleSubmitTest();
+      return;
     }
+    const raw = sessionStorage.getItem('testInProgress');
+    const computeRemaining = () => {
+      if (raw) {
+        try {
+          const { startTime, durationMin, testId } = JSON.parse(raw);
+          if (testId === activeTest.id) {
+            return Math.max(0, Math.ceil((startTime + durationMin * 60 * 1000 - Date.now()) / 1000));
+          }
+        } catch (_) {}
+      }
+      return Math.max(0, timeRemaining - 1);
+    };
+    const next = computeRemaining();
+    if (next <= 0) {
+      handleSubmitTest();
+      return;
+    }
+    const timer = setTimeout(() => setTimeRemaining(computeRemaining()), 1000);
+    return () => clearTimeout(timer);
   }, [timeRemaining, activeTest, handleSubmitTest]);
+
+  // Persist test answers so they survive refresh/reopen
+  useEffect(() => {
+    if (view === 'taking-test' && activeTest && Object.keys(testAnswers).length > 0) {
+      sessionStorage.setItem('testAnswers_' + activeTest.id, JSON.stringify(testAnswers));
+    }
+  }, [view, activeTest, testAnswers]);
+
+  // Restore in-progress test when student reopens tab or refreshes
+  useEffect(() => {
+    if (user?.role !== 'student' || !tests.length) return;
+    if (view === 'taking-test' && activeTest) return;
+    const raw = sessionStorage.getItem('testInProgress');
+    if (!raw) return;
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const { testId, startTime, durationMin, testName, problemIds } = data;
+    if (Date.now() > startTime + durationMin * 60 * 1000) {
+      sessionStorage.removeItem('testInProgress');
+      sessionStorage.removeItem('testAnswers_' + testId);
+      return;
+    }
+    const test = tests.find(t => t.id === testId);
+    if (!test) return;
+    (async () => {
+      try {
+        const { data: problemsData } = await api.get('/api/problems');
+        const probs = problemIds.map(id => problemsData.find(p => p.id === id)).filter(Boolean);
+        const savedAnswers = sessionStorage.getItem('testAnswers_' + testId);
+        const answers = savedAnswers ? JSON.parse(savedAnswers) : {};
+        setActiveTest(test);
+        setTestProblems(probs);
+        setTestAnswers(answers);
+        setTimeRemaining(Math.max(0, Math.ceil((startTime + durationMin * 60 * 1000 - Date.now()) / 1000)));
+        setView('taking-test');
+      } catch (_) {}
+    })();
+  }, [user?.role, tests, api, view, activeTest]);
 
   // Keep ref updated so beforeunload can submit with latest answers
   useEffect(() => {
@@ -229,6 +291,26 @@ const App = () => {
     return <>{parts}</>;
   };
 
+  const ProblemImage = ({ url }) => {
+    const [error, setError] = useState(false);
+    const src = url.startsWith('http') ? url : API_URL + (url.startsWith('/') ? url : '/' + url);
+    if (error) {
+      return (
+        <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-500">
+          Image unavailable
+        </div>
+      );
+    }
+    return (
+      <img
+        src={src}
+        alt="Problem"
+        className="mt-3 max-w-full max-h-64 rounded-lg border object-contain bg-gray-50"
+        onError={() => setError(true)}
+      />
+    );
+  };
+
   const startTest = async (test) => {
     const hasAttempt = attempts.find(a => a.test_id === test.id);
     if (hasAttempt) {
@@ -238,10 +320,18 @@ const App = () => {
 
     try {
       const { data: problemsData } = await api.get('/api/problems');
-      // Add defensive check for problem_ids
       const problemIds = test.problem_ids || [];
       const testProbs = problemIds.map(id => problemsData.find(p => p.id === id)).filter(Boolean);
       const shuffled = [...testProbs].sort(() => Math.random() - 0.5);
+      const startTime = Date.now();
+      sessionStorage.setItem('testInProgress', JSON.stringify({
+        testId: test.id,
+        startTime,
+        durationMin: test.time_limit,
+        testName: test.name,
+        problemIds: shuffled.map(p => p.id)
+      }));
+      sessionStorage.removeItem('testAnswers_' + test.id);
       
       setActiveTest(test);
       setTestProblems(shuffled);
@@ -529,9 +619,9 @@ if (view === 'taking-test' && activeTest) {
           </div>
         </div>
 
-        {/* Lockdown warning */}
-        <div className="mb-4 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 text-center text-sm font-medium text-amber-900">
-          Do not reload, switch tabs, exit the test, or go back. If you do, your answers will be auto-submitted.
+        {/* Lockdown warning — prominent */}
+        <div className="mb-4 rounded-xl border-2 border-amber-500 bg-amber-100 px-4 py-4 text-center text-base font-semibold text-amber-900 shadow-sm">
+          ⚠ Do not reload, switch tabs, exit, or go back. If you do, your answers will be auto-submitted immediately.
         </div>
 
         {/* Time warning */}
@@ -555,11 +645,7 @@ if (view === 'taking-test' && activeTest) {
                   <RenderLatex text={problem.question} />
                 </h3>
                 {problem.image_url && (
-                  <img
-                    src={API_URL + problem.image_url}
-                    alt="Problem"
-                    className="mt-3 max-w-full max-h-64 rounded-lg border object-contain bg-gray-50"
-                  />
+                  <ProblemImage url={problem.image_url} />
                 )}
               </div>
 
