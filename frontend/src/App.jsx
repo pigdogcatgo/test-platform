@@ -259,7 +259,13 @@ const App = () => {
       setEditingProblem(null);
       loadUserData();
     } catch (error) {
-      const message = error.response?.data?.error || error.message || 'Error saving problem';
+      const status = error.response?.status;
+      const data = error.response?.data;
+      let message = typeof data?.error === 'string' ? data.error : error.message || 'Error saving problem';
+      if (status === 403) message = 'Admin access required. Only admins can add or edit problems.';
+      if (status === 401) message = 'Session expired. Please log in again.';
+      if (status && status >= 500) message = `Server error (${status}). Please try again later.`;
+      if (error.code === 'ERR_NETWORK' || !error.response) message = 'Could not reach server. Check your connection and that the backend is running.';
       alert(message);
     }
   };
@@ -1007,27 +1013,34 @@ if (view === 'admin-dashboard' && user) {
                     />
                   )}
                 </div>
-                <input
-                  type="number"
-                  step="any"
-                  value={editingProblem.answer ?? ''}
-                  onChange={(e) =>
-                    setEditingProblem({ ...editingProblem, answer: e.target.value })
-                  }
-                  className="w-full px-4 py-2 border rounded-lg"
-                  placeholder="Answer (number)"
-                />
-                <input
-                  type="text"
-                  value={editingProblem.topic ?? ''}
-                  onChange={(e) =>
-                    setEditingProblem({ ...editingProblem, topic: e.target.value })
-                  }
-                  className="w-full px-4 py-2 border rounded-lg"
-                  placeholder="Topic"
-                />
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Answer (number)</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editingProblem.answer ?? ''}
+                    onChange={(e) =>
+                      setEditingProblem({ ...editingProblem, answer: e.target.value })
+                    }
+                    className="w-full px-4 py-2 border rounded-lg"
+                    placeholder="e.g. 42 or 3.14"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Topic (optional)</label>
+                  <input
+                    type="text"
+                    value={editingProblem.topic ?? ''}
+                    onChange={(e) =>
+                      setEditingProblem({ ...editingProblem, topic: e.target.value })
+                    }
+                    className="w-full px-4 py-2 border rounded-lg"
+                    placeholder="e.g. Algebra, Geometry"
+                  />
+                </div>
                 <div className="flex gap-2">
                   <button
+                    type="button"
                     onClick={saveProblem}
                     className="flex-1 bg-[#007f8f] text-white py-2 rounded-lg"
                   >
