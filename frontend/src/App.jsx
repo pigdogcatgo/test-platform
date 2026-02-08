@@ -264,7 +264,7 @@ const App = () => {
       let message = typeof data?.error === 'string' ? data.error : error.message || 'Error saving problem';
       if (status === 403) message = 'Admin access required. Only admins can add or edit problems.';
       if (status === 401) message = 'Session expired. Please log in again.';
-      if (status && status >= 500) message = `Server error (${status}). Please try again later.`;
+      if (status && status >= 500 && !message) message = `Server error (${status}). Please try again later.`;
       if (error.code === 'ERR_NETWORK' || !error.response) message = 'Could not reach server. Check your connection and that the backend is running.';
       alert(message);
     }

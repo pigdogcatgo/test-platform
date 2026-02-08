@@ -47,6 +47,9 @@ export async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await client.query(`
+      ALTER TABLE problems ADD COLUMN IF NOT EXISTS image_url TEXT
+    `);
     
     // Tests table
     await client.query(`
