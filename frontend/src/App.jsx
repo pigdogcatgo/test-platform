@@ -5,6 +5,96 @@ import './index.css';
 import 'katex/dist/katex.min.css';
 import { InlineMath, BlockMath } from 'react-katex';
 
+// Remember URLs that failed so we never re-request (avoids remount/Strict Mode retries and ERR_BLOCKED loops)
+const failedImageUrls = new Set();
+
+function ProblemImage({ url, token }) {
+  const [error, setError] = useState(false);
+  const [blobUrl, setBlobUrl] = useState(null);
+  const requestKey = url + (token ? '|auth' : '');
+
+  // For /uploads/xxx we load via authenticated API and show as blob URL
+  useEffect(() => {
+    if (!url || error || failedImageUrls.has(requestKey)) return;
+    const isUpload = url.startsWith('/uploads/');
+    const filename = isUpload ? url.replace(/^\/uploads\/?/, '') : null;
+    if (!isUpload || !filename || !token) {
+      setBlobUrl(undefined);
+      return;
+    }
+    const apiUrl = API_URL + '/api/uploads/' + encodeURIComponent(filename);
+    let revoked = false;
+    fetch(apiUrl, { headers: { Authorization: 'Bearer ' + token } })
+      .then((res) => {
+        if (revoked) return null;
+        if (!res.ok) throw new Error(res.status);
+        return res.blob();
+      })
+      .then((blob) => {
+        if (revoked || !blob) return;
+        setBlobUrl(URL.createObjectURL(blob));
+      })
+      .catch(() => {
+        if (!revoked) {
+          failedImageUrls.add(requestKey);
+          setError(true);
+        }
+      });
+    return () => {
+      revoked = true;
+    };
+  }, [url, token, requestKey, error]);
+
+  // Revoke blob URL when it changes or on unmount
+  const blobUrlRef = useRef(null);
+  useEffect(() => {
+    const prev = blobUrlRef.current;
+    blobUrlRef.current = blobUrl;
+    if (prev) URL.revokeObjectURL(prev);
+    return () => {
+      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    };
+  }, [blobUrl]);
+
+  const directSrc = url.startsWith('http') ? url : API_URL + (url.startsWith('/') ? url : '/' + url);
+  const src = blobUrl != null ? blobUrl : (token && url.startsWith('/uploads/') ? undefined : directSrc);
+  const alreadyFailed = failedImageUrls.has(requestKey) || failedImageUrls.has(directSrc);
+
+  if (error || alreadyFailed) {
+    if (!alreadyFailed) failedImageUrls.add(requestKey);
+    return (
+      <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-500">
+        Image unavailable
+      </div>
+    );
+  }
+
+  // Still loading via fetch (authenticated)
+  if (token && url.startsWith('/uploads/') && blobUrl == null && !error) {
+    return (
+      <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-400">
+        Loading image…
+      </div>
+    );
+  }
+
+  if (!src) return null;
+
+  return (
+    <img
+      src={src}
+      alt="Problem"
+      className="mt-3 max-w-full max-h-64 rounded-lg border object-contain bg-gray-50"
+      onError={() => {
+        failedImageUrls.add(requestKey);
+        failedImageUrls.add(directSrc);
+        setError(true);
+      }}
+    />
+  );
+}
+
 const App = () => {
   const [token, setToken] = useState(() => localStorage.getItem('token'));
   const [user, setUser] = useState(null);
@@ -289,26 +379,6 @@ const App = () => {
     }
     
     return <>{parts}</>;
-  };
-
-  const ProblemImage = ({ url }) => {
-    const [error, setError] = useState(false);
-    const src = url.startsWith('http') ? url : API_URL + (url.startsWith('/') ? url : '/' + url);
-    if (error) {
-      return (
-        <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-500">
-          Image unavailable
-        </div>
-      );
-    }
-    return (
-      <img
-        src={src}
-        alt="Problem"
-        className="mt-3 max-w-full max-h-64 rounded-lg border object-contain bg-gray-50"
-        onError={() => setError(true)}
-      />
-    );
   };
 
   const startTest = async (test) => {
@@ -645,7 +715,7 @@ if (view === 'taking-test' && activeTest) {
                   <RenderLatex text={problem.question} />
                 </h3>
                 {problem.image_url && (
-                  <ProblemImage url={problem.image_url} />
+                  <ProblemImage url={problem.image_url} token={token} />
                 )}
               </div>
 

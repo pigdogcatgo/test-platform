@@ -182,6 +182,20 @@ app.post('/api/upload', authenticateToken, upload.single('image'), (req, res) =>
   res.json({ url });
 });
 
+// Serve uploaded image with auth (so <img> can load via fetch + token)
+app.get('/api/uploads/:filename', authenticateToken, (req, res) => {
+  const raw = req.params.filename;
+  const filename = path.basename(raw);
+  if (!filename || filename !== raw || filename.includes('..')) {
+    return res.status(400).send('Bad request');
+  }
+  const filepath = path.join(uploadsDir, filename);
+  if (!fs.existsSync(filepath)) {
+    return res.status(404).send('Not found');
+  }
+  res.sendFile(filepath);
+});
+
 // Create problem (admin only)
 app.post('/api/problems', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
