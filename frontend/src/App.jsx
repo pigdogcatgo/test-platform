@@ -228,15 +228,25 @@ const App = () => {
   };
 
   const saveProblem = async () => {
-    if (!editingProblem.question || (editingProblem.answer !== 0 && !editingProblem.answer)) {
-      alert('Please fill in question and answer');
+    const question = (editingProblem.question || '').trim();
+    const rawAnswer = editingProblem.answer;
+    const answerNum = rawAnswer === '' || rawAnswer === undefined || rawAnswer === null
+      ? NaN
+      : Number(rawAnswer);
+
+    if (!question) {
+      alert('Please enter a question.');
+      return;
+    }
+    if (Number.isNaN(answerNum) || answerNum === null) {
+      alert('Please enter a valid number for the answer.');
       return;
     }
 
     const payload = {
-      question: editingProblem.question,
-      answer: Number(editingProblem.answer),
-      topic: editingProblem.topic ?? '',
+      question,
+      answer: answerNum,
+      topic: (editingProblem.topic ?? '').trim(),
       image_url: editingProblem.image_url || null
     };
 
@@ -249,7 +259,8 @@ const App = () => {
       setEditingProblem(null);
       loadUserData();
     } catch (error) {
-      alert('Error saving problem');
+      const message = error.response?.data?.error || error.message || 'Error saving problem';
+      alert(message);
     }
   };
 
@@ -1001,10 +1012,10 @@ if (view === 'admin-dashboard' && user) {
                   step="any"
                   value={editingProblem.answer ?? ''}
                   onChange={(e) =>
-                    setEditingProblem({ ...editingProblem, answer: e.target.value === '' ? '' : parseFloat(e.target.value) })
+                    setEditingProblem({ ...editingProblem, answer: e.target.value })
                   }
                   className="w-full px-4 py-2 border rounded-lg"
-                  placeholder="Answer"
+                  placeholder="Answer (number)"
                 />
                 <input
                   type="text"

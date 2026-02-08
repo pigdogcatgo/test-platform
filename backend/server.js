@@ -187,16 +187,23 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  
+  const { question, answer, topic, image_url: imageUrl } = req.body;
+  if (!question || typeof question !== 'string' || !question.trim()) {
+    return res.status(400).json({ error: 'Question is required' });
+  }
+  const answerNum = Number(answer);
+  if (answer === undefined || answer === null || answer === '' || Number.isNaN(answerNum)) {
+    return res.status(400).json({ error: 'A valid numeric answer is required' });
+  }
   try {
-    const { question, answer, topic, image_url: imageUrl } = req.body;
     const result = await pool.query(
       'INSERT INTO problems (question, answer, topic, image_url) VALUES ($1, $2, $3, $4) RETURNING *',
-      [question, answer, topic, imageUrl || null]
+      [question.trim(), answerNum, (topic || '').trim(), imageUrl || null]
     );
     res.json(result.rows[0]);
   } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Create problem error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
   }
 });
 
@@ -205,16 +212,23 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  
+  const { question, answer, topic, image_url: imageUrl } = req.body;
+  if (!question || typeof question !== 'string' || !question.trim()) {
+    return res.status(400).json({ error: 'Question is required' });
+  }
+  const answerNum = Number(answer);
+  if (answer === undefined || answer === null || answer === '' || Number.isNaN(answerNum)) {
+    return res.status(400).json({ error: 'A valid numeric answer is required' });
+  }
   try {
-    const { question, answer, topic, image_url: imageUrl } = req.body;
     const result = await pool.query(
       'UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4 WHERE id = $5 RETURNING *',
-      [question, answer, topic, imageUrl || null, req.params.id]
+      [question.trim(), answerNum, (topic || '').trim(), imageUrl || null, req.params.id]
     );
     res.json(result.rows[0]);
   } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Update problem error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
   }
 });
 
