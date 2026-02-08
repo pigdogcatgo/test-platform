@@ -10,6 +10,7 @@ const failedImageUrls = new Set();
 
 function ProblemImage({ url, token }) {
   const [error, setError] = useState(false);
+  const [errorStatus, setErrorStatus] = useState(null); // 401, 404, etc.
   const [blobUrl, setBlobUrl] = useState(null);
   const requestKey = url + (token ? '|auth' : '');
 
@@ -27,17 +28,21 @@ function ProblemImage({ url, token }) {
     fetch(apiUrl, { headers: { Authorization: 'Bearer ' + token } })
       .then((res) => {
         if (revoked) return null;
-        if (!res.ok) throw new Error(res.status);
+        if (!res.ok) {
+          setErrorStatus(res.status);
+          throw new Error(res.status);
+        }
         return res.blob();
       })
       .then((blob) => {
         if (revoked || !blob) return;
         setBlobUrl(URL.createObjectURL(blob));
       })
-      .catch(() => {
+      .catch((err) => {
         if (!revoked) {
           failedImageUrls.add(requestKey);
           setError(true);
+          if (err instanceof Error && err.message && /^\d+$/.test(err.message)) setErrorStatus(Number(err.message));
         }
       });
     return () => {
@@ -61,11 +66,22 @@ function ProblemImage({ url, token }) {
   const src = blobUrl != null ? blobUrl : (token && url.startsWith('/uploads/') ? undefined : directSrc);
   const alreadyFailed = failedImageUrls.has(requestKey) || failedImageUrls.has(directSrc);
 
-  if (error || alreadyFailed) {
-    if (!alreadyFailed) failedImageUrls.add(requestKey);
+  // /uploads/ but no token: don't hit direct URL (would 401)
+  if (url.startsWith('/uploads/') && !token) {
     return (
       <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-500">
         Image unavailable
+      </div>
+    );
+  }
+
+  if (error || alreadyFailed) {
+    if (!alreadyFailed) failedImageUrls.add(requestKey);
+    const statusHint = errorStatus ? ` (${errorStatus})` : '';
+    const extraHint = errorStatus === 404 ? ' — file may be missing on server (try re-uploading).' : '';
+    return (
+      <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-500">
+        Image unavailable{statusHint}{extraHint}
       </div>
     );
   }
