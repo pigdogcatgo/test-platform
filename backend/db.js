@@ -23,6 +23,12 @@ export async function initDatabase() {
     } catch (migErr) {
       console.warn('Migration image_url (non-fatal):', migErr.message);
     }
+    try {
+      await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS problem_elo_snapshot JSONB');
+      console.log('Tests problem_elo_snapshot column ensured');
+    } catch (migErr) {
+      console.warn('Migration problem_elo_snapshot (non-fatal):', migErr.message);
+    }
 
     await client.query('BEGIN');
     
@@ -57,7 +63,7 @@ export async function initDatabase() {
       )
     `);
     
-    // Tests table
+    // Tests table (problem_elo_snapshot = frozen ELOs for this test so all students see same difficulties)
     await client.query(`
       CREATE TABLE IF NOT EXISTS tests (
         id SERIAL PRIMARY KEY,
@@ -66,6 +72,7 @@ export async function initDatabase() {
         due_date DATE NOT NULL,
         time_limit INTEGER NOT NULL,
         created_by INTEGER REFERENCES users(id),
+        problem_elo_snapshot JSONB,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);

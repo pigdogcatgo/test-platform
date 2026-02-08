@@ -390,12 +390,26 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
       [test.problem_ids]
     );
     const problems = problemsResult.rows;
+
+    // Batch ELO: use same problem ELOs for everyone on this test (snapshot on first submit)
+    let snapshot = test.problem_elo_snapshot;
+    if (typeof snapshot === 'string') try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+    if (!snapshot || typeof snapshot !== 'object' || Object.keys(snapshot).length === 0) {
+      snapshot = {};
+      for (const p of problems) snapshot[p.id] = p.elo;
+      await client.query(
+        'UPDATE tests SET problem_elo_snapshot = $1 WHERE id = $2',
+        [JSON.stringify(snapshot), testId]
+      );
+    }
+    // Use snapshot ELO for grading (so all students in batch face same difficulties)
+    const getProblemElo = (problem) => snapshot[problem.id] ?? problem.elo;
     
     // Get current user ELO
     const userResult = await client.query('SELECT elo FROM users WHERE id = $1', [req.user.id]);
     const currentUserElo = userResult.rows[0].elo;
     
-    // Grade and calculate ELO
+    // Grade and calculate ELO using snapshot problem ELOs
     let score = 0;
     const results = {};
     let newUserElo = currentUserElo;
@@ -407,12 +421,12 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
       
       if (isCorrect) score++;
       
-      // Calculate new ELOs
+      const problemElo = getProblemElo(problem);
       const outcome = isCorrect ? 1 : 0;
-      const tempNewUserElo = calculateELO(newUserElo, problem.elo, outcome, 32);
-      const newProblemElo = calculateELO(problem.elo, newUserElo, 1 - outcome, 16);
+      const tempNewUserElo = calculateELO(newUserElo, problemElo, outcome, 32);
+      const newProblemElo = calculateELO(problemElo, newUserElo, 1 - outcome, 16);
       
-      // Update problem
+      // Update problem in DB (global difficulty still evolves)
       await client.query(
         `UPDATE problems 
          SET elo = $1, 
@@ -422,12 +436,12 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
         [newProblemElo, isCorrect ? 1 : 0, problem.id]
       );
       
-      // Record ELO history
+      // Record ELO history (snapshot ELO used for grading)
       await client.query(
         `INSERT INTO elo_history 
          (user_id, problem_id, old_user_elo, new_user_elo, old_problem_elo, new_problem_elo, was_correct) 
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [req.user.id, problem.id, newUserElo, tempNewUserElo, problem.elo, newProblemElo, isCorrect]
+        [req.user.id, problem.id, newUserElo, tempNewUserElo, problemElo, newProblemElo, isCorrect]
       );
       
       newUserElo = tempNewUserElo;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import axios from 'axios';
 import { API_URL } from './config';
 import './index.css';
@@ -23,6 +23,8 @@ const App = () => {
   const [testProblems, setTestProblems] = useState([]);
   const [testAnswers, setTestAnswers] = useState({});
   const [timeRemaining, setTimeRemaining] = useState(null);
+  const testSubmitRef = useRef({ activeTest: null, testAnswers: {} });
+  const handleSubmitTestRef = useRef(() => {});
   
   const [editingProblem, setEditingProblem] = useState(null);
   const [problemToDelete, setProblemToDelete] = useState(null);
@@ -85,6 +87,7 @@ const App = () => {
     
     try {
       const { data } = await api.post(`/api/tests/${activeTest.id}/submit`, { answers: testAnswers });
+      if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
       alert(`Test submitted! Score: ${data.attempt.score}/${data.attempt.total}\nELO Change: ${data.eloChange >= 0 ? '+' : ''}${data.eloChange}`);
       
       setActiveTest(null);
@@ -96,6 +99,8 @@ const App = () => {
     }
   }, [activeTest, testAnswers, api, loadUserData]);
 
+  handleSubmitTestRef.current = handleSubmitTest;
+
   // Timer effect with proper dependencies
   useEffect(() => {
     if (timeRemaining !== null && timeRemaining > 0 && activeTest) {
@@ -105,6 +110,48 @@ const App = () => {
       handleSubmitTest();
     }
   }, [timeRemaining, activeTest, handleSubmitTest]);
+
+  // Keep ref updated so beforeunload can submit with latest answers
+  useEffect(() => {
+    if (view === 'taking-test' && activeTest) {
+      testSubmitRef.current = { activeTest, testAnswers };
+    }
+  }, [view, activeTest, testAnswers]);
+
+  // Lockdown: auto-submit on leave / tab switch
+  useEffect(() => {
+    if (view !== 'taking-test' || !activeTest) return;
+    let leftWhileHidden = false;
+    const onBeforeUnload = (e) => {
+      const { activeTest: at, testAnswers: ta } = testSubmitRef.current;
+      if (at && ta && Object.keys(ta).length >= 0) {
+        const t = localStorage.getItem('token');
+        if (t) {
+          fetch(`${API_URL}/api/tests/${at.id}/submit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
+            body: JSON.stringify({ answers: ta }),
+            keepalive: true
+          });
+        }
+      }
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) leftWhileHidden = true;
+      else if (leftWhileHidden) {
+        leftWhileHidden = false;
+        handleSubmitTestRef.current?.();
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [view, activeTest]);
 
   // Load user data when token changes
   useEffect(() => {
@@ -201,6 +248,11 @@ const App = () => {
       setTimeRemaining(test.time_limit * 60);
       setTestAnswers({});
       setView('taking-test');
+      try {
+        document.documentElement.requestFullscreen?.();
+      } catch {
+        // Fullscreen optional; user may deny
+      }
     } catch (error) {
       alert('Error loading test');
     }
@@ -475,6 +527,11 @@ if (view === 'taking-test' && activeTest) {
               </div>
             </div>
           </div>
+        </div>
+
+        {/* Lockdown warning */}
+        <div className="mb-4 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 text-center text-sm font-medium text-amber-900">
+          Do not reload, switch tabs, exit the test, or go back. If you do, your answers will be auto-submitted.
         </div>
 
         {/* Time warning */}
