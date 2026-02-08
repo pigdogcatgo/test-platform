@@ -15,6 +15,15 @@ export async function initDatabase() {
   const client = await pool.connect();
   
   try {
+    // Run migrations that add columns to existing tables in their own transaction
+    // so they commit even if later steps fail (e.g. on existing Render DBs)
+    try {
+      await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS image_url TEXT');
+      console.log('Problems image_url column ensured');
+    } catch (migErr) {
+      console.warn('Migration image_url (non-fatal):', migErr.message);
+    }
+
     await client.query('BEGIN');
     
     // Users table
@@ -46,9 +55,6 @@ export async function initDatabase() {
         times_correct INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
-    `);
-    await client.query(`
-      ALTER TABLE problems ADD COLUMN IF NOT EXISTS image_url TEXT
     `);
     
     // Tests table
