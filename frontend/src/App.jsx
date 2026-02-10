@@ -18,12 +18,13 @@ function ProblemImage({ url, token }) {
   useEffect(() => {
     if (!url || error || failedImageUrls.has(requestKey)) return;
     const isUpload = url.startsWith('/uploads/');
-    const filename = isUpload ? url.replace(/^\/uploads\/?/, '') : null;
-    if (!isUpload || !filename || !token) {
+    const pathPart = isUpload ? url.replace(/^\/uploads\/?/, '') : null;
+    if (!isUpload || !pathPart || !token) {
       setBlobUrl(undefined);
       return;
     }
-    const apiUrl = API_URL + '/api/uploads/' + encodeURIComponent(filename);
+    // Keep path for /api/uploads/db/123 (DB) or /api/uploads/filename.png (disk)
+    const apiUrl = API_URL + url.replace(/^\/uploads/, '/api/uploads');
     let revoked = false;
     fetch(apiUrl, { headers: { Authorization: 'Bearer ' + token } })
       .then((res) => {

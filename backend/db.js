@@ -29,6 +29,20 @@ export async function initDatabase() {
     } catch (migErr) {
       console.warn('Migration problem_elo_snapshot (non-fatal):', migErr.message);
     }
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS uploads (
+          id SERIAL PRIMARY KEY,
+          data TEXT NOT NULL,
+          filename VARCHAR(255) NOT NULL,
+          content_type VARCHAR(100) NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      console.log('Uploads table ensured');
+    } catch (migErr) {
+      console.warn('Migration uploads (non-fatal):', migErr.message);
+    }
 
     await client.query('BEGIN');
     

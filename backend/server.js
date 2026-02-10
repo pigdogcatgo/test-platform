@@ -13,22 +13,18 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Ensure uploads directory exists
-const uploadsDir = path.join(process.cwd(), 'uploads');
+// Uploads directory: use UPLOADS_DIR for persistent storage (e.g. Render disk at /var/data/uploads)
+const uploadsDir = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Multer config for image uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const ext = (file.mimetype === 'image/png') ? '.png' : (file.mimetype === 'image/jpeg' || file.mimetype === 'image/jpg') ? '.jpg' : '.png';
-    cb(null, `problem-${Date.now()}${path.extname(file.originalname) || ext}`);
-  }
-});
+// Multer: memory storage so we can save to DB (free persistence on Render)
+const memoryStorage = multer.memoryStorage();
 const upload = multer({
-  storage,
+  storage: memoryStorage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (req, file, cb) => {
     const allowed = /image\/(jpeg|jpg|png|gif|webp)/;
@@ -170,23 +166,50 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
   }
 });
 
-// Upload image (admin only)
-app.post('/api/upload', authenticateToken, upload.single('image'), (req, res) => {
+// Upload image (admin only) — store in DB so it survives deploys (free on Render)
+app.post('/api/upload', authenticateToken, upload.single('image'), async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  if (!req.file) {
+  if (!req.file || !req.file.buffer) {
     return res.status(400).json({ error: 'No image file provided' });
   }
-  const url = '/uploads/' + req.file.filename;
-  res.json({ url });
+  const dataBase64 = req.file.buffer.toString('base64');
+  const contentType = req.file.mimetype || 'image/png';
+  const filename = req.file.originalname || `problem-${Date.now()}.png`;
+  try {
+    const result = await pool.query(
+      'INSERT INTO uploads (data, filename, content_type) VALUES ($1, $2, $3) RETURNING id',
+      [dataBase64, filename, contentType]
+    );
+    const id = result.rows[0].id;
+    res.json({ url: '/uploads/db/' + id });
+  } catch (err) {
+    console.error('Upload save error:', err);
+    res.status(500).json({ error: 'Failed to save image' });
+  }
 });
 
-// Serve uploaded image with auth (so <img> can load via fetch + token)
+// Serve DB-stored image (survives deploys, free) — route must be before /:filename
+app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).send('Bad request');
+  try {
+    const result = await pool.query('SELECT data, content_type FROM uploads WHERE id = $1', [id]);
+    if (result.rows.length === 0) return res.status(404).send('Not found');
+    const buf = Buffer.from(result.rows[0].data, 'base64');
+    res.setHeader('Content-Type', result.rows[0].content_type || 'image/png');
+    res.send(buf);
+  } catch (err) {
+    console.error('Upload serve error:', err);
+    res.status(500).send('Server error');
+  }
+});
+
+// Serve file on disk (legacy / local)
 app.get('/api/uploads/:filename', authenticateToken, (req, res) => {
-  const raw = req.params.filename;
-  const filename = path.basename(raw);
-  if (!filename || filename !== raw || filename.includes('..')) {
+  const filename = path.basename(req.params.filename);
+  if (!filename || filename !== req.params.filename || filename.includes('..')) {
     return res.status(400).send('Bad request');
   }
   const filepath = path.join(uploadsDir, filename);
