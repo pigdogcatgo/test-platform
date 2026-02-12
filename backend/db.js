@@ -30,6 +30,12 @@ export async function initDatabase() {
       console.warn('Migration problem_elo_snapshot (non-fatal):', migErr.message);
     }
     try {
+      await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS source TEXT');
+      console.log('Problems source column ensured');
+    } catch (migErr) {
+      console.warn('Migration problems source (non-fatal):', migErr.message);
+    }
+    try {
       await client.query(`
         CREATE TABLE IF NOT EXISTS uploads (
           id SERIAL PRIMARY KEY,
@@ -70,6 +76,7 @@ export async function initDatabase() {
         answer NUMERIC NOT NULL,
         topic VARCHAR(100),
         image_url TEXT,
+        source TEXT,
         elo INTEGER DEFAULT 1500,
         times_used INTEGER DEFAULT 0,
         times_correct INTEGER DEFAULT 0,

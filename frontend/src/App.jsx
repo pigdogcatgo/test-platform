@@ -202,6 +202,7 @@ const App = () => {
       setActiveTest(null);
       setTestAnswers({});
       setTimeRemaining(null);
+      setView('student-dashboard');
       loadUserData();
     } catch (error) {
       alert(error.response?.data?.error || 'Error submitting test');
@@ -476,7 +477,8 @@ const App = () => {
       question,
       answer: answerNum,
       topic: (editingProblem.topic ?? '').trim(),
-      image_url: editingProblem.image_url || null
+      image_url: editingProblem.image_url || null,
+      source: (editingProblem.source ?? '').trim() || null
     };
 
     try {
@@ -728,6 +730,9 @@ if (view === 'taking-test' && activeTest) {
                 <span className="text-xs font-medium text-gray-500">
                   Question {index + 1} of {testProblems.length}
                 </span>
+                {problem.source && (
+                  <p className="text-xs text-gray-500 mt-0.5">Source: {problem.source}</p>
+                )}
                 <h3 className="text-base font-semibold text-gray-800 mt-1">
                   <RenderLatex text={problem.question} />
                 </h3>
@@ -1178,7 +1183,7 @@ if (view === 'admin-dashboard' && user) {
         </div>
 
         <button
-          onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '' })}
+          onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '', source: '' })}
           className="mb-6 bg-[#007f8f] text-white px-6 py-3 rounded-lg"
         >
           Add Problem
@@ -1268,6 +1273,18 @@ if (view === 'admin-dashboard' && user) {
                     placeholder="e.g. Algebra, Geometry"
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Source (optional)</label>
+                  <input
+                    type="text"
+                    value={editingProblem.source ?? ''}
+                    onChange={(e) =>
+                      setEditingProblem({ ...editingProblem, source: e.target.value })
+                    }
+                    className="w-full px-4 py-2 border rounded-lg"
+                    placeholder="e.g. 2017 AMC 8, Contest Name"
+                  />
+                </div>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -1321,6 +1338,7 @@ if (view === 'admin-dashboard' && user) {
                 <th className="px-4 py-3">Question</th>
                 <th className="px-4 py-3">Answer</th>
                 <th className="px-4 py-3">Topic</th>
+                <th className="px-4 py-3">Source</th>
                 <th className="px-4 py-3">ELO</th>
                 <th className="px-4 py-3">Actions</th>
               </tr>
@@ -1342,11 +1360,12 @@ if (view === 'admin-dashboard' && user) {
                   </td>
                   <td className="px-4 py-3">{p.answer}</td>
                   <td className="px-4 py-3">{p.topic}</td>
+                  <td className="px-4 py-3">{p.source ?? '—'}</td>
                   <td className="px-4 py-3">{p.elo}</td>
                   <td className="px-4 py-3 space-x-2">
                     <button
                       type="button"
-                      onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '' })}
+                      onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '' })}
                       className="text-[#007f8f] hover:underline font-medium"
                     >
                       Edit

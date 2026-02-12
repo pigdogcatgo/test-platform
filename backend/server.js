@@ -224,7 +224,7 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  const { question, answer, topic, image_url: imageUrl } = req.body;
+  const { question, answer, topic, image_url: imageUrl, source } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
@@ -234,9 +234,10 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   }
   try {
     const topicStr = typeof topic === 'string' ? topic.trim() : '';
+    const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const result = await pool.query(
-      'INSERT INTO problems (question, answer, topic, image_url) VALUES ($1, $2, $3, $4) RETURNING *',
-      [question.trim(), answerNum, topicStr, imageUrl || null]
+      'INSERT INTO problems (question, answer, topic, image_url, source) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [question.trim(), answerNum, topicStr, imageUrl || null, sourceStr]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -250,7 +251,7 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  const { question, answer, topic, image_url: imageUrl } = req.body;
+  const { question, answer, topic, image_url: imageUrl, source } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
@@ -260,9 +261,10 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   }
   try {
     const topicStr = typeof topic === 'string' ? topic.trim() : '';
+    const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const result = await pool.query(
-      'UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4 WHERE id = $5 RETURNING *',
-      [question.trim(), answerNum, topicStr, imageUrl || null, req.params.id]
+      'UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5 WHERE id = $6 RETURNING *',
+      [question.trim(), answerNum, topicStr, imageUrl || null, sourceStr, req.params.id]
     );
     res.json(result.rows[0]);
   } catch (error) {
