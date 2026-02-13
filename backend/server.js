@@ -71,6 +71,22 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+async function attachFolderAndTags(problem) {
+  const [folderRow, tagRows] = await Promise.all([
+    problem.folder_id ? pool.query('SELECT name FROM folders WHERE id = $1', [problem.folder_id]) : Promise.resolve({ rows: [] }),
+    pool.query('SELECT tag_id FROM problem_tags WHERE problem_id = $1', [problem.id])
+  ]);
+  const tagIds = tagRows.rows.map(r => r.tag_id);
+  const tagNames = tagIds.length ? (await pool.query('SELECT id, name FROM tags WHERE id = ANY($1)', [tagIds])).rows : [];
+  const tagMap = Object.fromEntries(tagNames.map(t => [t.id, t.name]));
+  return {
+    ...problem,
+    folder_name: folderRow.rows[0]?.name || null,
+    tag_ids: tagIds,
+    tag_names: tagIds.map(tid => tagMap[tid]).filter(Boolean)
+  };
+}
+
 // ELO calculation
 function calculateELO(playerRating, opponentRating, outcome, kFactor = 32) {
   const expectedScore = 1 / (1 + Math.pow(10, (opponentRating - playerRating) / 400));
@@ -173,13 +189,107 @@ app.get('/api/me', authenticateToken, async (req, res) => {
   }
 });
 
-// Get all problems
+// Folders (admin: CRUD; teachers: read-only for test creation)
+app.get('/api/folders', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM folders ORDER BY name');
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/folders', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  const { name } = req.body;
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Folder name is required' });
+  }
+  try {
+    const result = await pool.query('INSERT INTO folders (name) VALUES ($1) RETURNING *', [name.trim()]);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
+app.put('/api/folders/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  const { name } = req.body;
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Folder name is required' });
+  }
+  try {
+    const result = await pool.query('UPDATE folders SET name = $1 WHERE id = $2 RETURNING *', [name.trim(), req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Folder not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
+app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
+  try {
+    await pool.query('UPDATE problems SET folder_id = NULL WHERE folder_id = $1', [id]);
+    const del = await pool.query('DELETE FROM folders WHERE id = $1 RETURNING id', [id]);
+    if (del.rowCount === 0) return res.status(404).json({ error: 'Folder not found' });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
+// Tags (admin + teacher can read)
+app.get('/api/tags', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM tags ORDER BY name');
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/tags', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  const { name } = req.body;
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Tag name is required' });
+  }
+  try {
+    const result = await pool.query('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING *', [name.trim()]);
+    if (result.rows.length === 0) return res.status(400).json({ error: 'Tag already exists' });
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
+// Get all problems (with folder and tags)
 app.get('/api/problems', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM problems ORDER BY id'
-    );
-    res.json(result.rows);
+    const result = await pool.query(`
+      SELECT p.*, f.name as folder_name
+      FROM problems p
+      LEFT JOIN folders f ON p.folder_id = f.id
+      ORDER BY COALESCE(f.name, 'zzz'), p.id
+    `);
+    const tagResult = await pool.query('SELECT problem_id, tag_id FROM problem_tags');
+    const tagsByProblem = {};
+    for (const row of tagResult.rows) {
+      if (!tagsByProblem[row.problem_id]) tagsByProblem[row.problem_id] = [];
+      tagsByProblem[row.problem_id].push(row.tag_id);
+    }
+    const tagNames = await pool.query('SELECT id, name FROM tags');
+    const tagMap = Object.fromEntries(tagNames.rows.map(r => [r.id, r.name]));
+    const problems = result.rows.map(p => ({
+      ...p,
+      tag_ids: tagsByProblem[p.id] || [],
+      tag_names: (tagsByProblem[p.id] || []).map(tid => tagMap[tid]).filter(Boolean)
+    }));
+    res.json(problems);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -243,7 +353,7 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  const { question, answer, topic, image_url: imageUrl, source } = req.body;
+  const { question, answer, image_url: imageUrl, source, folder_id: folderId, tag_ids: tagIds } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
@@ -252,13 +362,21 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
   }
   try {
-    const topicStr = typeof topic === 'string' ? topic.trim() : '';
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
+    const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
-      'INSERT INTO problems (question, answer, topic, image_url, source) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [question.trim(), answerNum, topicStr, imageUrl || null, sourceStr]
+      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [question.trim(), answerNum, '', imageUrl || null, sourceStr, fid]
     );
-    res.json(result.rows[0]);
+    const problem = result.rows[0];
+    if (Array.isArray(tagIds) && tagIds.length > 0) {
+      const validIds = tagIds.filter(id => Number.isInteger(Number(id))).map(id => Number(id));
+      for (const tid of validIds) {
+        await pool.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT (problem_id, tag_id) DO NOTHING', [problem.id, tid]);
+      }
+    }
+    const withMeta = await attachFolderAndTags(problem);
+    res.json(withMeta);
   } catch (error) {
     console.error('Create problem error:', error);
     res.status(500).json({ error: error.message || 'Server error' });
@@ -270,7 +388,7 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  const { question, answer, topic, image_url: imageUrl, source } = req.body;
+  const { question, answer, image_url: imageUrl, source, folder_id: folderId, tag_ids: tagIds } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
@@ -279,13 +397,23 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
   }
   try {
-    const topicStr = typeof topic === 'string' ? topic.trim() : '';
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
+    const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
-      'UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5 WHERE id = $6 RETURNING *',
-      [question.trim(), answerNum, topicStr, imageUrl || null, sourceStr, req.params.id]
+      'UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = $6 WHERE id = $7 RETURNING *',
+      [question.trim(), answerNum, '', imageUrl || null, sourceStr, fid, req.params.id]
     );
-    res.json(result.rows[0]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Problem not found' });
+    const problem = result.rows[0];
+    await pool.query('DELETE FROM problem_tags WHERE problem_id = $1', [problem.id]);
+    if (Array.isArray(tagIds) && tagIds.length > 0) {
+      const validIds = tagIds.filter(id => Number.isInteger(Number(id))).map(id => Number(id));
+      for (const tid of validIds) {
+        await pool.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2)', [problem.id, tid]);
+      }
+    }
+    const withMeta = await attachFolderAndTags(problem);
+    res.json(withMeta);
   } catch (error) {
     console.error('Update problem error:', error);
     res.status(500).json({ error: error.message || 'Server error' });

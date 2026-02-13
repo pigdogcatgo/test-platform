@@ -122,6 +122,8 @@ const App = () => {
   const [showSignupPassword, setShowSignupPassword] = useState(false);
   
   const [problems, setProblems] = useState([]);
+  const [folders, setFolders] = useState([]);
+  const [tags, setTags] = useState([]);
   const [tests, setTests] = useState([]);
   const [attempts, setAttempts] = useState([]);
   const [students, setStudents] = useState([]);
@@ -135,6 +137,8 @@ const App = () => {
   
   const [editingProblem, setEditingProblem] = useState(null);
   const [problemToDelete, setProblemToDelete] = useState(null);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [newTagName, setNewTagName] = useState('');
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -170,18 +174,28 @@ const App = () => {
         setAttempts(attemptsRes.data);
       } else if (userData.role === 'teacher') {
         setView('teacher-dashboard');
-        const [problemsRes, testsRes, studentsRes] = await Promise.all([
+        const [problemsRes, testsRes, studentsRes, foldersRes, tagsRes] = await Promise.all([
           api.get('/api/problems'),
           api.get('/api/tests'),
-          api.get('/api/students')
+          api.get('/api/students'),
+          api.get('/api/folders'),
+          api.get('/api/tags')
         ]);
         setProblems(problemsRes.data);
         setTests(testsRes.data);
         setStudents(studentsRes.data);
+        setFolders(foldersRes.data);
+        setTags(tagsRes.data);
       } else if (userData.role === 'admin') {
         setView('admin-dashboard');
-        const { data: problemsData } = await api.get('/api/problems');
-        setProblems(problemsData);
+        const [problemsRes, foldersRes, tagsRes] = await Promise.all([
+          api.get('/api/problems'),
+          api.get('/api/folders'),
+          api.get('/api/tags')
+        ]);
+        setProblems(problemsRes.data);
+        setFolders(foldersRes.data);
+        setTags(tagsRes.data);
       }
     } catch (error) {
       console.error('Error loading user data:', error);
@@ -478,7 +492,9 @@ const App = () => {
       answer: answerStr,
       topic: (editingProblem.topic ?? '').trim(),
       image_url: editingProblem.image_url || null,
-      source: (editingProblem.source ?? '').trim() || null
+      source: (editingProblem.source ?? '').trim() || null,
+      folder_id: editingProblem.folder_id || null,
+      tag_ids: editingProblem.tag_ids || []
     };
 
     try {
@@ -508,6 +524,39 @@ const App = () => {
       loadUserData();
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting problem');
+    }
+  };
+
+  const createFolder = async () => {
+    if (!newFolderName.trim()) return;
+    try {
+      await api.post('/api/folders', { name: newFolderName.trim() });
+      setNewFolderName('');
+      loadUserData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Error creating folder');
+    }
+  };
+
+  const deleteFolder = async (id) => {
+    if (!confirm('Delete this folder? Problems will move to Uncategorized.')) return;
+    try {
+      await api.delete(`/api/folders/${id}`);
+      loadUserData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Error deleting folder');
+    }
+  };
+
+  const createTag = async (name) => {
+    const n = (name ?? newTagName).trim();
+    if (!n) return;
+    try {
+      await api.post('/api/tags', { name: n });
+      setNewTagName('');
+      loadUserData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Error creating tag');
     }
   };
 
@@ -1125,34 +1174,53 @@ if (view === 'create-test' && user) {
             />
           </div>
 
-          <div className="max-h-64 overflow-y-auto border rounded-lg p-4 space-y-2">
-            {problems.map(p => (
-              <label key={p.id} className="flex gap-2 text-sm items-start">
-                <input
-                  type="checkbox"
-                  checked={newTest.problemIds.includes(p.id)}
-                  onChange={(e) =>
-                    setNewTest({
-                      ...newTest,
-                      problemIds: e.target.checked
-                        ? [...newTest.problemIds, p.id]
-                        : newTest.problemIds.filter(id => id !== p.id)
-                    })
-                  }
-                  className="mt-1"
-                />
-                <span className="flex-1 min-w-0">
-                  <RenderLatex text={p.question} />
-                  {p.image_url && (
-                    <img
-                      src={API_URL + p.image_url}
-                      alt=""
-                      className="mt-1 max-h-16 rounded border object-contain"
-                    />
-                  )}
-                </span>
-              </label>
-            ))}
+          <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-4">
+            {(() => {
+              const byFolder = {};
+              for (const p of problems) {
+                const fname = p.folder_name || 'Uncategorized';
+                if (!byFolder[fname]) byFolder[fname] = [];
+                byFolder[fname].push(p);
+              }
+              const folderNames = Object.keys(byFolder).sort();
+              return folderNames.map(fname => (
+                <div key={fname}>
+                  <div className="font-semibold text-gray-700 mb-2 text-sm">{fname}</div>
+                  <div className="space-y-2 pl-2 border-l-2 border-gray-200">
+                    {byFolder[fname].map(p => (
+                      <label key={p.id} className="flex gap-2 text-sm items-start">
+                        <input
+                          type="checkbox"
+                          checked={newTest.problemIds.includes(p.id)}
+                          onChange={(e) =>
+                            setNewTest({
+                              ...newTest,
+                              problemIds: e.target.checked
+                                ? [...newTest.problemIds, p.id]
+                                : newTest.problemIds.filter(id => id !== p.id)
+                            })
+                          }
+                          className="mt-1"
+                        />
+                        <span className="flex-1 min-w-0">
+                          <RenderLatex text={p.question} />
+                          {p.tag_names?.length > 0 && (
+                            <span className="text-xs text-gray-500 ml-1">[{p.tag_names.join(', ')}]</span>
+                          )}
+                          {p.image_url && (
+                            <img
+                              src={API_URL + p.image_url}
+                              alt=""
+                              className="mt-1 max-h-16 rounded border object-contain"
+                            />
+                          )}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ));
+            })()}
           </div>
 
           <button
@@ -1181,8 +1249,30 @@ if (view === 'admin-dashboard' && user) {
           </button>
         </div>
 
+        <div className="mb-6 p-4 bg-white rounded-xl shadow">
+          <h3 className="font-semibold text-gray-800 mb-3">Folders</h3>
+          <div className="flex flex-wrap gap-2 mb-3">
+            {folders.map(f => (
+              <span key={f.id} className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-gray-100 text-sm">
+                {f.name}
+                <button type="button" onClick={() => deleteFolder(f.id)} className="text-red-600 hover:underline text-xs">×</button>
+              </span>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              placeholder="New folder name"
+              className="flex-1 px-3 py-2 border rounded-lg text-sm"
+            />
+            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm">Add</button>
+          </div>
+        </div>
+
         <button
-          onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '', source: '' })}
+          onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '', source: '', folder_id: null, tag_ids: [] })}
           className="mb-6 bg-[#007f8f] text-white px-6 py-3 rounded-lg"
         >
           Add Problem
@@ -1260,16 +1350,53 @@ if (view === 'admin-dashboard' && user) {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Topic (optional)</label>
-                  <input
-                    type="text"
-                    value={editingProblem.topic ?? ''}
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Folder</label>
+                  <select
+                    value={editingProblem.folder_id ?? ''}
                     onChange={(e) =>
-                      setEditingProblem({ ...editingProblem, topic: e.target.value })
+                      setEditingProblem({ ...editingProblem, folder_id: e.target.value ? Number(e.target.value) : null })
                     }
                     className="w-full px-4 py-2 border rounded-lg"
-                    placeholder="e.g. Algebra, Geometry"
-                  />
+                  >
+                    <option value="">Uncategorized</option>
+                    {folders.map(f => (
+                      <option key={f.id} value={f.id}>{f.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Tags</label>
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {tags.map(t => (
+                      <label key={t.id} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 bg-gray-50 text-sm cursor-pointer hover:bg-gray-100">
+                        <input
+                          type="checkbox"
+                          checked={(editingProblem.tag_ids ?? []).includes(t.id)}
+                          onChange={(e) => {
+                            const ids = editingProblem.tag_ids ?? [];
+                            setEditingProblem({
+                              ...editingProblem,
+                              tag_ids: e.target.checked
+                                ? [...ids, t.id]
+                                : ids.filter(id => id !== t.id)
+                            });
+                          }}
+                        />
+                        {t.name}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="flex gap-2 mt-1">
+                    <input
+                      type="text"
+                      placeholder="Add new tag"
+                      value={newTagName}
+                      onChange={(e) => setNewTagName(e.target.value)}
+                      className="flex-1 px-3 py-1.5 border rounded-lg text-sm"
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); createTag(); } }}
+                    />
+                    <button type="button" onClick={() => createTag()} className="px-3 py-1.5 text-sm text-[#007f8f] hover:underline">Add</button>
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Source (optional)</label>
@@ -1335,7 +1462,8 @@ if (view === 'admin-dashboard' && user) {
               <tr>
                 <th className="px-4 py-3">Question</th>
                 <th className="px-4 py-3">Answer</th>
-                <th className="px-4 py-3">Topic</th>
+                <th className="px-4 py-3">Folder</th>
+                <th className="px-4 py-3">Tags</th>
                 <th className="px-4 py-3">Source</th>
                 <th className="px-4 py-3">ELO</th>
                 <th className="px-4 py-3">Actions</th>
@@ -1357,13 +1485,14 @@ if (view === 'admin-dashboard' && user) {
                     </div>
                   </td>
                   <td className="px-4 py-3">{p.answer}</td>
-                  <td className="px-4 py-3">{p.topic}</td>
+                  <td className="px-4 py-3">{p.folder_name ?? '—'}</td>
+                  <td className="px-4 py-3">{p.tag_names?.length ? p.tag_names.join(', ') : '—'}</td>
                   <td className="px-4 py-3">{p.source ?? '—'}</td>
                   <td className="px-4 py-3">{p.elo}</td>
                   <td className="px-4 py-3 space-x-2">
                     <button
                       type="button"
-                      onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '' })}
+                      onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '', folder_id: p.folder_id ?? null, tag_ids: p.tag_ids ?? [] })}
                       className="text-[#007f8f] hover:underline font-medium"
                     >
                       Edit

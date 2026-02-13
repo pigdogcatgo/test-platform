@@ -37,6 +37,39 @@ export async function initDatabase() {
     }
     try {
       await client.query(`
+        CREATE TABLE IF NOT EXISTS folders (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(200) NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES folders(id)');
+      await client.query(`INSERT INTO folders (name) SELECT 'Uncategorized' WHERE NOT EXISTS (SELECT 1 FROM folders LIMIT 1)`);
+      console.log('Folders table and problems.folder_id ensured');
+    } catch (migErr) {
+      console.warn('Migration folders (non-fatal):', migErr.message);
+    }
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS tags (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(100) NOT NULL UNIQUE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS problem_tags (
+          problem_id INTEGER REFERENCES problems(id) ON DELETE CASCADE,
+          tag_id INTEGER REFERENCES tags(id) ON DELETE CASCADE,
+          PRIMARY KEY (problem_id, tag_id)
+        )
+      `);
+      console.log('Tags and problem_tags tables ensured');
+    } catch (migErr) {
+      console.warn('Migration tags (non-fatal):', migErr.message);
+    }
+    try {
+      await client.query(`
         CREATE TABLE IF NOT EXISTS uploads (
           id SERIAL PRIMARY KEY,
           data TEXT NOT NULL,
@@ -183,6 +216,21 @@ export async function seedDatabase() {
       UPDATE users SET teacher_id = (SELECT id FROM users WHERE username = 'teacher1' LIMIT 1)
       WHERE role = 'student'
     `);
+    
+    // Create default folder and tags if empty
+    const folderCheck = await client.query('SELECT COUNT(*) FROM folders');
+    if (parseInt(folderCheck.rows[0].count) === 0) {
+      await client.query(`INSERT INTO folders (name) VALUES ('Uncategorized')`);
+    }
+    const tagCheck = await client.query('SELECT COUNT(*) FROM tags');
+    if (parseInt(tagCheck.rows[0].count) === 0) {
+      await client.query(`
+        INSERT INTO tags (name) VALUES
+        ('Algebra'), ('Geometry'), ('Number Theory'), ('Counting'), ('Probability'),
+        ('Arithmetic'), ('Exponents'), ('Percentages'), ('Division'), ('Multiplication'),
+        ('Square Roots'), ('Fractions')
+      `);
+    }
     
     // Create sample problems
     await client.query(`
