@@ -139,6 +139,7 @@ const App = () => {
   const [problemToDelete, setProblemToDelete] = useState(null);
   const [newFolderName, setNewFolderName] = useState('');
   const [newTagName, setNewTagName] = useState('');
+  const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names that are expanded
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -343,6 +344,14 @@ const App = () => {
       loadUserData();
     }
   }, [token, loadUserData]);
+
+  // When entering create-test, expand all folders by default
+  useEffect(() => {
+    if (view === 'create-test' && problems.length > 0) {
+      const folders = [...new Set(problems.map(p => p.folder_name || 'Uncategorized'))];
+      setExpandedFolders(prev => (prev.size === 0 ? new Set(folders) : prev));
+    }
+  }, [view, problems]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -1174,7 +1183,7 @@ if (view === 'create-test' && user) {
             />
           </div>
 
-          <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-4">
+          <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-1">
             {(() => {
               const byFolder = {};
               for (const p of problems) {
@@ -1183,43 +1192,55 @@ if (view === 'create-test' && user) {
                 byFolder[fname].push(p);
               }
               const folderNames = Object.keys(byFolder).sort();
-              return folderNames.map(fname => (
-                <div key={fname}>
-                  <div className="font-semibold text-gray-700 mb-2 text-sm">{fname}</div>
-                  <div className="space-y-2 pl-2 border-l-2 border-gray-200">
-                    {byFolder[fname].map(p => (
-                      <label key={p.id} className="flex gap-2 text-sm items-start">
-                        <input
-                          type="checkbox"
-                          checked={newTest.problemIds.includes(p.id)}
-                          onChange={(e) =>
-                            setNewTest({
-                              ...newTest,
-                              problemIds: e.target.checked
-                                ? [...newTest.problemIds, p.id]
-                                : newTest.problemIds.filter(id => id !== p.id)
-                            })
-                          }
-                          className="mt-1"
-                        />
-                        <span className="flex-1 min-w-0">
-                          <RenderLatex text={p.question} />
-                          {p.tag_names?.length > 0 && (
-                            <span className="text-xs text-gray-500 ml-1">[{p.tag_names.join(', ')}]</span>
-                          )}
-                          {p.image_url && (
-                            <img
-                              src={API_URL + p.image_url}
-                              alt=""
-                              className="mt-1 max-h-16 rounded border object-contain"
+              return folderNames.map(fname => {
+                const isExpanded = expandedFolders.has(fname);
+                const toggle = () => setExpandedFolders(prev => {
+                  const next = new Set(prev);
+                  if (next.has(fname)) next.delete(fname);
+                  else next.add(fname);
+                  return next;
+                });
+                return (
+                  <div key={fname} className="border border-gray-200 rounded-lg overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={toggle}
+                      className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 text-left font-semibold text-gray-700 text-sm"
+                    >
+                      <span>{fname}</span>
+                      <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
+                    </button>
+                    {isExpanded && (
+                      <div className="border-t border-gray-200 p-3 space-y-2">
+                        {byFolder[fname].map(p => (
+                          <label key={p.id} className="flex gap-3 text-sm items-center cursor-pointer hover:bg-gray-50 -mx-1 px-2 py-1.5 rounded">
+                            <input
+                              type="checkbox"
+                              checked={newTest.problemIds.includes(p.id)}
+                              onChange={(e) =>
+                                setNewTest({
+                                  ...newTest,
+                                  problemIds: e.target.checked
+                                    ? [...newTest.problemIds, p.id]
+                                    : newTest.problemIds.filter(id => id !== p.id)
+                                })
+                              }
+                              className="flex-shrink-0"
                             />
-                          )}
-                        </span>
-                      </label>
-                    ))}
+                            <span className="flex-1 min-w-0 text-gray-700">
+                              <span className="font-medium">{p.source || `Problem #${p.id}`}</span>
+                              {p.tag_names?.length > 0 && (
+                                <span className="text-gray-500 ml-1">[{p.tag_names.join(', ')}]</span>
+                              )}
+                              <span className="text-[#007f8f] font-medium ml-2">ELO {p.elo}</span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ));
+                );
+              });
             })()}
           </div>
 
