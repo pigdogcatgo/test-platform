@@ -345,13 +345,12 @@ const App = () => {
     }
   }, [token, loadUserData]);
 
-  // When entering create-test, expand all folders by default
+  // When entering create-test, all folders start collapsed
   useEffect(() => {
-    if (view === 'create-test' && problems.length > 0) {
-      const folders = [...new Set(problems.map(p => p.folder_name || 'Uncategorized'))];
-      setExpandedFolders(prev => (prev.size === 0 ? new Set(folders) : prev));
+    if (view === 'create-test') {
+      setExpandedFolders(new Set());
     }
-  }, [view, problems]);
+  }, [view]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -1021,22 +1020,14 @@ if (view === 'teacher-dashboard' && user) {
                     </p>
 
                     <button
-                      onClick={() => loadTestAnalytics(test.id)}
+                      onClick={async () => {
+                        await loadTestAnalytics(test.id);
+                        setView('test-analytics');
+                      }}
                       className="text-sm text-[#007f8f] font-medium hover:underline"
                     >
                       View Analytics →
                     </button>
-
-                    {selectedTestAnalytics?.testId === test.id && (
-                      <div className="mt-4 pt-4 border-t text-sm">
-                        {selectedTestAnalytics.attempts.slice(0, 5).map((a, i) => (
-                          <div key={a.id} className="flex justify-between mb-1">
-                            <span>{i + 1}. {a.username}</span>
-                            <span className="font-medium">{a.score}/{a.total}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
@@ -1065,6 +1056,116 @@ if (view === 'teacher-dashboard' && user) {
                 ))
               )}
             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+if (view === 'test-analytics' && user && selectedTestAnalytics) {
+  const test = tests.find(t => t.id === selectedTestAnalytics.testId);
+  const attempts = selectedTestAnalytics.attempts || [];
+  const problemIds = test?.problem_ids || [];
+
+  // Student accuracies (already have score/total per attempt)
+  const studentAccuracies = attempts.map(a => ({
+    username: a.username,
+    score: a.score,
+    total: a.total,
+    accuracy: a.total > 0 ? Math.round((a.score / a.total) * 100) : 0
+  }));
+
+  // Most missed problems: count wrong answers per problem
+  const missCount = {};
+  for (const pid of problemIds) missCount[pid] = 0;
+  for (const a of attempts) {
+    const results = typeof a.results === 'string' ? JSON.parse(a.results) : (a.results || {});
+    for (const pid of problemIds) {
+      if (results[pid] === false) missCount[pid]++;
+    }
+  }
+
+  // Group by topic (tag) - a problem can have multiple tags
+  const byTopic = {};
+  for (const pid of problemIds) {
+    const p = problems.find(pr => pr.id === pid);
+    const tags = (p?.tag_names?.length) ? p.tag_names : ['Untagged'];
+    for (const tag of tags) {
+      if (!byTopic[tag]) byTopic[tag] = [];
+      byTopic[tag].push({ ...p, id: pid, missCount: missCount[pid] || 0 });
+    }
+  }
+  for (const tag of Object.keys(byTopic)) {
+    byTopic[tag].sort((a, b) => (b.missCount || 0) - (a.missCount || 0));
+  }
+
+  return (
+    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
+      <div className="w-full max-w-4xl p-6">
+        <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
+          <button
+            onClick={() => setView('teacher-dashboard')}
+            className="text-sm text-[#007f8f] hover:underline"
+          >
+            ← Back to Dashboard
+          </button>
+          <h1 className="text-lg font-semibold text-gray-800">
+            Analytics: {test?.name || 'Test'}
+          </h1>
+          <span />
+        </div>
+
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl shadow p-6">
+            <h2 className="text-base font-semibold text-gray-800 mb-4">Student Accuracies</h2>
+            {studentAccuracies.length === 0 ? (
+              <p className="text-gray-500 text-sm">No attempts yet</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-gray-600 border-b">
+                      <th className="pb-2 pr-4">Student</th>
+                      <th className="pb-2 pr-4">Score</th>
+                      <th className="pb-2">Accuracy</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {studentAccuracies.map((s, i) => (
+                      <tr key={i} className="border-b last:border-0">
+                        <td className="py-2 pr-4 font-medium">{s.username}</td>
+                        <td className="py-2 pr-4">{s.score}/{s.total}</td>
+                        <td className="py-2">{s.accuracy}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-xl shadow p-6">
+            <h2 className="text-base font-semibold text-gray-800 mb-4">Most Missed Problems by Topic</h2>
+            {Object.keys(byTopic).length === 0 ? (
+              <p className="text-gray-500 text-sm">No problems in this test</p>
+            ) : (
+              <div className="space-y-4">
+                {Object.entries(byTopic).sort(([a], [b]) => a.localeCompare(b)).map(([topic, probs]) => (
+                  <div key={topic}>
+                    <h3 className="font-medium text-gray-700 mb-2 text-sm">{topic}</h3>
+                    <div className="space-y-1.5 pl-3 border-l-2 border-gray-200">
+                      {probs.map(p => (
+                        <div key={p.id} className="flex justify-between text-sm">
+                          <span className="text-gray-800">{p.source || `Problem #${p.id}`}</span>
+                          <span className="text-red-600 font-medium">{p.missCount} missed</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1200,19 +1301,41 @@ if (view === 'create-test' && user) {
                   else next.add(fname);
                   return next;
                 });
+                const folderProbs = byFolder[fname];
+                const folderIds = folderProbs.map(p => p.id);
+                const allSelected = folderIds.length > 0 && folderIds.every(id => newTest.problemIds.includes(id));
+                const someSelected = folderIds.some(id => newTest.problemIds.includes(id));
+                const toggleFolderSelection = (e) => {
+                  e.stopPropagation();
+                  if (allSelected) {
+                    setNewTest({ ...newTest, problemIds: newTest.problemIds.filter(id => !folderIds.includes(id)) });
+                  } else {
+                    setNewTest({ ...newTest, problemIds: [...new Set([...newTest.problemIds, ...folderIds])] });
+                  }
+                };
                 return (
                   <div key={fname} className="border border-gray-200 rounded-lg overflow-hidden">
-                    <button
-                      type="button"
-                      onClick={toggle}
-                      className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 text-left font-semibold text-gray-700 text-sm"
-                    >
-                      <span>{fname}</span>
-                      <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
-                    </button>
+                    <div className="w-full flex items-center px-4 py-2.5 bg-gray-50 hover:bg-gray-100">
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        ref={el => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                        onChange={toggleFolderSelection}
+                        onClick={(e) => e.stopPropagation()}
+                        className="flex-shrink-0 mr-2"
+                      />
+                      <button
+                        type="button"
+                        onClick={toggle}
+                        className="flex-1 flex items-center justify-between text-left font-semibold text-gray-700 text-sm"
+                      >
+                        <span>{fname}</span>
+                        <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
+                      </button>
+                    </div>
                     {isExpanded && (
                       <div className="border-t border-gray-200 p-3 space-y-2">
-                        {byFolder[fname].map(p => (
+                        {folderProbs.map(p => (
                           <label key={p.id} className="flex gap-3 text-sm items-center cursor-pointer hover:bg-gray-50 -mx-1 px-2 py-1.5 rounded">
                             <input
                               type="checkbox"
