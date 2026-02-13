@@ -6,9 +6,28 @@ import fs from 'fs';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
+import { evaluate } from 'mathjs';
 import pool, { initDatabase, seedDatabase } from './db.js';
 
 dotenv.config();
+
+// Parse answer expressions: "3/4", "√2", "√2/2", "2√3", "sqrt(2)/2", decimals, etc.
+function parseAnswerToNumber(input) {
+  if (input === undefined || input === null || input === '') return null;
+  const s = String(input).trim();
+  if (!s) return null;
+  // √2 → sqrt(2), √2.5 → sqrt(2.5), 2√3 → 2*sqrt(3), √(2+3) → sqrt(2+3)
+  // Use \u221A for √ so it works regardless of source encoding
+  const expr = s
+    .replace(/\u221A(\d+(?:\.\d+)?)/g, 'sqrt($1)')
+    .replace(/\u221A\(([^)]+)\)/g, 'sqrt($1)');
+  try {
+    const val = evaluate(expr);
+    return typeof val === 'number' && !Number.isNaN(val) ? val : null;
+  } catch {
+    return null;
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -228,9 +247,9 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
-  const answerNum = Number(answer);
-  if (answer === undefined || answer === null || answer === '' || Number.isNaN(answerNum)) {
-    return res.status(400).json({ error: 'A valid numeric answer is required' });
+  const answerNum = parseAnswerToNumber(answer);
+  if (answerNum === null) {
+    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
   }
   try {
     const topicStr = typeof topic === 'string' ? topic.trim() : '';
@@ -255,9 +274,9 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
-  const answerNum = Number(answer);
-  if (answer === undefined || answer === null || answer === '' || Number.isNaN(answerNum)) {
-    return res.status(400).json({ error: 'A valid numeric answer is required' });
+  const answerNum = parseAnswerToNumber(answer);
+  if (answerNum === null) {
+    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
   }
   try {
     const topicStr = typeof topic === 'string' ? topic.trim() : '';
@@ -453,9 +472,11 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     const results = {};
     let newUserElo = currentUserElo;
     
+    const TOLERANCE = 0.001;
     for (const problem of problems) {
-      const userAnswer = parseFloat(answers[problem.id]);
-      const isCorrect = Math.abs(userAnswer - parseFloat(problem.answer)) < 0.01;
+      const userAnswer = parseAnswerToNumber(answers[problem.id]);
+      const correctAnswer = parseFloat(problem.answer);
+      const isCorrect = userAnswer !== null && Math.abs(userAnswer - correctAnswer) < TOLERANCE;
       results[problem.id] = isCorrect;
       
       if (isCorrect) score++;

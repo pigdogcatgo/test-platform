@@ -742,8 +742,7 @@ if (view === 'taking-test' && activeTest) {
               </div>
 
               <input
-                type="number"
-                step="any"
+                type="text"
                 value={testAnswers[problem.id] || ''}
                 onChange={(e) =>
                   setTestAnswers({
@@ -752,7 +751,7 @@ if (view === 'taking-test' && activeTest) {
                   })
                 }
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:border-[#00A3AD] focus:outline-none text-center text-sm"
-                placeholder="Enter your answer"
+                placeholder="e.g. 42, 3/4, √2, √2/2"
               />
             </div>
           ))}
@@ -1249,16 +1248,15 @@ if (view === 'admin-dashboard' && user) {
                   )}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Answer (number)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Answer (number, fraction, or radical)</label>
                   <input
-                    type="number"
-                    step="any"
+                    type="text"
                     value={editingProblem.answer ?? ''}
                     onChange={(e) =>
                       setEditingProblem({ ...editingProblem, answer: e.target.value })
                     }
                     className="w-full px-4 py-2 border rounded-lg"
-                    placeholder="e.g. 42 or 3.14"
+                    placeholder="e.g. 42, 3/4, √2, √2/2, 2√3"
                   />
                 </div>
                 <div>
