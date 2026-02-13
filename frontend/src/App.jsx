@@ -460,22 +460,22 @@ const App = () => {
   const saveProblem = async () => {
     const question = (editingProblem.question || '').trim();
     const rawAnswer = editingProblem.answer;
-    const answerNum = rawAnswer === '' || rawAnswer === undefined || rawAnswer === null
-      ? NaN
-      : Number(rawAnswer);
+    const answerStr = rawAnswer === '' || rawAnswer === undefined || rawAnswer === null
+      ? ''
+      : String(rawAnswer).trim();
 
     if (!question) {
       alert('Please enter a question.');
       return;
     }
-    if (Number.isNaN(answerNum) || answerNum === null) {
-      alert('Please enter a valid number for the answer.');
+    if (!answerStr) {
+      alert('Please enter an answer (e.g. 42, 3/4, √2, sqrt(2)/2).');
       return;
     }
 
     const payload = {
       question,
-      answer: answerNum,
+      answer: answerStr,
       topic: (editingProblem.topic ?? '').trim(),
       image_url: editingProblem.image_url || null,
       source: (editingProblem.source ?? '').trim() || null
