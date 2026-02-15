@@ -1,15 +1,15 @@
 /**
  * PDF Problem Import Service
  * Extracts problems from competition PDFs, uses AI for LaTeX conversion, topic tagging, and answer extraction.
+ * Uses Google Gemini (free tier) - get API key at https://aistudio.google.com/app/apikey
  */
 import { PDFParse } from 'pdf-parse';
-import OpenAI from 'openai';
+import { GoogleGenAI } from '@google/genai';
 import pool from './db.js';
 import { parseAnswerToNumber } from './answerUtils.js';
 
-const openai = process.env.OPENAI_API_KEY
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  : null;
+const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
 
 const TOPIC_TAGS = {
   algebra: 'Algebra',
@@ -110,11 +110,11 @@ export function parseAnswerKey(text) {
 }
 
 /**
- * Use OpenAI to process a single problem: LaTeX, topic, answer (if not in key).
+ * Use Google Gemini (free) to process a single problem: LaTeX, topic, answer (if not in key).
  */
 async function processProblemWithAI(problem, answerFromKey) {
-  if (!openai) {
-    throw new Error('OPENAI_API_KEY is required for PDF import. Set it in your .env file.');
+  if (!ai) {
+    throw new Error('GEMINI_API_KEY is required for PDF import. Get a free key at https://aistudio.google.com/app/apikey');
   }
 
   const systemPrompt = `You are a math competition problem processor. For each problem, output valid JSON only, no markdown:
@@ -131,16 +131,16 @@ Rules: Preserve the problem statement exactly; only convert math to LaTeX. Topic
       : 'Solve the problem and provide the answer.'
   }`;
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-    temperature: 0.2,
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.0-flash',
+    contents: userPrompt,
+    config: {
+      systemInstruction: systemPrompt,
+      temperature: 0.2,
+    },
   });
 
-  const content = completion.choices[0]?.message?.content?.trim() || '{}';
+  const content = (response?.text || '').trim() || '{}';
   let parsed;
   try {
     const jsonStr = content.replace(/^```json?\s*|\s*```$/g, '').trim();

@@ -1482,7 +1482,7 @@ if (view === 'admin-dashboard' && user) {
         <div className="mb-6 p-4 bg-white rounded-xl shadow">
           <h3 className="font-semibold text-gray-800 mb-3">Import from PDF</h3>
           <p className="text-sm text-gray-600 mb-3">
-            Upload a competition PDF (e.g. MathCounts, AMC). Problems are auto-extracted, converted to LaTeX, tagged by topic (Algebra, Number Theory, Counting, Geometry), and placed in a folder based on the source. Set <code className="bg-gray-100 px-1 rounded">OPENAI_API_KEY</code> in backend .env.
+            Upload a competition PDF (e.g. MathCounts, AMC). Problems are auto-extracted, converted to LaTeX, tagged by topic (Algebra, Number Theory, Counting, Geometry), and placed in a folder based on the source. Get a free API key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-[#007f8f] hover:underline">aistudio.google.com</a> and set <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code> in Render.
           </p>
           <div className="flex flex-wrap gap-3 items-end mb-3">
             <div className="flex-1 min-w-[200px]">
