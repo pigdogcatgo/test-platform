@@ -70,6 +70,19 @@ export async function initDatabase() {
     }
     try {
       await client.query(`
+        CREATE TABLE IF NOT EXISTS student_tag_elo (
+          user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+          tag_id INTEGER REFERENCES tags(id) ON DELETE CASCADE,
+          elo INTEGER NOT NULL DEFAULT 1500,
+          PRIMARY KEY (user_id, tag_id)
+        )
+      `);
+      console.log('student_tag_elo table ensured');
+    } catch (migErr) {
+      console.warn('Migration student_tag_elo (non-fatal):', migErr.message);
+    }
+    try {
+      await client.query(`
         CREATE TABLE IF NOT EXISTS uploads (
           id SERIAL PRIMARY KEY,
           data TEXT NOT NULL,

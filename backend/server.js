@@ -6,28 +6,10 @@ import fs from 'fs';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
-import { evaluate } from 'mathjs';
 import pool, { initDatabase, seedDatabase } from './db.js';
+import { parseAnswerToNumber } from './answerUtils.js';
 
 dotenv.config();
-
-// Parse answer expressions: "3/4", "√2", "√2/2", "2√3", "sqrt(2)/2", decimals, etc.
-function parseAnswerToNumber(input) {
-  if (input === undefined || input === null || input === '') return null;
-  const s = String(input).trim();
-  if (!s) return null;
-  // √2 → sqrt(2), √2.5 → sqrt(2.5), 2√3 → 2*sqrt(3), √(2+3) → sqrt(2+3)
-  // Use \u221A for √ so it works regardless of source encoding
-  const expr = s
-    .replace(/\u221A(\d+(?:\.\d+)?)/g, 'sqrt($1)')
-    .replace(/\u221A\(([^)]+)\)/g, 'sqrt($1)');
-  try {
-    const val = evaluate(expr);
-    return typeof val === 'number' && !Number.isNaN(val) ? val : null;
-  } catch {
-    return null;
-  }
-}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -49,6 +31,15 @@ const upload = multer({
     const allowed = /image\/(jpeg|jpg|png|gif|webp)/;
     if (allowed.test(file.mimetype)) cb(null, true);
     else cb(new Error('Only images (JPEG, PNG, GIF, WebP) are allowed'));
+  }
+});
+
+const uploadPdf = multer({
+  storage: memoryStorage,
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB for PDFs
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') cb(null, true);
+    else cb(new Error('Only PDF files are allowed'));
   }
 });
 
@@ -176,14 +167,25 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Get current user
+// Get current user (with subject-specific ELOs for students)
 app.get('/api/me', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT id, username, role, elo, teacher_id FROM users WHERE id = $1',
       [req.user.id]
     );
-    res.json(result.rows[0]);
+    const user = result.rows[0];
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.role === 'student') {
+      const tagElos = await pool.query(
+        `SELECT t.name, ste.elo FROM student_tag_elo ste
+         JOIN tags t ON t.id = ste.tag_id
+         WHERE ste.user_id = $1 ORDER BY t.name`,
+        [req.user.id]
+      );
+      user.tag_elos = tagElos.rows;
+    }
+    res.json(user);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -239,6 +241,31 @@ app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
+// Import problems from PDF (admin only)
+app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  if (!req.file || !req.file.buffer) {
+    return res.status(400).json({ error: 'No PDF file provided' });
+  }
+  const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
+  try {
+    const { importPdfToDatabase } = await import('./pdfImport.js');
+    const result = await importPdfToDatabase(req.file.buffer, answerKey);
+    res.json({
+      success: true,
+      imported: result.imported,
+      folderId: result.folderId,
+      folderName: result.folderName,
+      errors: result.errors,
+    });
+  } catch (error) {
+    console.error('PDF import error:', error);
+    res.status(400).json({ error: error.message || 'Import failed' });
   }
 });
 
@@ -577,6 +604,17 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     );
     const problems = problemsResult.rows;
 
+    // Get problem -> tags mapping for subject-specific ELO
+    const tagRows = await client.query(
+      'SELECT problem_id, tag_id FROM problem_tags WHERE problem_id = ANY($1)',
+      [test.problem_ids]
+    );
+    const tagsByProblem = {};
+    for (const r of tagRows.rows) {
+      if (!tagsByProblem[r.problem_id]) tagsByProblem[r.problem_id] = [];
+      tagsByProblem[r.problem_id].push(r.tag_id);
+    }
+
     // Batch ELO: use same problem ELOs for everyone on this test (snapshot on first submit)
     let snapshot = test.problem_elo_snapshot;
     if (typeof snapshot === 'string') try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
@@ -631,6 +669,22 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [req.user.id, problem.id, newUserElo, tempNewUserElo, problemElo, newProblemElo, isCorrect]
       );
+
+      // Update subject-specific (tag) ELO for each tag on this problem
+      const problemTagIds = tagsByProblem[problem.id] || [];
+      for (const tagId of problemTagIds) {
+        const tagEloRows = await client.query(
+          'SELECT elo FROM student_tag_elo WHERE user_id = $1 AND tag_id = $2',
+          [req.user.id, tagId]
+        );
+        let currentTagElo = tagEloRows.rows[0]?.elo ?? 1500;
+        const newTagElo = calculateELO(currentTagElo, problemElo, outcome, 32);
+        await client.query(
+          `INSERT INTO student_tag_elo (user_id, tag_id, elo) VALUES ($1, $2, $3)
+           ON CONFLICT (user_id, tag_id) DO UPDATE SET elo = $3`,
+          [req.user.id, tagId, newTagElo]
+        );
+      }
       
       newUserElo = tempNewUserElo;
     }
@@ -666,7 +720,7 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
   }
 });
 
-// Get all students (teacher only; only students they registered)
+// Get all students (teacher only; only students they registered) with subject ELOs
 app.get('/api/students', authenticateToken, async (req, res) => {
   if (req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Teacher access required' });
@@ -677,7 +731,23 @@ app.get('/api/students', authenticateToken, async (req, res) => {
       'SELECT id, username, elo FROM users WHERE role = $1 AND teacher_id = $2 ORDER BY elo DESC',
       ['student', req.user.id]
     );
-    res.json(result.rows);
+    const students = result.rows;
+    const tagElos = await pool.query(
+      `SELECT ste.user_id, t.name, ste.elo FROM student_tag_elo ste
+       JOIN tags t ON t.id = ste.tag_id
+       JOIN users u ON u.id = ste.user_id AND u.role = 'student' AND u.teacher_id = $1
+       ORDER BY t.name`,
+      [req.user.id]
+    );
+    const byUser = {};
+    for (const r of tagElos.rows) {
+      if (!byUser[r.user_id]) byUser[r.user_id] = [];
+      byUser[r.user_id].push({ name: r.name, elo: r.elo });
+    }
+    for (const s of students) {
+      s.tag_elos = byUser[s.id] || [];
+    }
+    res.json(students);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }

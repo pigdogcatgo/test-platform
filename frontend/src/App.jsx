@@ -140,6 +140,10 @@ const App = () => {
   const [newFolderName, setNewFolderName] = useState('');
   const [newTagName, setNewTagName] = useState('');
   const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names that are expanded
+  const [pdfImportFile, setPdfImportFile] = useState(null);
+  const [pdfImportAnswerKey, setPdfImportAnswerKey] = useState('');
+  const [pdfImportLoading, setPdfImportLoading] = useState(false);
+  const [pdfImportResult, setPdfImportResult] = useState(null);
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -568,6 +572,34 @@ const App = () => {
     }
   };
 
+  const handlePdfImport = async () => {
+    if (!pdfImportFile) {
+      alert('Select a PDF file first');
+      return;
+    }
+    setPdfImportLoading(true);
+    setPdfImportResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('pdf', pdfImportFile);
+      if (pdfImportAnswerKey.trim()) formData.append('answerKey', pdfImportAnswerKey.trim());
+      const { data } = await api.post('/api/import-pdf', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120000,
+      });
+      setPdfImportResult(data);
+      setPdfImportFile(null);
+      setPdfImportAnswerKey('');
+      const input = document.getElementById('pdf-import-input');
+      if (input) input.value = '';
+      loadUserData();
+    } catch (error) {
+      setPdfImportResult({ error: error.response?.data?.error || error.message || 'Import failed' });
+    } finally {
+      setPdfImportLoading(false);
+    }
+  };
+
   const loadTestAnalytics = async (testId) => {
     try {
       const { data } = await api.get(`/api/tests/${testId}/attempts`);
@@ -863,11 +895,25 @@ if (view === 'student-dashboard' && user) {
             Here’s a snapshot of your progress
           </p>
 
-          <div className="inline-flex flex-col items-center bg-[#e6f6f7] px-6 py-4 rounded-xl">
-            <span className="text-xs text-gray-600 mb-1">Your ELO</span>
-            <span className="text-4xl font-bold text-[#007f8f]">
-              {user.elo}
-            </span>
+          <div className="flex flex-wrap gap-4 justify-center">
+            <div className="inline-flex flex-col items-center bg-[#e6f6f7] px-6 py-4 rounded-xl">
+              <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
+              <span className="text-4xl font-bold text-[#007f8f]">
+                {user.elo}
+              </span>
+            </div>
+            {user.tag_elos?.length > 0 && (
+              <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
+                <span className="text-xs text-gray-600 mb-2">By Subject</span>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                  {user.tag_elos.map(t => (
+                    <span key={t.name} className="text-gray-800">
+                      {t.name}: <span className="font-semibold text-[#007f8f]">{t.elo}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -1049,9 +1095,18 @@ if (view === 'teacher-dashboard' && user) {
                 </div>
               ) : (
                 students.map((s, i) => (
-                  <div key={s.id} className="flex justify-between p-4">
-                    <span className="font-medium">{i + 1}. {s.username}</span>
-                    <span className="text-[#007f8f] font-semibold">{s.elo}</span>
+                  <div key={s.id} className="p-4">
+                    <div className="flex justify-between items-center">
+                      <span className="font-medium">{i + 1}. {s.username}</span>
+                      <span className="text-[#007f8f] font-semibold">Overall: {s.elo}</span>
+                    </div>
+                    {s.tag_elos?.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-600">
+                        {s.tag_elos.map(t => (
+                          <span key={t.name}>{t.name}: <span className="font-medium text-[#007f8f]">{t.elo}</span></span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))
               )}
@@ -1229,9 +1284,18 @@ if (view === 'register-students' && user) {
               </div>
             ) : (
               students.map((s, i) => (
-                <div key={s.id} className="flex justify-between p-4">
-                  <span className="font-medium">{i + 1}. {s.username}</span>
-                  <span className="text-[#007f8f] font-semibold">{s.elo}</span>
+                <div key={s.id} className="p-4">
+                  <div className="flex justify-between items-center">
+                    <span className="font-medium">{i + 1}. {s.username}</span>
+                    <span className="text-[#007f8f] font-semibold">Overall: {s.elo}</span>
+                  </div>
+                  {s.tag_elos?.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-600">
+                      {s.tag_elos.map(t => (
+                        <span key={t.name}>{t.name}: <span className="font-medium text-[#007f8f]">{t.elo}</span></span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))
             )}
@@ -1413,6 +1477,60 @@ if (view === 'admin-dashboard' && user) {
             />
             <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm">Add</button>
           </div>
+        </div>
+
+        <div className="mb-6 p-4 bg-white rounded-xl shadow">
+          <h3 className="font-semibold text-gray-800 mb-3">Import from PDF</h3>
+          <p className="text-sm text-gray-600 mb-3">
+            Upload a competition PDF (e.g. MathCounts, AMC). Problems are auto-extracted, converted to LaTeX, tagged by topic (Algebra, Number Theory, Counting, Geometry), and placed in a folder based on the source. Set <code className="bg-gray-100 px-1 rounded">OPENAI_API_KEY</code> in backend .env.
+          </p>
+          <div className="flex flex-wrap gap-3 items-end mb-3">
+            <div className="flex-1 min-w-[200px]">
+              <label className="block text-xs text-gray-500 mb-1">PDF file</label>
+              <input
+                id="pdf-import-input"
+                type="file"
+                accept="application/pdf"
+                onChange={(e) => setPdfImportFile(e.target.files?.[0] || null)}
+                className="w-full text-sm text-gray-600"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handlePdfImport}
+              disabled={pdfImportLoading || !pdfImportFile}
+              className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {pdfImportLoading ? 'Importing…' : 'Import'}
+            </button>
+          </div>
+          <div className="mb-2">
+            <label className="block text-xs text-gray-500 mb-1">Answer key (optional) — format: 1. 42, 2. 3/4, 3. 90000</label>
+            <textarea
+              value={pdfImportAnswerKey}
+              onChange={(e) => setPdfImportAnswerKey(e.target.value)}
+              placeholder={'1. 101\n2. 90000\n3. 18'}
+              className="w-full px-3 py-2 border rounded-lg text-sm font-mono min-h-[60px]"
+              rows={3}
+            />
+          </div>
+          {pdfImportResult && (
+            <div className={`mt-3 p-3 rounded-lg text-sm ${pdfImportResult.error ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-800'}`}>
+              {pdfImportResult.error ? (
+                pdfImportResult.error
+              ) : (
+                <>
+                  Imported {pdfImportResult.imported} problems into folder &quot;{pdfImportResult.folderName}&quot;.
+                  {pdfImportResult.errors?.length > 0 && (
+                    <div className="mt-2 text-amber-700">
+                      {pdfImportResult.errors.length} problem(s) failed: {pdfImportResult.errors.slice(0, 3).join('; ')}
+                      {pdfImportResult.errors.length > 3 && ` …`}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         <button
