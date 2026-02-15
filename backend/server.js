@@ -299,6 +299,19 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
   }
 });
 
+app.delete('/api/tags/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid tag id' });
+  try {
+    const del = await pool.query('DELETE FROM tags WHERE id = $1 RETURNING id', [id]);
+    if (del.rowCount === 0) return res.status(404).json({ error: 'Tag not found' });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
 // Get all problems (with folder and tags)
 app.get('/api/problems', authenticateToken, async (req, res) => {
   try {

@@ -561,6 +561,16 @@ const App = () => {
     }
   };
 
+  const deleteTag = async (id) => {
+    if (!confirm('Delete this tag? It will be removed from all problems.')) return;
+    try {
+      await api.delete(`/api/tags/${id}`);
+      loadUserData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Error deleting tag');
+    }
+  };
+
   const createTag = async (name) => {
     const n = (name ?? newTagName).trim();
     if (!n) return;
@@ -1482,6 +1492,29 @@ if (view === 'admin-dashboard' && user) {
               className="flex-1 px-3 py-2 border rounded-lg text-sm"
             />
             <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm">Add</button>
+          </div>
+        </div>
+
+        <div className="mb-6 p-4 bg-white rounded-xl shadow">
+          <h3 className="font-semibold text-gray-800 mb-3">Tags</h3>
+          <div className="flex flex-wrap gap-2 mb-3">
+            {tags.map(t => (
+              <span key={t.id} className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-gray-100 text-sm">
+                {t.name}
+                <button type="button" onClick={() => deleteTag(t.id)} className="text-red-600 hover:underline text-xs">×</button>
+              </span>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newTagName}
+              onChange={(e) => setNewTagName(e.target.value)}
+              placeholder="New tag name"
+              className="flex-1 px-3 py-2 border rounded-lg text-sm"
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); createTag(); } }}
+            />
+            <button type="button" onClick={() => createTag()} className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm">Add</button>
           </div>
         </div>
 
