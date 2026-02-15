@@ -138,13 +138,15 @@ const App = () => {
   const [editingProblem, setEditingProblem] = useState(null);
   const [problemToDelete, setProblemToDelete] = useState(null);
   const [newFolderName, setNewFolderName] = useState('');
+  const [editingFolderId, setEditingFolderId] = useState(null);
+  const [editingFolderName, setEditingFolderName] = useState('');
   const [newTagName, setNewTagName] = useState('');
   const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names that are expanded
   const [pdfImportFile, setPdfImportFile] = useState(null);
   const [pdfImportAnswerKey, setPdfImportAnswerKey] = useState('');
   const [pdfImportLoading, setPdfImportLoading] = useState(false);
   const [pdfImportResult, setPdfImportResult] = useState(null);
-  const [pdfImportUseAI, setPdfImportUseAI] = useState(false);
+  const [pdfImportUseAI, setPdfImportUseAI] = useState(true);
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -558,6 +560,19 @@ const App = () => {
       loadUserData();
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting folder');
+    }
+  };
+
+  const updateFolder = async (id) => {
+    const name = editingFolderName.trim();
+    if (!name) return;
+    try {
+      await api.put(`/api/folders/${id}`, { name });
+      setEditingFolderId(null);
+      setEditingFolderName('');
+      loadUserData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Error updating folder');
     }
   };
 
@@ -1478,8 +1493,26 @@ if (view === 'admin-dashboard' && user) {
           <div className="flex flex-wrap gap-2 mb-3">
             {folders.map(f => (
               <span key={f.id} className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-gray-100 text-sm">
-                {f.name}
-                <button type="button" onClick={() => deleteFolder(f.id)} className="text-red-600 hover:underline text-xs">×</button>
+                {editingFolderId === f.id ? (
+                  <>
+                    <input
+                      type="text"
+                      value={editingFolderName}
+                      onChange={(e) => setEditingFolderName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') updateFolder(f.id); if (e.key === 'Escape') { setEditingFolderId(null); setEditingFolderName(''); } }}
+                      className="w-32 px-1 py-0.5 border rounded text-sm"
+                      autoFocus
+                    />
+                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#007f8f] hover:underline text-xs">✓</button>
+                    <button type="button" onClick={() => { setEditingFolderId(null); setEditingFolderName(''); }} className="text-gray-500 hover:underline text-xs">✗</button>
+                  </>
+                ) : (
+                  <>
+                    {f.name}
+                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#007f8f] hover:underline text-xs">edit</button>
+                    <button type="button" onClick={() => deleteFolder(f.id)} className="text-red-600 hover:underline text-xs">×</button>
+                  </>
+                )}
               </span>
             ))}
           </div>

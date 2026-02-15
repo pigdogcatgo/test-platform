@@ -172,7 +172,10 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
     let jsonStr = content.replace(/^```json?\s*|\s*```$/g, '').trim();
     const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
     if (arrayMatch) jsonStr = arrayMatch[0];
-    // Fix LaTeX backslashes: \sqrt, \frac etc. use \s, \c etc. which are invalid in JSON
+    // Fix LaTeX backslashes that break JSON parsing
+    // 1. \u not followed by 4 hex digits (e.g. \usepackage, \unit) -> \\u
+    jsonStr = jsonStr.replace(/\\u(?![0-9a-fA-F]{4})/g, '\\\\u');
+    // 2. \s, \c, \sqrt etc. - invalid single-char escapes -> \\X (valid: \" \\ \/ \b \f \n \r \t \uXXXX)
     jsonStr = jsonStr.replace(/\\([^"\\/bfnrtu])/g, '\\\\$1');
     arr = JSON.parse(jsonStr);
     if (!Array.isArray(arr)) arr = [arr];
