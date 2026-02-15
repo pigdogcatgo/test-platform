@@ -245,6 +245,10 @@ app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
 });
 
 // Import problems from PDF (admin only)
+// GET handler for diagnostics: if you get 405 here, the route exists; 404 means old deployment
+app.get('/api/import-pdf', (_req, res) => {
+  res.status(405).json({ error: 'Use POST to import a PDF', ok: true });
+});
 app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
