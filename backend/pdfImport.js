@@ -64,12 +64,12 @@ export function extractSourceName(text) {
 
 /**
  * Split text into individual problems by number pattern (1. 2. 3. ...).
- * Uses sequential numbering (1, 2, 3, ...) so answer key "1. 42" = first problem,
- * regardless of section numbering in the PDF (e.g. "17. ", "18. " in a "Problems 17-30" section).
+ * Uses sequential numbering (1, 2, 3, ...) so answer key "1. 42" = first problem.
+ * Matches "N. ", "N) ", "N: " at line start (some PDFs use ) or : in second sections).
  */
 export function splitIntoProblems(text) {
   const problems = [];
-  const regex = /^(\d+)\.\s+/gm;
+  const regex = /^\s*(\d+)[\.\)\:]\s+/gm;
   let match;
   let lastIndex = 0;
   let lastNum = 0;

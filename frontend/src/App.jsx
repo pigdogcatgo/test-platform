@@ -150,6 +150,8 @@ const App = () => {
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
+  const [selectedProblemIds, setSelectedProblemIds] = useState([]);
+  const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
 
   // Create axios instance with useMemo to prevent recreation on every render
   const api = useMemo(() => {
@@ -539,6 +541,31 @@ const App = () => {
       loadUserData();
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting problem');
+    }
+  };
+
+  const bulkMoveProblems = async () => {
+    if (selectedProblemIds.length === 0) return;
+    const folderId = bulkMoveFolderId === '' || bulkMoveFolderId === 'uncategorized' ? null : Number(bulkMoveFolderId);
+    try {
+      await api.put('/api/problems/bulk-move', { ids: selectedProblemIds, folder_id: folderId });
+      setSelectedProblemIds([]);
+      setBulkMoveFolderId('');
+      loadUserData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Error moving problems');
+    }
+  };
+
+  const bulkDeleteProblems = async () => {
+    if (selectedProblemIds.length === 0) return;
+    if (!confirm(`Delete ${selectedProblemIds.length} selected problem(s)?`)) return;
+    try {
+      await api.delete('/api/problems/bulk', { data: { ids: selectedProblemIds } });
+      setSelectedProblemIds([]);
+      loadUserData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Error deleting problems');
     }
   };
 
@@ -1798,10 +1825,58 @@ if (view === 'admin-dashboard' && user) {
 
         <div className="bg-white rounded-xl shadow overflow-x-auto"></div>
 
+        {selectedProblemIds.length > 0 && (
+          <div className="bg-[#007f8f]/10 border border-[#007f8f]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
+            <span className="font-medium text-gray-800">{selectedProblemIds.length} selected</span>
+            <select
+              value={bulkMoveFolderId}
+              onChange={(e) => setBulkMoveFolderId(e.target.value)}
+              className="px-3 py-1.5 border rounded-lg text-sm"
+            >
+              <option value="">Move to folder…</option>
+              <option value="uncategorized">Uncategorized</option>
+              {folders.map(f => (
+                <option key={f.id} value={f.id}>{f.name}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={bulkMoveProblems}
+              disabled={!bulkMoveFolderId}
+              className="px-3 py-1.5 bg-[#007f8f] text-white rounded-lg text-sm hover:bg-[#006b78] disabled:opacity-50"
+            >
+              Move
+            </button>
+            <button
+              type="button"
+              onClick={bulkDeleteProblems}
+              className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700"
+            >
+              Delete selected
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedProblemIds([])}
+              className="text-gray-600 hover:underline text-sm"
+            >
+              Clear selection
+            </button>
+          </div>
+        )}
+
         <div className="bg-white rounded-xl shadow overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-left">
               <tr>
+                <th className="px-4 py-3 w-10">
+                  <input
+                    type="checkbox"
+                    checked={problems.length > 0 && selectedProblemIds.length === problems.length}
+                    ref={el => { if (el) el.indeterminate = selectedProblemIds.length > 0 && selectedProblemIds.length < problems.length; }}
+                    onChange={(e) => setSelectedProblemIds(e.target.checked ? problems.map(p => p.id) : [])}
+                    className="rounded"
+                  />
+                </th>
                 <th className="px-4 py-3">Question</th>
                 <th className="px-4 py-3">Answer</th>
                 <th className="px-4 py-3">Folder</th>
@@ -1814,6 +1889,19 @@ if (view === 'admin-dashboard' && user) {
             <tbody>
               {problems.map(p => (
                 <tr key={p.id} className="border-t">
+                  <td className="px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedProblemIds.includes(p.id)}
+                      onChange={(e) =>
+                        setSelectedProblemIds(prev =>
+                          e.target.checked ? [...prev, p.id] : prev.filter(id => id !== p.id)
+                        )
+                      }
+                      className="rounded"
+                      onClick={(ev) => ev.stopPropagation()}
+                    />
+                  </td>
                   <td className="px-4 py-3 max-w-md">
                     <div>
                       <RenderLatex text={p.question} />
