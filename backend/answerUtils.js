@@ -10,6 +10,7 @@ export function parseAnswerToNumber(input) {
   const expr = s
     .replace(/\u221A(\d+(?:\.\d+)?)/g, 'sqrt($1)')
     .replace(/\u221A\(([^)]+)\)/g, 'sqrt($1)')
+    .replace(/(\d+(?:\.\d+)?)sqrt(\d+(?:\.\d+)?)/g, '$1*sqrt($2)') // 32sqrt22 -> 32*sqrt(22)
     .replace(/\bsqrt(\d+(?:\.\d+)?)/g, 'sqrt($1)'); // sqrt10 -> sqrt(10)
   try {
     const val = evaluate(expr);
