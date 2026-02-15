@@ -109,58 +109,77 @@ export function parseAnswerKey(text) {
   return map;
 }
 
+const BATCH_SIZE = 50; // All problems in one call (Gemini 1.5 has 1M context)
+
 /**
- * Use Google Gemini (free) to process a single problem: LaTeX, topic, answer (if not in key).
+ * Process a batch of problems in one API call. Reduces requests from N to ceil(N/5).
  */
-async function processProblemWithAI(problem, answerFromKey) {
+async function processBatchWithAI(batch, answerMap) {
   if (!ai) {
     throw new Error('GEMINI_API_KEY is required for PDF import. Get a free key at https://aistudio.google.com/app/apikey');
   }
 
-  const systemPrompt = `You are a math competition problem processor. For each problem, output valid JSON only, no markdown:
-{
-  "questionLatex": "question text with LaTeX: use $...$ for inline math, $$...$$ for display. Convert fractions as \\frac{a}{b}, sqrt as \\sqrt{x}, exponents as x^2.",
-  "topic": "one of: Algebra, Number Theory, Counting, Geometry, Probability, Arithmetic",
-  "answer": "numeric answer: integer, decimal, fraction like 3/4, or radical like sqrt(2)/2 or 2*sqrt(3). Simplify fully."
-}
-Rules: Preserve the problem statement exactly; only convert math to LaTeX. Topic must be exactly one of the listed options.`;
+  const systemPrompt = `You are a math competition problem processor. Process multiple problems and output a JSON array only, no markdown. Each element:
+{ "number": 1, "questionLatex": "LaTeX text with $...$ and $$...$$", "topic": "Algebra|Number Theory|Counting|Geometry|Probability|Arithmetic", "answer": "numeric" }
+Rules: Preserve problem text exactly; only convert math to LaTeX. Topic must be exactly one option. Use the provided answer when given.`;
 
-  const userPrompt = `Problem ${problem.number}:\n${problem.raw}\n\n${
-    answerFromKey !== undefined
-      ? `The answer is: ${answerFromKey}. Use this exact value for "answer".`
-      : 'Solve the problem and provide the answer.'
-  }`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
-    contents: userPrompt,
-    config: {
-      systemInstruction: systemPrompt,
-      temperature: 0.2,
-    },
+  const parts = batch.map((p) => {
+    const ans = answerMap[p.number];
+    return `Problem ${p.number}:\n${p.raw}\n${ans !== undefined ? `Answer: ${ans}` : 'Solve and provide answer.'}`;
   });
+  const userPrompt = parts.join('\n\n---\n\n');
 
-  const content = (response?.text || '').trim() || '{}';
-  let parsed;
+  let content = '[]';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-1.5-flash',
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemPrompt,
+          temperature: 0.2,
+        },
+      });
+      content = (response?.text || '').trim() || '[]';
+      break;
+    } catch (err) {
+      const errStr = String(err?.message || err?.toString?.() || err);
+      const is429 = /RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr);
+      const retryDelay = is429 ? 60000 : 3000;
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, retryDelay));
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  let arr;
   try {
     const jsonStr = content.replace(/^```json?\s*|\s*```$/g, '').trim();
-    parsed = JSON.parse(jsonStr);
+    arr = JSON.parse(jsonStr);
+    if (!Array.isArray(arr)) arr = [arr];
   } catch {
-    throw new Error(`AI returned invalid JSON for problem ${problem.number}`);
+    throw new Error(`AI returned invalid JSON for batch`);
   }
 
-  const answer = answerFromKey !== undefined ? String(answerFromKey) : (parsed.answer || '');
-  const answerNum = parseAnswerToNumber(answer);
-  if (answerNum === null && answer !== '') {
-    throw new Error(`Invalid answer for problem ${problem.number}: "${answer}"`);
+  const results = [];
+  for (let i = 0; i < batch.length; i++) {
+    const prob = batch[i];
+    const item = arr[i] || arr.find((x) => x.number === prob.number) || {};
+    const answer = answerMap[prob.number] !== undefined ? String(answerMap[prob.number]) : (item.answer || '');
+    const answerNum = parseAnswerToNumber(answer);
+    if (answerNum === null && answer !== '') {
+      throw new Error(`Invalid answer for problem ${prob.number}: "${answer}"`);
+    }
+    results.push({
+      question: item.questionLatex || prob.raw,
+      answer: answerNum !== null ? answerNum : 0,
+      topic: item.topic || 'Arithmetic',
+      source: `Problem ${prob.number}`,
+    });
   }
-
-  return {
-    question: parsed.questionLatex || problem.raw,
-    answer: answerNum !== null ? answerNum : 0,
-    topic: parsed.topic || 'Arithmetic',
-    source: `Problem ${problem.number}`,
-  };
+  return results;
 }
 
 /**
@@ -185,12 +204,32 @@ async function ensureTags(client) {
 }
 
 /**
- * Main import: parse PDF, process with AI, insert into DB.
+ * Process a problem without AI: raw text, answer from key required.
+ */
+function processProblemNoAI(problem, answerFromKey) {
+  if (answerFromKey === undefined) {
+    throw new Error(`Answer key required for problem ${problem.number} (no-AI mode)`);
+  }
+  const answerNum = parseAnswerToNumber(String(answerFromKey));
+  if (answerNum === null) {
+    throw new Error(`Invalid answer for problem ${problem.number}: "${answerFromKey}"`);
+  }
+  return {
+    question: problem.raw,
+    answer: answerNum,
+    topic: 'Arithmetic',
+    source: `Problem ${problem.number}`,
+  };
+}
+
+/**
+ * Main import: parse PDF, process with or without AI, insert into DB.
  * @param {Buffer} pdfBuffer - PDF file buffer
- * @param {string} [answerKeyText] - Optional answer key (e.g. "1. 42\n2. 3/4")
+ * @param {string} [answerKeyText] - Answer key (required for no-AI mode)
+ * @param {boolean} [useAI=true] - If false, skip AI; requires answer key for every problem
  * @returns {{ imported: number, folderId: number, folderName: string, errors: string[] }}
  */
-export async function importPdfToDatabase(pdfBuffer, answerKeyText = '') {
+export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI = true) {
   const errors = [];
   const answerMap = parseAnswerKey(answerKeyText);
 
@@ -203,6 +242,10 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '') {
   const problems = splitIntoProblems(text);
   if (problems.length === 0) {
     throw new Error('No problems found in PDF. Expected format: "1. Question text..."');
+  }
+
+  if (!useAI && Object.keys(answerMap).length === 0) {
+    throw new Error('Answer key is required when not using AI. Paste answers in format: 1. 42, 2. 3/4, etc.');
   }
 
   const client = await pool.connect();
@@ -219,33 +262,53 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '') {
     const tagMap = await ensureTags(client);
     let imported = 0;
 
-    for (let i = 0; i < problems.length; i++) {
-      const prob = problems[i];
-      // Rate limit: Gemini free tier ~2–15 req/min; wait 5s between calls to avoid 429
-      if (i > 0) {
-        await new Promise((r) => setTimeout(r, 5000));
-      }
-      try {
-        const answerFromKey = answerMap[prob.number];
-        const processed = await processProblemWithAI(prob, answerFromKey);
-
-        const tagName = processed.topic in TOPIC_TAGS ? TOPIC_TAGS[processed.topic] : processed.topic;
-        const tagId = tagMap[tagName] || tagMap['Arithmetic'];
-
-        const ins = await client.query(
-          `INSERT INTO problems (question, answer, topic, source, folder_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-          [processed.question, processed.answer, tagName, processed.source, folderId]
-        );
-        const problemId = ins.rows[0].id;
-        if (tagId) {
-          await client.query(
-            'INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-            [problemId, tagId]
-          );
+    if (useAI) {
+      for (let i = 0; i < problems.length; i += BATCH_SIZE) {
+        const batch = problems.slice(i, i + BATCH_SIZE);
+        if (i > 0) await new Promise((r) => setTimeout(r, 7000));
+        try {
+          const processedList = await processBatchWithAI(batch, answerMap);
+          for (let j = 0; j < batch.length; j++) {
+            const processed = processedList[j];
+            const prob = batch[j];
+            const tagName = processed.topic in TOPIC_TAGS ? TOPIC_TAGS[processed.topic] : processed.topic;
+            const tagId = tagMap[tagName] || tagMap['Arithmetic'];
+            const ins = await client.query(
+              `INSERT INTO problems (question, answer, topic, source, folder_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+              [processed.question, processed.answer, tagName, processed.source, folderId]
+            );
+            if (tagId) {
+              await client.query(
+                'INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+                [ins.rows[0].id, tagId]
+              );
+            }
+            imported++;
+          }
+        } catch (err) {
+          for (const p of batch) errors.push(`Problem ${p.number}: ${err.message}`);
         }
-        imported++;
-      } catch (err) {
-        errors.push(`Problem ${prob.number}: ${err.message}`);
+      }
+    } else {
+      for (const prob of problems) {
+        try {
+          const answerFromKey = answerMap[prob.number];
+          const processed = processProblemNoAI(prob, answerFromKey);
+          const tagId = tagMap['Arithmetic'];
+          const ins = await client.query(
+            `INSERT INTO problems (question, answer, topic, source, folder_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+            [processed.question, processed.answer, 'Arithmetic', processed.source, folderId]
+          );
+          if (tagId) {
+            await client.query(
+              'INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+              [ins.rows[0].id, tagId]
+            );
+          }
+          imported++;
+        } catch (err) {
+          errors.push(`Problem ${prob.number}: ${err.message}`);
+        }
       }
     }
 

@@ -144,6 +144,7 @@ const App = () => {
   const [pdfImportAnswerKey, setPdfImportAnswerKey] = useState('');
   const [pdfImportLoading, setPdfImportLoading] = useState(false);
   const [pdfImportResult, setPdfImportResult] = useState(null);
+  const [pdfImportUseAI, setPdfImportUseAI] = useState(false);
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -577,12 +578,17 @@ const App = () => {
       alert('Select a PDF file first');
       return;
     }
+    if (!pdfImportUseAI && !pdfImportAnswerKey.trim()) {
+      alert('Answer key is required when not using AI. Paste answers (one per line): 1. 42, 2. 3/4, etc.');
+      return;
+    }
     setPdfImportLoading(true);
     setPdfImportResult(null);
     try {
       const formData = new FormData();
       formData.append('pdf', pdfImportFile);
       if (pdfImportAnswerKey.trim()) formData.append('answerKey', pdfImportAnswerKey.trim());
+      formData.append('useAI', pdfImportUseAI ? 'true' : 'false');
       const { data } = await api.post('/api/import-pdf', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 300000, // 5 min (rate-limited for Gemini free tier)
@@ -1482,8 +1488,16 @@ if (view === 'admin-dashboard' && user) {
         <div className="mb-6 p-4 bg-white rounded-xl shadow">
           <h3 className="font-semibold text-gray-800 mb-3">Import from PDF</h3>
           <p className="text-sm text-gray-600 mb-3">
-            Upload a competition PDF (e.g. MathCounts, AMC). Problems are auto-extracted, converted to LaTeX, tagged by topic (Algebra, Number Theory, Counting, Geometry), and placed in a folder based on the source. Get a free API key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-[#007f8f] hover:underline">aistudio.google.com</a> and set <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code> in Render.
+            Upload a competition PDF (e.g. MathCounts, AMC). Problems are auto-extracted and placed in a folder. <strong>No AI mode</strong> (default): paste the answer key — no API key needed. <strong>Use AI</strong>: converts to LaTeX, auto-tags, can solve — requires <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code>.
           </p>
+          <label className="flex items-center gap-2 mb-3 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={pdfImportUseAI}
+              onChange={(e) => setPdfImportUseAI(e.target.checked)}
+            />
+            Use AI (LaTeX, auto-tags, optional solving) — requires API key
+          </label>
           <div className="flex flex-wrap gap-3 items-end mb-3">
             <div className="flex-1 min-w-[200px]">
               <label className="block text-xs text-gray-500 mb-1">PDF file</label>
@@ -1505,7 +1519,7 @@ if (view === 'admin-dashboard' && user) {
             </button>
           </div>
           <div className="mb-2">
-            <label className="block text-xs text-gray-500 mb-1">Answer key (optional) — format: 1. 42, 2. 3/4, 3. 90000</label>
+            <label className="block text-xs text-gray-500 mb-1">Answer key {pdfImportUseAI ? '(optional with AI)' : '(required — one per line)'} — format: 1. 42, 2. 3/4, 3. 90000</label>
             <textarea
               value={pdfImportAnswerKey}
               onChange={(e) => setPdfImportAnswerKey(e.target.value)}
