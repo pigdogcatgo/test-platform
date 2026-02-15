@@ -120,7 +120,7 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
     throw new Error('GEMINI_API_KEY is required for PDF import. Get a free key at https://aistudio.google.com/app/apikey');
   }
   const tagList = allowedTagNames.length > 0 ? allowedTagNames.join('", "') : 'Arithmetic';
-  const systemPrompt = `You are a math competition problem processor. Output a JSON array with one object per problem. Each: { "number": N, "questionLatex": "LaTeX with $...$ and $$...$$", "topic": "MUST be exactly one of: ${tagList}", "answer": "numeric" }. For "topic" you may ONLY use one of the listed tags—no other values. Preserve problem text; only convert math to LaTeX. Use the provided answer when given. Return exactly ${batch.length} objects in order.`;
+  const systemPrompt = `You are a math competition problem processor. Output a JSON array with one object per problem. Each: { "number": N, "questionLatex": "LaTeX with $...$ and $$...$$", "topics": ["tag1", "tag2"], "answer": "numeric" }. For "topics" use an array of one or more tags from: ${tagList}. Use multiple tags when a problem fits multiple categories (e.g. geometric probability: ["Geometry", "Probability"]). Only use listed tags. Preserve problem text; only convert math to LaTeX. Use the provided answer when given. Return exactly ${batch.length} objects in order.`;
 
   const parts = batch.map((p) => {
     const ans = answerMap[p.number];
@@ -187,10 +187,14 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
     if (answerNum === null && answer !== '') {
       throw new Error(`Invalid answer for problem ${prob.number}: "${answer}"`);
     }
+    let topics = item.topics;
+    if (!Array.isArray(topics)) {
+      topics = item.topic ? [item.topic] : ['Arithmetic'];
+    }
     results.push({
       question: item.questionLatex || prob.raw,
       answer: answerNum !== null ? answerNum : 0,
-      topic: item.topic || 'Arithmetic',
+      topics,
       source: `Problem ${prob.number}`,
     });
   }
@@ -290,18 +294,23 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
           for (let j = 0; j < batch.length; j++) {
             const processed = processedList[j];
             const prob = batch[j];
-            const rawTopic = (processed.topic || '').trim();
-            const tagName = allowedTagNames.includes(rawTopic) ? rawTopic : (TOPIC_TAGS[rawTopic] && allowedTagNames.includes(TOPIC_TAGS[rawTopic]) ? TOPIC_TAGS[rawTopic] : defaultTag);
-            const tagId = tagMap[tagName] || tagMap[defaultTag];
+            const tagNames = (processed.topics || [defaultTag])
+              .map((t) => (typeof t === 'string' ? t : String(t)).trim())
+              .filter((t) => allowedTagNames.includes(t));
+            if (tagNames.length === 0) tagNames.push(defaultTag);
             const ins = await client.query(
               `INSERT INTO problems (question, answer, topic, source, folder_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-              [processed.question, processed.answer, tagName, processed.source, folderId]
+              [processed.question, processed.answer, tagNames[0], processed.source, folderId]
             );
-            if (tagId) {
-              await client.query(
-                'INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-                [ins.rows[0].id, tagId]
-              );
+            const problemId = ins.rows[0].id;
+            for (const tagName of tagNames) {
+              const tagId = tagMap[tagName];
+              if (tagId) {
+                await client.query(
+                  'INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+                  [problemId, tagId]
+                );
+              }
             }
             imported++;
           }
