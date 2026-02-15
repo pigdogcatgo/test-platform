@@ -119,9 +119,7 @@ async function processBatchWithAI(batch, answerMap) {
     throw new Error('GEMINI_API_KEY is required for PDF import. Get a free key at https://aistudio.google.com/app/apikey');
   }
 
-  const systemPrompt = `You are a math competition problem processor. Process multiple problems and output a JSON array only, no markdown. Each element:
-{ "number": 1, "questionLatex": "LaTeX text with $...$ and $$...$$", "topic": "Algebra|Number Theory|Counting|Geometry|Probability|Arithmetic", "answer": "numeric" }
-Rules: Preserve problem text exactly; only convert math to LaTeX. Topic must be exactly one option. Use the provided answer when given.`;
+  const systemPrompt = `You are a math competition problem processor. Output a JSON array with one object per problem. Each: { "number": N, "questionLatex": "LaTeX with $...$ and $$...$$", "topic": "Algebra|Number Theory|Counting|Geometry|Probability|Arithmetic", "answer": "numeric" }. Preserve problem text; only convert math to LaTeX. Use the provided answer when given. Return exactly ${batch.length} objects in order.`;
 
   const parts = batch.map((p) => {
     const ans = answerMap[p.number];
@@ -141,6 +139,7 @@ Rules: Preserve problem text exactly; only convert math to LaTeX. Topic must be 
           config: {
             systemInstruction: systemPrompt,
             temperature: 0.2,
+            responseMimeType: 'application/json',
           },
         });
         content = (response?.text || '').trim() || '[]';
@@ -169,11 +168,13 @@ Rules: Preserve problem text exactly; only convert math to LaTeX. Topic must be 
 
   let arr;
   try {
-    const jsonStr = content.replace(/^```json?\s*|\s*```$/g, '').trim();
+    let jsonStr = content.replace(/^```json?\s*|\s*```$/g, '').trim();
+    const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
+    if (arrayMatch) jsonStr = arrayMatch[0];
     arr = JSON.parse(jsonStr);
     if (!Array.isArray(arr)) arr = [arr];
-  } catch {
-    throw new Error(`AI returned invalid JSON for batch`);
+  } catch (err) {
+    throw new Error(`AI returned invalid JSON for batch. ${err.message}`);
   }
 
   const results = [];
