@@ -120,7 +120,7 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
     throw new Error('GEMINI_API_KEY is required for PDF import. Get a free key at https://aistudio.google.com/app/apikey');
   }
   const tagList = allowedTagNames.length > 0 ? allowedTagNames.join('", "') : 'Arithmetic';
-  const systemPrompt = `You are a math competition problem processor. Output a JSON array with one object per problem. Each: { "number": N, "questionLatex": "LaTeX with $...$ and $$...$$", "topics": ["tag1", "tag2"], "answer": "numeric" }. For "topics" use an array of one or more tags from: ${tagList}. Use multiple tags when a problem fits multiple categories (e.g. geometric probability: ["Geometry", "Probability"]). Only use listed tags. Preserve problem text; only convert math to LaTeX. Use the provided answer when given. Return exactly ${batch.length} objects in order.`;
+  const systemPrompt = `You are a math competition problem processor. Output a JSON array with one object per problem. Each: { "number": N, "questionLatex": "LaTeX with $...$ and $$...$$", "topics": ["tag1", "tag2"], "answer": "numeric" }. For "topics" use an array of one or more tags from: ${tagList}. Use multiple tags when a problem fits multiple categories (e.g. geometric probability: ["Geometry", "Probability"]). Only use listed tags. In questionLatex JSON strings, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly. Preserve problem text; only convert math to LaTeX. Use the provided answer when given. Return exactly ${batch.length} objects in order.`;
 
   const parts = batch.map((p) => {
     const ans = answerMap[p.number];
@@ -172,6 +172,8 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
     let jsonStr = content.replace(/^```json?\s*|\s*```$/g, '').trim();
     const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
     if (arrayMatch) jsonStr = arrayMatch[0];
+    // Fix LaTeX backslashes: \sqrt, \frac etc. use \s, \c etc. which are invalid in JSON
+    jsonStr = jsonStr.replace(/\\([^"\\/bfnrtu])/g, '\\\\$1');
     arr = JSON.parse(jsonStr);
     if (!Array.isArray(arr)) arr = [arr];
   } catch (err) {
