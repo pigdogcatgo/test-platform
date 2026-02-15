@@ -129,30 +129,43 @@ Rules: Preserve problem text exactly; only convert math to LaTeX. Topic must be 
   });
   const userPrompt = parts.join('\n\n---\n\n');
 
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
   let content = '[]';
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-1.5-flash',
-        contents: userPrompt,
-        config: {
-          systemInstruction: systemPrompt,
-          temperature: 0.2,
-        },
-      });
-      content = (response?.text || '').trim() || '[]';
-      break;
-    } catch (err) {
-      const errStr = String(err?.message || err?.toString?.() || err);
-      const is429 = /RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr);
-      const retryDelay = is429 ? 60000 : 3000;
-      if (attempt < 2) {
-        await new Promise((r) => setTimeout(r, retryDelay));
-      } else {
-        throw err;
+  let lastErr;
+  for (const model of models) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: userPrompt,
+          config: {
+            systemInstruction: systemPrompt,
+            temperature: 0.2,
+          },
+        });
+        content = (response?.text || '').trim() || '[]';
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        const errStr = String(err?.message || err?.toString?.() || err);
+        const is404 = /NOT_FOUND|404|not found/i.test(errStr);
+        const is429 = /RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr);
+        if (is404) break; // try next model
+        const retryDelay = is429 ? 60000 : 3000;
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, retryDelay));
+        } else {
+          throw err;
+        }
       }
     }
+    if (!lastErr) break;
+    if (lastErr && !/NOT_FOUND|404|not found/i.test(String(lastErr?.message || lastErr))) {
+      throw lastErr;
+    }
   }
+  if (lastErr) throw lastErr;
 
   let arr;
   try {
