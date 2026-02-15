@@ -219,7 +219,12 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '') {
     const tagMap = await ensureTags(client);
     let imported = 0;
 
-    for (const prob of problems) {
+    for (let i = 0; i < problems.length; i++) {
+      const prob = problems[i];
+      // Rate limit: Gemini free tier ~2–15 req/min; wait 5s between calls to avoid 429
+      if (i > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+      }
       try {
         const answerFromKey = answerMap[prob.number];
         const processed = await processProblemWithAI(prob, answerFromKey);

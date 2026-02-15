@@ -585,7 +585,7 @@ const App = () => {
       if (pdfImportAnswerKey.trim()) formData.append('answerKey', pdfImportAnswerKey.trim());
       const { data } = await api.post('/api/import-pdf', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 120000,
+        timeout: 300000, // 5 min (rate-limited for Gemini free tier)
       });
       setPdfImportResult(data);
       setPdfImportFile(null);
