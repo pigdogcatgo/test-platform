@@ -5,6 +5,7 @@
  */
 import { PDFParse } from 'pdf-parse';
 import { GoogleGenAI } from '@google/genai';
+import { jsonrepair } from 'jsonrepair';
 import pool from './db.js';
 import { parseAnswerToNumber } from './answerUtils.js';
 
@@ -172,12 +173,18 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
     let jsonStr = content.replace(/^```json?\s*|\s*```$/g, '').trim();
     const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
     if (arrayMatch) jsonStr = arrayMatch[0];
-    // Fix LaTeX backslashes that break JSON parsing
+    // Fix LaTeX backslashes that break JSON parsing (AI often outputs \sqrt, \frac, \usepackage etc.)
     // 1. \u not followed by 4 hex digits (e.g. \usepackage, \unit) -> \\u
     jsonStr = jsonStr.replace(/\\u(?![0-9a-fA-F]{4})/g, '\\\\u');
     // 2. \s, \c, \sqrt etc. - invalid single-char escapes -> \\X (valid: \" \\ \/ \b \f \n \r \t \uXXXX)
     jsonStr = jsonStr.replace(/\\([^"\\/bfnrtu])/g, '\\\\$1');
-    arr = JSON.parse(jsonStr);
+    try {
+      arr = JSON.parse(jsonStr);
+    } catch (parseErr) {
+      // Fallback: use jsonrepair for edge cases (trailing backslash, other bad escapes)
+      jsonStr = jsonrepair(jsonStr);
+      arr = JSON.parse(jsonStr);
+    }
     if (!Array.isArray(arr)) arr = [arr];
   } catch (err) {
     throw new Error(`AI returned invalid JSON for batch. ${err.message}`);
