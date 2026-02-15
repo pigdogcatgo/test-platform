@@ -113,13 +113,14 @@ const BATCH_SIZE = 50; // All problems in one call (Gemini 1.5 has 1M context)
 
 /**
  * Process a batch of problems in one API call. Reduces requests from N to ceil(N/5).
+ * @param {string[]} allowedTagNames - Only these tags may be used; AI must pick from this list.
  */
-async function processBatchWithAI(batch, answerMap) {
+async function processBatchWithAI(batch, answerMap, allowedTagNames) {
   if (!ai) {
     throw new Error('GEMINI_API_KEY is required for PDF import. Get a free key at https://aistudio.google.com/app/apikey');
   }
-
-  const systemPrompt = `You are a math competition problem processor. Output a JSON array with one object per problem. Each: { "number": N, "questionLatex": "LaTeX with $...$ and $$...$$", "topic": "Algebra|Number Theory|Counting|Geometry|Probability|Arithmetic", "answer": "numeric" }. Preserve problem text; only convert math to LaTeX. Use the provided answer when given. Return exactly ${batch.length} objects in order.`;
+  const tagList = allowedTagNames.length > 0 ? allowedTagNames.join('", "') : 'Arithmetic';
+  const systemPrompt = `You are a math competition problem processor. Output a JSON array with one object per problem. Each: { "number": N, "questionLatex": "LaTeX with $...$ and $$...$$", "topic": "MUST be exactly one of: ${tagList}", "answer": "numeric" }. For "topic" you may ONLY use one of the listed tags—no other values. Preserve problem text; only convert math to LaTeX. Use the provided answer when given. Return exactly ${batch.length} objects in order.`;
 
   const parts = batch.map((p) => {
     const ans = answerMap[p.number];
@@ -273,7 +274,11 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
     }
     const folderId = folderRow.rows[0].id;
 
-    const tagMap = await ensureTags(client);
+    await ensureTags(client);
+    const allTags = await client.query('SELECT id, name FROM tags ORDER BY name');
+    const tagMap = Object.fromEntries(allTags.rows.map((r) => [r.name, r.id]));
+    const allowedTagNames = allTags.rows.map((r) => r.name);
+    const defaultTag = allowedTagNames[0] || 'Arithmetic';
     let imported = 0;
 
     if (useAI) {
@@ -281,12 +286,13 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
         const batch = problems.slice(i, i + BATCH_SIZE);
         if (i > 0) await new Promise((r) => setTimeout(r, 7000));
         try {
-          const processedList = await processBatchWithAI(batch, answerMap);
+          const processedList = await processBatchWithAI(batch, answerMap, allowedTagNames);
           for (let j = 0; j < batch.length; j++) {
             const processed = processedList[j];
             const prob = batch[j];
-            const tagName = processed.topic in TOPIC_TAGS ? TOPIC_TAGS[processed.topic] : processed.topic;
-            const tagId = tagMap[tagName] || tagMap['Arithmetic'];
+            const rawTopic = (processed.topic || '').trim();
+            const tagName = allowedTagNames.includes(rawTopic) ? rawTopic : (TOPIC_TAGS[rawTopic] && allowedTagNames.includes(TOPIC_TAGS[rawTopic]) ? TOPIC_TAGS[rawTopic] : defaultTag);
+            const tagId = tagMap[tagName] || tagMap[defaultTag];
             const ins = await client.query(
               `INSERT INTO problems (question, answer, topic, source, folder_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
               [processed.question, processed.answer, tagName, processed.source, folderId]
@@ -308,7 +314,7 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
         try {
           const answerFromKey = answerMap[prob.number];
           const processed = processProblemNoAI(prob, answerFromKey);
-          const tagId = tagMap['Arithmetic'];
+          const tagId = tagMap[defaultTag];
           const ins = await client.query(
             `INSERT INTO problems (question, answer, topic, source, folder_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
             [processed.question, processed.answer, 'Arithmetic', processed.source, folderId]
