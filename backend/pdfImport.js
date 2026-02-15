@@ -64,6 +64,8 @@ export function extractSourceName(text) {
 
 /**
  * Split text into individual problems by number pattern (1. 2. 3. ...).
+ * Uses sequential numbering (1, 2, 3, ...) so answer key "1. 42" = first problem,
+ * regardless of section numbering in the PDF (e.g. "17. ", "18. " in a "Problems 17-30" section).
  */
 export function splitIntoProblems(text) {
   const problems = [];
@@ -71,23 +73,29 @@ export function splitIntoProblems(text) {
   let match;
   let lastIndex = 0;
   let lastNum = 0;
+  let seq = 0;
 
   while ((match = regex.exec(text)) !== null) {
     const num = parseInt(match[1], 10);
     const start = match.index;
     if (lastNum > 0) {
       const raw = text.slice(lastIndex, start).trim();
-      if (raw.length > 10) problems.push({ number: lastNum, raw });
+      if (raw.length > 10) {
+        seq++;
+        problems.push({ number: seq, raw });
+      }
     }
     lastNum = num;
     lastIndex = start;
   }
   if (lastNum > 0) {
     const raw = text.slice(lastIndex).trim();
-    // Trim footer/copyright
     const footer = /Copyright\s+.*?\.\s*All rights reserved.*$/is;
     const cleaned = raw.replace(footer, '').trim();
-    if (cleaned.length > 10) problems.push({ number: lastNum, raw: cleaned });
+    if (cleaned.length > 10) {
+      seq++;
+      problems.push({ number: seq, raw: cleaned });
+    }
   }
   return problems;
 }
@@ -191,13 +199,15 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
   }
 
   const results = [];
+  const batchErrors = [];
   for (let i = 0; i < batch.length; i++) {
     const prob = batch[i];
     const item = arr[i] || arr.find((x) => x.number === prob.number) || {};
     const answer = answerMap[prob.number] !== undefined ? String(answerMap[prob.number]) : (item.answer || '');
     const answerNum = parseAnswerToNumber(answer);
     if (answerNum === null && answer !== '') {
-      throw new Error(`Invalid answer for problem ${prob.number}: "${answer}"`);
+      batchErrors.push({ number: prob.number, message: `Invalid answer for problem ${prob.number}: "${answer}"` });
+      continue;
     }
     let topics = item.topics;
     if (!Array.isArray(topics)) {
@@ -210,7 +220,7 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
       source: `Problem ${prob.number}`,
     });
   }
-  return results;
+  return { results, errors: batchErrors };
 }
 
 /**
@@ -302,10 +312,9 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
         const batch = problems.slice(i, i + BATCH_SIZE);
         if (i > 0) await new Promise((r) => setTimeout(r, 7000));
         try {
-          const processedList = await processBatchWithAI(batch, answerMap, allowedTagNames);
-          for (let j = 0; j < batch.length; j++) {
-            const processed = processedList[j];
-            const prob = batch[j];
+          const { results: processedList, errors: batchErrors } = await processBatchWithAI(batch, answerMap, allowedTagNames);
+          for (const err of batchErrors) errors.push(err.message);
+          for (const processed of processedList) {
             const tagNames = (processed.topics || [defaultTag])
               .map((t) => (typeof t === 'string' ? t : String(t)).trim())
               .filter((t) => allowedTagNames.includes(t));
