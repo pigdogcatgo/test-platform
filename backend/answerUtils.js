@@ -9,7 +9,8 @@ export function parseAnswerToNumber(input) {
   if (!s) return null;
   const expr = s
     .replace(/\u221A(\d+(?:\.\d+)?)/g, 'sqrt($1)')
-    .replace(/\u221A\(([^)]+)\)/g, 'sqrt($1)');
+    .replace(/\u221A\(([^)]+)\)/g, 'sqrt($1)')
+    .replace(/\bsqrt(\d+(?:\.\d+)?)/g, 'sqrt($1)'); // sqrt10 -> sqrt(10)
   try {
     const val = evaluate(expr);
     return typeof val === 'number' && !Number.isNaN(val) ? val : null;
