@@ -156,7 +156,8 @@ CRITICAL RULES:
 
   const userPrompt = `Extract all math problems from this raw PDF text. Handle any formatting - the document structure may be inconsistent. Copy each problem character-for-character from the source; do not introduce any typos or changes.\n\n---\n\n${text}${answerKeyHint}`;
 
-  const models = ['gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'];
+  // Pro models have no free-tier quota; use Flash first, then Pro for paid accounts
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro'];
   let content = '[]';
   let lastErr;
   for (const model of models) {
@@ -180,6 +181,7 @@ CRITICAL RULES:
         const is404 = /NOT_FOUND|404|not found/i.test(errStr);
         const is429 = /RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr);
         if (is404) break; // try next model
+        if (is429 && attempt >= 2) break; // quota exceeded, try next model
         const retryDelay = is429 ? 60000 : 3000;
         if (attempt < 2) {
           await new Promise((r) => setTimeout(r, retryDelay));
@@ -189,9 +191,9 @@ CRITICAL RULES:
       }
     }
     if (!lastErr) break;
-    if (lastErr && !/NOT_FOUND|404|not found/i.test(String(lastErr?.message || lastErr))) {
-      throw lastErr;
-    }
+    const errStr2 = String(lastErr?.message || lastErr || '');
+    const tryNext = /NOT_FOUND|404|not found|RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr2);
+    if (lastErr && !tryNext) throw lastErr;
   }
   if (lastErr) throw lastErr;
 
