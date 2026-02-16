@@ -107,6 +107,72 @@ export function splitIntoProblems(text) {
 }
 
 /**
+ * Strip LaTeX to get comparable plain text for fidelity check.
+ */
+function stripLatexForCompare(s) {
+  if (!s || typeof s !== 'string') return '';
+  let t = s
+    .replace(/\$\$[^$]*\$\$|\$[^$]*\$/g, ' ')
+    .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, '$1/$2')
+    .replace(/\\sqrt\{([^}]*)\}/g, 'sqrt($1)')
+    .replace(/\\overline\{([^}]*)\}/g, '$1')
+    .replace(/\\[a-zA-Z]+/g, ' ')
+    .replace(/[{}]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .trim();
+  return t;
+}
+
+/**
+ * Extract critical content (numbers, Circle X, etc.) for fidelity check.
+ */
+function extractCritical(text) {
+  const normalized = stripLatexForCompare(text);
+  const numbers = new Set();
+  (normalized.match(/\d+(?:\.\d+)?/g) || []).forEach((n) => numbers.add(n));
+  const circleMatches = text.match(/Circle\s+([A-Z])/gi) || [];
+  const circles = new Set(circleMatches.map((m) => m.replace(/\s+/g, ' ').toLowerCase()));
+  const words = new Set((normalized.match(/\b[a-z0-9]{2,}\b/g) || []).filter((w) => w.length >= 2));
+  return { numbers, circles, words };
+}
+
+/**
+ * Non-AI check: does AI output preserve critical content from source?
+ * Returns array of warning strings, empty if OK.
+ */
+function validateFidelity(sourceRaw, aiOutput, problemNum) {
+  const warnings = [];
+  if (!sourceRaw || !aiOutput) return warnings;
+  const src = extractCritical(sourceRaw);
+  const out = extractCritical(aiOutput);
+  for (const c of src.circles) {
+    const letter = c.replace('circle ', '').trim();
+    const outCircles = [...out.circles].map((x) => x.replace('circle ', '').trim());
+    if (!outCircles.includes(letter)) {
+      const wrong = outCircles.filter((x) => x !== letter);
+      if (wrong.length > 0) {
+        warnings.push(`Problem ${problemNum}: source has "Circle ${letter}" but output has "Circle ${wrong[0]}"`);
+      } else {
+        warnings.push(`Problem ${problemNum}: source has "Circle ${letter}" but it's missing in output`);
+      }
+    }
+  }
+  const srcWords = [...src.words].filter((w) => w.length >= 3);
+  const overlap = srcWords.filter((w) => out.words.has(w)).length;
+  const ratio = srcWords.length > 0 ? overlap / srcWords.length : 1;
+  if (ratio < 0.6) {
+    warnings.push(`Problem ${problemNum}: low word overlap (${Math.round(ratio * 100)}%) - possible paraphrase`);
+  }
+  const srcNums = [...src.numbers].filter((n) => n.length >= 1);
+  const missingNums = srcNums.filter((n) => !out.numbers.has(n) && !aiOutput.includes(n));
+  if (missingNums.length > srcNums.length * 0.3) {
+    warnings.push(`Problem ${problemNum}: many numbers from source missing in output`);
+  }
+  return warnings;
+}
+
+/**
  * Parse optional answer key text. Format: "1. 42" or "1) 3/4" or "1: 90000" (one per line)
  */
 export function parseAnswerKey(text) {
@@ -154,75 +220,78 @@ CRITICAL RULES:
 - Keep numbers, coordinates, and variables IN the sentence where they belong. "A line passes through the points (3,-1), (5,5) and (9,m)" must stay as one coherent sentence. Do not split coordinates into separate fragments.
 - For "not equal" use \\\\ne (not \\\\neq). For repeating decimals use \\\\overline{digits}, e.g. 0.\\\\overline{123} for 0.123 repeating.`;
 
-  const userPrompt = `Extract all math problems from this raw PDF text. Handle any formatting - the document structure may be inconsistent. Copy each problem character-for-character from the source; do not introduce any typos or changes.\n\n---\n\n${text}${answerKeyHint}`;
+  const baseUserPrompt = `Extract all math problems from this raw PDF text. Handle any formatting - the document structure may be inconsistent. Copy each problem character-for-character from the source; do not introduce any typos or changes.\n\n---\n\n${text}${answerKeyHint}`;
 
-  // Pro models have no free-tier quota; use Flash first, then Pro for paid accounts
-  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro'];
-  let content = '[]';
-  let lastErr;
-  for (const model of models) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: userPrompt,
-          config: {
-            systemInstruction: systemPrompt,
-            temperature: 0,
-            responseMimeType: 'application/json',
-          },
-        });
-        content = (response?.text || '').trim() || '[]';
-        lastErr = null;
-        break;
-      } catch (err) {
-        lastErr = err;
-        const errStr = String(err?.message || err?.toString?.() || err);
-        const is404 = /NOT_FOUND|404|not found/i.test(errStr);
-        const is429 = /RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr);
-        if (is404) break; // try next model
-        if (is429 && attempt >= 2) break; // quota exceeded, try next model
-        const retryDelay = is429 ? 60000 : 3000;
-        if (attempt < 2) {
-          await new Promise((r) => setTimeout(r, retryDelay));
-        } else {
-          throw err;
+  const callAI = async (prompt) => {
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro'];
+    let out = '[]';
+    let lastErr;
+    for (const model of models) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: prompt,
+            config: { systemInstruction: systemPrompt, temperature: 0, responseMimeType: 'application/json' },
+          });
+          out = (response?.text || '').trim() || '[]';
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          const errStr = String(err?.message || err?.toString?.() || err);
+          const is404 = /NOT_FOUND|404|not found/i.test(errStr);
+          const is429 = /RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr);
+          if (is404) break;
+          if (is429 && attempt >= 2) break;
+          await new Promise((r) => setTimeout(r, is429 ? 60000 : 3000));
+          if (attempt >= 2) throw err;
         }
       }
+      if (!lastErr) break;
+      const tryNext = /NOT_FOUND|404|RESOURCE_EXHAUSTED|quota|429/i.test(String(lastErr?.message || lastErr || ''));
+      if (!tryNext) throw lastErr;
     }
-    if (!lastErr) break;
-    const errStr2 = String(lastErr?.message || lastErr || '');
-    const tryNext = /NOT_FOUND|404|not found|RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr2);
-    if (lastErr && !tryNext) throw lastErr;
-  }
-  if (lastErr) throw lastErr;
+    if (lastErr) throw lastErr;
+    return out;
+  };
 
-  let arr;
-  try {
-    let jsonStr = content.replace(/^```json?\s*|\s*```$/g, '').trim();
+  const parseContentToResults = (rawContent) => {
+    let jsonStr = rawContent.replace(/^```json?\s*|\s*```$/g, '').trim();
     const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
     if (arrayMatch) jsonStr = arrayMatch[0];
-    // Fix LaTeX backslashes that break JSON parsing (AI often outputs \sqrt, \frac, \usepackage etc.)
-    // 1. \u not followed by 4 hex digits (e.g. \usepackage, \unit) -> \\u
     jsonStr = jsonStr.replace(/\\u(?![0-9a-fA-F]{4})/g, '\\\\u');
-    // 2. \s, \c, \sqrt etc. - invalid single-char escapes -> \\X (valid: \" \\ \/ \b \f \n \r \t \uXXXX)
     jsonStr = jsonStr.replace(/\\([^"\\/bfnrtu])/g, '\\\\$1');
     try {
-      arr = JSON.parse(jsonStr);
-    } catch (parseErr) {
-      // Fallback: use jsonrepair for edge cases (trailing backslash, other bad escapes)
+      var arr = JSON.parse(jsonStr);
+    } catch {
       jsonStr = jsonrepair(jsonStr);
       arr = JSON.parse(jsonStr);
     }
     if (!Array.isArray(arr)) arr = [arr];
-  } catch (err) {
-    throw new Error(`AI returned invalid JSON for batch. ${err.message}`);
-  }
+    return arr;
+  };
 
-  const results = [];
-  const batchErrors = [];
-  const items = Array.isArray(arr) ? arr : [arr];
-  for (let i = 0; i < items.length; i++) {
+  const sourceProblems = splitIntoProblems(text);
+  const MAX_CORRECTIONS = 3;
+  let content = await callAI(baseUserPrompt);
+  let results = [];
+  let batchErrors = [];
+  let fidelityWarnings = [];
+
+  for (let correctionAttempt = 0; correctionAttempt <= MAX_CORRECTIONS; correctionAttempt++) {
+    let arr;
+    try {
+      arr = parseContentToResults(content);
+    } catch (err) {
+      throw new Error(`AI returned invalid JSON for batch. ${err.message}`);
+    }
+
+    results = [];
+    batchErrors = [];
+    fidelityWarnings = [];
+    const items = Array.isArray(arr) ? arr : [arr];
+    for (let i = 0; i < items.length; i++) {
     const item = items[i];
     const num = item?.number ?? i + 1;
     const answer = answerMap[num] !== undefined ? String(answerMap[num]) : (item.answer || '');
@@ -242,12 +311,38 @@ CRITICAL RULES:
     // Fix common AI mistake: "cost \7" should be "cost \$7" (literal dollar for price)
     question = question.replace(/(\b(?:cost|costs|spent)\s+)\\(\d+)/gi, '$1\\$$2');
     results.push({
+      number: num,
       question,
       answer: answerNum !== null ? answerNum : 0,
       topics,
       source: `Problem ${num}`,
     });
   }
+    if (sourceProblems.length > results.length) {
+      batchErrors.push({
+        number: 0,
+        message: `Expected ${sourceProblems.length} problems from source but AI returned ${results.length}. Some problems may be missing.`,
+      });
+    }
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const src = sourceProblems[i];
+      if (src?.raw && r) {
+        const warns = validateFidelity(src.raw, r.question, r.number);
+        for (const w of warns) fidelityWarnings.push(w);
+      }
+    }
+
+    if (fidelityWarnings.length === 0 || correctionAttempt >= MAX_CORRECTIONS) {
+      for (const w of fidelityWarnings) batchErrors.push({ number: 0, message: w });
+      break;
+    }
+
+    const correctivePrompt = `${baseUserPrompt}\n\n---\n\nCORRECTION NEEDED: Your output had these fidelity issues. Fix the indicated problems to match the source text exactly, and return the complete corrected JSON array. Keep all other problems unchanged.\n\nIssues:\n${fidelityWarnings.join('\n')}`;
+    await new Promise((r) => setTimeout(r, 2000));
+    content = await callAI(correctivePrompt);
+  }
+
   return { results, errors: batchErrors };
 }
 
