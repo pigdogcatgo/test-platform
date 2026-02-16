@@ -65,21 +65,27 @@ export function extractSourceName(text) {
 /**
  * Split text into individual problems by number pattern (1. 2. 3. ...).
  * Uses sequential numbering (1, 2, 3, ...) so answer key "1. 42" = first problem.
- * Matches "N. ", "N) ", "N: " at line start (some PDFs use ) or : in second sections).
+ * Matches "N. ", "N) ", "N: " at line start. Handles "Problem N." format and relaxed spacing.
  */
 export function splitIntoProblems(text) {
+  if (!text || typeof text !== 'string') return [];
+  // Normalize: \r\n, \r, form-feed -> \n; helps with PDF extraction quirks
+  let normalized = text.replace(/\r\n|\r|\f/g, '\n');
+  // Convert "Problem 17." or "problem 17)" at line start to "17." so main regex matches
+  normalized = normalized.replace(/(?:^|\n)\s*[Pp]roblem\s+(\d+)([\.\)\:])\s*/g, '\n$1$2 ');
   const problems = [];
-  const regex = /^\s*(\d+)[\.\)\:]\s+/gm;
+  // Match N. N) N: at line start; \s* allows "17.Question" (no space); \s* between num and delimiter for "17 ."
+  const regex = /^\s*(\d+)\s*[\.\)\:]\s*/gm;
   let match;
   let lastIndex = 0;
   let lastNum = 0;
   let seq = 0;
 
-  while ((match = regex.exec(text)) !== null) {
+  while ((match = regex.exec(normalized)) !== null) {
     const num = parseInt(match[1], 10);
     const start = match.index;
     if (lastNum > 0) {
-      const raw = text.slice(lastIndex, start).trim();
+      const raw = normalized.slice(lastIndex, start).trim();
       if (raw.length > 10) {
         seq++;
         problems.push({ number: seq, raw });
@@ -89,7 +95,7 @@ export function splitIntoProblems(text) {
     lastIndex = start;
   }
   if (lastNum > 0) {
-    const raw = text.slice(lastIndex).trim();
+    const raw = normalized.slice(lastIndex).trim();
     const footer = /Copyright\s+.*?\.\s*All rights reserved.*$/is;
     const cleaned = raw.replace(footer, '').trim();
     if (cleaned.length > 10) {
@@ -118,24 +124,29 @@ export function parseAnswerKey(text) {
   return map;
 }
 
-const BATCH_SIZE = 50; // All problems in one call (Gemini 1.5 has 1M context)
-
 /**
- * Process a batch of problems in one API call. Reduces requests from N to ceil(N/5).
- * @param {string[]} allowedTagNames - Only these tags may be used; AI must pick from this list.
+ * Process full PDF text with AI - no regex split. AI extracts problems on its own,
+ * handling inconsistent formatting (1., 17., Problem 1, etc.).
  */
-async function processBatchWithAI(batch, answerMap, allowedTagNames) {
+async function processFullTextWithAI(text, answerMap, allowedTagNames) {
   if (!ai) {
     throw new Error('GEMINI_API_KEY is required for PDF import. Get a free key at https://aistudio.google.com/app/apikey');
   }
-  const tagList = allowedTagNames.length > 0 ? allowedTagNames.join('", "') : 'Arithmetic';
-  const systemPrompt = `You are a math competition problem processor. Output a JSON array with one object per problem. Each: { "number": N, "questionLatex": "LaTeX with $...$ and $$...$$", "topics": ["tag1", "tag2"], "answer": "numeric" }. For "topics" use an array of one or more tags from: ${tagList}. Use multiple tags when a problem fits multiple categories (e.g. geometric probability: ["Geometry", "Probability"]). Only use listed tags. In questionLatex JSON strings, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly. Preserve problem text; only convert math to LaTeX. Use the provided answer when given. Return exactly ${batch.length} objects in order.`;
+  const tagList = allowedTagNames.length > 0 ? allowedTagNames.map(t => `"${t}"`).join(', ') : '"Arithmetic"';
+  const answerKeyHint = Object.keys(answerMap).length > 0
+    ? `\n\nAnswer key (use these when the problem number matches):\n${Object.entries(answerMap).map(([n, a]) => `${n}. ${a}`).join('\n')}`
+    : '';
 
-  const parts = batch.map((p) => {
-    const ans = answerMap[p.number];
-    return `Problem ${p.number}:\n${p.raw}\n${ans !== undefined ? `Answer: ${ans}` : 'Solve and provide answer.'}`;
-  });
-  const userPrompt = parts.join('\n\n---\n\n');
+  const systemPrompt = `You are a math competition problem processor. You will receive raw text extracted from a PDF. The formatting is often inconsistent: problems may be numbered as "1.", "17.", "Problem 1", "1) ", with varying spacing, underscores for answer blanks, page breaks, etc. Your job is to:
+1. Identify and extract ALL math problems from the text
+2. For each problem: convert to LaTeX (use $...$ and $$...$$), assign topics, and solve for the answer
+3. Return a JSON array of objects: { "number": N, "questionLatex": "...", "topics": ["tag1", "tag2"], "answer": "numeric" }
+4. Use "number" as the problem order (1, 2, 3, ...) based on appearance in the document
+5. For "topics" use only from: [${tagList}]
+6. In questionLatex, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly
+7. Solve each problem and provide the numeric answer. If an answer key is provided, use those answers for matching problem numbers.`;
+
+  const userPrompt = `Extract all math problems from this raw PDF text. Handle any formatting - the document structure may be inconsistent.\n\n---\n\n${text}${answerKeyHint}`;
 
   const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
   let content = '[]';
@@ -200,24 +211,27 @@ async function processBatchWithAI(batch, answerMap, allowedTagNames) {
 
   const results = [];
   const batchErrors = [];
-  for (let i = 0; i < batch.length; i++) {
-    const prob = batch[i];
-    const item = arr[i] || arr.find((x) => x.number === prob.number) || {};
-    const answer = answerMap[prob.number] !== undefined ? String(answerMap[prob.number]) : (item.answer || '');
+  const items = Array.isArray(arr) ? arr : [arr];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const num = item?.number ?? i + 1;
+    const answer = answerMap[num] !== undefined ? String(answerMap[num]) : (item.answer || '');
     const answerNum = parseAnswerToNumber(answer);
     if (answerNum === null && answer !== '') {
-      batchErrors.push({ number: prob.number, message: `Invalid answer for problem ${prob.number}: "${answer}"` });
+      batchErrors.push({ number: num, message: `Invalid answer for problem ${num}: "${answer}"` });
       continue;
     }
     let topics = item.topics;
     if (!Array.isArray(topics)) {
       topics = item.topic ? [item.topic] : ['Arithmetic'];
     }
+    const question = (item.questionLatex || item.question || '').trim();
+    if (!question) continue;
     results.push({
-      question: item.questionLatex || prob.raw,
+      question,
       answer: answerNum !== null ? answerNum : 0,
       topics,
-      source: `Problem ${prob.number}`,
+      source: `Problem ${num}`,
     });
   }
   return { results, errors: batchErrors };
@@ -281,12 +295,14 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
 
   const sourceName = extractSourceName(text);
   const problems = splitIntoProblems(text);
-  if (problems.length === 0) {
-    throw new Error('No problems found in PDF. Expected format: "1. Question text..."');
-  }
 
-  if (!useAI && Object.keys(answerMap).length === 0) {
-    throw new Error('Answer key is required when not using AI. Paste answers in format: 1. 42, 2. 3/4, etc.');
+  if (!useAI) {
+    if (problems.length === 0) {
+      throw new Error('No problems found in PDF. Expected format: "1. Question text..."');
+    }
+    if (Object.keys(answerMap).length === 0) {
+      throw new Error('Answer key is required when not using AI. Paste answers in format: 1. 42, 2. 3/4, etc.');
+    }
   }
 
   const client = await pool.connect();
@@ -308,13 +324,10 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
     let imported = 0;
 
     if (useAI) {
-      for (let i = 0; i < problems.length; i += BATCH_SIZE) {
-        const batch = problems.slice(i, i + BATCH_SIZE);
-        if (i > 0) await new Promise((r) => setTimeout(r, 7000));
-        try {
-          const { results: processedList, errors: batchErrors } = await processBatchWithAI(batch, answerMap, allowedTagNames);
-          for (const err of batchErrors) errors.push(err.message);
-          for (const processed of processedList) {
+      try {
+        const { results: processedList, errors: batchErrors } = await processFullTextWithAI(text, answerMap, allowedTagNames);
+        for (const err of batchErrors) errors.push(err.message);
+        for (const processed of processedList) {
             const tagNames = (processed.topics || [defaultTag])
               .map((t) => (typeof t === 'string' ? t : String(t)).trim())
               .filter((t) => allowedTagNames.includes(t));
@@ -336,9 +349,8 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
             imported++;
           }
         } catch (err) {
-          for (const p of batch) errors.push(`Problem ${p.number}: ${err.message}`);
+          errors.push(err.message || 'AI processing failed');
         }
-      }
     } else {
       for (const prob of problems) {
         try {

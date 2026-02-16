@@ -428,6 +428,66 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   }
 });
 
+// Bulk move and bulk delete must be defined BEFORE /:id routes (otherwise "bulk" matches as :id)
+app.put('/api/problems/bulk-move', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  const { ids, folder_id: folderId } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids must be a non-empty array' });
+  }
+  const validIds = ids.map(id => parseInt(id, 10)).filter(n => Number.isInteger(n) && n > 0);
+  if (validIds.length === 0) {
+    return res.status(400).json({ error: 'No valid problem ids' });
+  }
+  const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
+  try {
+    const result = await pool.query(
+      'UPDATE problems SET folder_id = $1 WHERE id = ANY($2) RETURNING id',
+      [fid, validIds]
+    );
+    res.json({ updated: result.rowCount });
+  } catch (error) {
+    console.error('Bulk move error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
+app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  const ids = req.body?.ids ?? req.query?.ids;
+  const idArray = Array.isArray(ids) ? ids : (typeof ids === 'string' ? ids.split(',').map(s => s.trim()) : []);
+  if (idArray.length === 0) {
+    return res.status(400).json({ error: 'ids must be a non-empty array' });
+  }
+  const validIds = idArray.map(id => parseInt(id, 10)).filter(n => Number.isInteger(n) && n > 0);
+  if (validIds.length === 0) {
+    return res.status(400).json({ error: 'No valid problem ids' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const id of validIds) {
+      await client.query(
+        'UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids)',
+        [id]
+      );
+    }
+    const del = await client.query('DELETE FROM problems WHERE id = ANY($1) RETURNING id', [validIds]);
+    await client.query('COMMIT');
+    res.json({ deleted: del.rowCount });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Bulk delete error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
 // Update problem (admin only)
 app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
@@ -490,67 +550,6 @@ app.delete('/api/problems/:id', authenticateToken, async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Delete problem error:', error);
-    res.status(500).json({ error: error.message || 'Server error' });
-  } finally {
-    client.release();
-  }
-});
-
-// Bulk move problems to folder (admin only)
-app.put('/api/problems/bulk-move', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-  const { ids, folder_id: folderId } = req.body;
-  if (!Array.isArray(ids) || ids.length === 0) {
-    return res.status(400).json({ error: 'ids must be a non-empty array' });
-  }
-  const validIds = ids.map(id => parseInt(id, 10)).filter(n => Number.isInteger(n) && n > 0);
-  if (validIds.length === 0) {
-    return res.status(400).json({ error: 'No valid problem ids' });
-  }
-  const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
-  try {
-    const result = await pool.query(
-      'UPDATE problems SET folder_id = $1 WHERE id = ANY($2) RETURNING id',
-      [fid, validIds]
-    );
-    res.json({ updated: result.rowCount });
-  } catch (error) {
-    console.error('Bulk move error:', error);
-    res.status(500).json({ error: error.message || 'Server error' });
-  }
-});
-
-// Bulk delete problems (admin only)
-app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-  const ids = req.body?.ids ?? req.query?.ids;
-  const idArray = Array.isArray(ids) ? ids : (typeof ids === 'string' ? ids.split(',').map(s => s.trim()) : []);
-  if (idArray.length === 0) {
-    return res.status(400).json({ error: 'ids must be a non-empty array' });
-  }
-  const validIds = idArray.map(id => parseInt(id, 10)).filter(n => Number.isInteger(n) && n > 0);
-  if (validIds.length === 0) {
-    return res.status(400).json({ error: 'No valid problem ids' });
-  }
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    for (const id of validIds) {
-      await client.query(
-        'UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids)',
-        [id]
-      );
-    }
-    const del = await client.query('DELETE FROM problems WHERE id = ANY($1) RETURNING id', [validIds]);
-    await client.query('COMMIT');
-    res.json({ deleted: del.rowCount });
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    console.error('Bulk delete error:', error);
     res.status(500).json({ error: error.message || 'Server error' });
   } finally {
     client.release();
