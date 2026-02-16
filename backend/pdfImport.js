@@ -139,12 +139,17 @@ async function processFullTextWithAI(text, answerMap, allowedTagNames) {
 
   const systemPrompt = `You are a math competition problem processor. You will receive raw text extracted from a PDF. The formatting is often inconsistent: problems may be numbered as "1.", "17.", "Problem 1", "1) ", with varying spacing, underscores for answer blanks, page breaks, etc. Your job is to:
 1. Identify and extract ALL math problems from the text
-2. For each problem: convert to LaTeX (use $...$ and $$...$$), assign topics, and solve for the answer
+2. For each problem: convert to LaTeX (use $...$ and $$...$$ for math only), assign topics, and solve for the answer
 3. Return a JSON array of objects: { "number": N, "questionLatex": "...", "topics": ["tag1", "tag2"], "answer": "numeric" }
 4. Use "number" as the problem order (1, 2, 3, ...) based on appearance in the document
 5. For "topics" use only from: [${tagList}]
 6. In questionLatex, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly
-7. Solve each problem and provide the numeric answer. If an answer key is provided, use those answers for matching problem numbers.`;
+7. Solve each problem and provide the numeric answer. If an answer key is provided, use those answers for matching problem numbers.
+
+CRITICAL RULES:
+- Write each problem EXACTLY word for word, character for character. Do not paraphrase, simplify, or "fix" the wording. Preserve the original problem text verbatim—changing even one word can make it a different problem.
+- Dollar sign ($) starts LaTeX math mode. If the problem contains a literal dollar sign (e.g. "$7" for price, "costs $10"), you MUST escape it as \\\\$ so it displays correctly. Never use unescaped $ outside of math delimiters.
+- For "not equal" use \\\\ne (not \\\\neq). For repeating decimals use \\\\overline{digits}, e.g. 0.\\\\overline{123} for 0.123 repeating.`;
 
   const userPrompt = `Extract all math problems from this raw PDF text. Handle any formatting - the document structure may be inconsistent.\n\n---\n\n${text}${answerKeyHint}`;
 
@@ -225,8 +230,10 @@ async function processFullTextWithAI(text, answerMap, allowedTagNames) {
     if (!Array.isArray(topics)) {
       topics = item.topic ? [item.topic] : ['Arithmetic'];
     }
-    const question = (item.questionLatex || item.question || '').trim();
+    let question = (item.questionLatex || item.question || '').trim();
     if (!question) continue;
+    // Fix LaTeX commands that don't render in KaTeX: \neq -> \ne
+    question = question.replace(/\\neq\b/g, '\\ne');
     results.push({
       question,
       answer: answerNum !== null ? answerNum : 0,

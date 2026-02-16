@@ -3,7 +3,7 @@ import axios from 'axios';
 import { API_URL } from './config';
 import './index.css';
 import 'katex/dist/katex.min.css';
-import { InlineMath, BlockMath } from 'react-katex';
+import katex from 'katex';
 
 // Remember URLs that failed so we never re-request (avoids remount/Strict Mode retries and ERR_BLOCKED loops)
 const failedImageUrls = new Set();
@@ -396,37 +396,34 @@ const App = () => {
 
   const RenderLatex = ({ text }) => {
     if (!text) return null;
-    
+    const fixLatex = (math) => (math || '').replace(/\\neq\b/g, '\\ne');
+    const renderMath = (math, display, key) => {
+      try {
+        const fixed = fixLatex(math);
+        const html = katex.renderToString(fixed, { displayMode: display, throwOnError: false });
+        return <span key={key} dangerouslySetInnerHTML={{ __html: html }} />;
+      } catch {
+        return <span className="text-red-600">[{math}]</span>;
+      }
+    };
     const parts = [];
     let lastIndex = 0;
-    
-    // Match both inline $...$ and display $$...$$ LaTeX
     const regex = /\$\$(.+?)\$\$|\$(.+?)\$/g;
     let match;
-    
     while ((match = regex.exec(text)) !== null) {
-      // Add text before the match
       if (match.index > lastIndex) {
         parts.push(text.substring(lastIndex, match.index));
       }
-      
-      // Add the LaTeX part
       if (match[1]) {
-        // Display math $$...$$
-        parts.push(<BlockMath key={match.index} math={match[1]} />);
+        parts.push(renderMath(match[1], true, match.index));
       } else if (match[2]) {
-        // Inline math $...$
-        parts.push(<InlineMath key={match.index} math={match[2]} />);
+        parts.push(renderMath(match[2], false, match.index));
       }
-      
       lastIndex = regex.lastIndex;
     }
-    
-    // Add remaining text
     if (lastIndex < text.length) {
       parts.push(text.substring(lastIndex));
     }
-    
     return <>{parts}</>;
   };
 
