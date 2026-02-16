@@ -141,7 +141,8 @@ const App = () => {
   const [editingFolderId, setEditingFolderId] = useState(null);
   const [editingFolderName, setEditingFolderName] = useState('');
   const [newTagName, setNewTagName] = useState('');
-  const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names that are expanded
+  const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names (create-test)
+  const [adminExpandedFolders, setAdminExpandedFolders] = useState(() => new Set()); // folder IDs expanded in admin (empty = all collapsed)
   const [pdfImportFile, setPdfImportFile] = useState(null);
   const [pdfImportAnswerKey, setPdfImportAnswerKey] = useState('');
   const [pdfImportLoading, setPdfImportLoading] = useState(false);
@@ -581,6 +582,7 @@ const App = () => {
     if (!confirm('Delete this folder? Problems will move to Uncategorized.')) return;
     try {
       await api.delete(`/api/folders/${id}`);
+      setAdminExpandedFolders(prev => { const next = new Set(prev); next.delete(id); return next; });
       loadUserData();
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting folder');
@@ -640,7 +642,7 @@ const App = () => {
       formData.append('useAI', pdfImportUseAI ? 'true' : 'false');
       const { data } = await api.post('/api/import-pdf', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 300000, // 5 min (rate-limited for Gemini free tier)
+        timeout: 300000, // 5 min (Render free tier limit)
       });
       setPdfImportResult(data);
       setPdfImportFile(null);
@@ -1820,8 +1822,6 @@ if (view === 'admin-dashboard' && user) {
           </div>
         )}
 
-        <div className="bg-white rounded-xl shadow overflow-x-auto"></div>
-
         {selectedProblemIds.length > 0 && (
           <div className="bg-[#007f8f]/10 border border-[#007f8f]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
             <span className="font-medium text-gray-800">{selectedProblemIds.length} selected</span>
@@ -1861,81 +1861,150 @@ if (view === 'admin-dashboard' && user) {
           </div>
         )}
 
-        <div className="bg-white rounded-xl shadow overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-left">
-              <tr>
-                <th className="px-4 py-3 w-10">
-                  <input
-                    type="checkbox"
-                    checked={problems.length > 0 && selectedProblemIds.length === problems.length}
-                    ref={el => { if (el) el.indeterminate = selectedProblemIds.length > 0 && selectedProblemIds.length < problems.length; }}
-                    onChange={(e) => setSelectedProblemIds(e.target.checked ? problems.map(p => p.id) : [])}
-                    className="rounded"
-                  />
-                </th>
-                <th className="px-4 py-3">Question</th>
-                <th className="px-4 py-3">Answer</th>
-                <th className="px-4 py-3">Folder</th>
-                <th className="px-4 py-3">Tags</th>
-                <th className="px-4 py-3">Source</th>
-                <th className="px-4 py-3">ELO</th>
-                <th className="px-4 py-3">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {problems.map(p => (
-                <tr key={p.id} className="border-t">
-                  <td className="px-4 py-3">
-                    <input
-                      type="checkbox"
-                      checked={selectedProblemIds.includes(p.id)}
-                      onChange={(e) =>
-                        setSelectedProblemIds(prev =>
-                          e.target.checked ? [...prev, p.id] : prev.filter(id => id !== p.id)
-                        )
-                      }
-                      className="rounded"
-                      onClick={(ev) => ev.stopPropagation()}
-                    />
-                  </td>
-                  <td className="px-4 py-3 max-w-md">
-                    <div>
-                      <RenderLatex text={p.question} />
-                      {p.image_url && (
-                        <img
-                          src={API_URL + p.image_url}
-                          alt=""
-                          className="mt-2 max-h-20 rounded border object-contain"
-                        />
-                      )}
+        <div className="space-y-4">
+          {(() => {
+            const UNCategorized = 'uncategorized';
+            const byFolder = {};
+            for (const f of folders) {
+              byFolder[f.id] = { name: f.name, problems: [] };
+            }
+            byFolder[UNCategorized] = { name: 'Uncategorized', problems: [] };
+            for (const p of problems) {
+              const fid = p.folder_id ?? UNCategorized;
+              if (!byFolder[fid]) byFolder[fid] = { name: p.folder_name || 'Uncategorized', problems: [] };
+              byFolder[fid].problems.push(p);
+            }
+            const folderIds = [...folders].sort((a, b) => a.name.localeCompare(b.name)).map(f => f.id);
+            const orderedFolders = [
+              ...folderIds,
+              ...(byFolder[UNCategorized]?.problems?.length ? [UNCategorized] : [])
+            ];
+            if (orderedFolders.length === 0 && problems.length === 0) {
+              return (
+                <div className="bg-white rounded-xl shadow p-8 text-center text-gray-500">
+                  No folders or problems yet. Add a folder above or import from PDF.
+                </div>
+              );
+            }
+            return orderedFolders.map(fid => {
+              const { name, problems: folderProbs } = byFolder[fid] || { name: 'Uncategorized', problems: [] };
+              const expandKey = fid === UNCategorized ? -1 : fid;
+              const isExpanded = adminExpandedFolders.has(expandKey);
+              const toggle = () => setAdminExpandedFolders(prev => {
+                const next = new Set(prev);
+                if (next.has(expandKey)) next.delete(expandKey);
+                else next.add(expandKey);
+                return next;
+              });
+              return (
+                <div key={fid} className="bg-white rounded-xl shadow overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
+                    <button
+                      type="button"
+                      onClick={toggle}
+                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#007f8f]"
+                    >
+                      <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
+                      <span>{name}</span>
+                      <span className="text-sm font-normal text-gray-500">({folderProbs.length} problems)</span>
+                    </button>
+                    {fid !== UNCategorized && (
+                      <button
+                        type="button"
+                        onClick={() => deleteFolder(fid)}
+                        className="text-red-600 hover:underline text-sm font-medium"
+                      >
+                        Delete folder
+                      </button>
+                    )}
+                  </div>
+                  {isExpanded && (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 text-left">
+                          <tr>
+                            <th className="px-4 py-3 w-10">
+                              <input
+                                type="checkbox"
+                                checked={folderProbs.length > 0 && folderProbs.every(p => selectedProblemIds.includes(p.id))}
+                                ref={el => {
+                                  if (el) {
+                                    const some = folderProbs.some(p => selectedProblemIds.includes(p.id));
+                                    el.indeterminate = some && !folderProbs.every(p => selectedProblemIds.includes(p.id));
+                                  }
+                                }}
+                                onChange={(e) => {
+                                  const ids = folderProbs.map(p => p.id);
+                                  setSelectedProblemIds(prev =>
+                                    e.target.checked ? [...new Set([...prev, ...ids])] : prev.filter(id => !ids.includes(id))
+                                  );
+                                }}
+                                className="rounded"
+                                onClick={ev => ev.stopPropagation()}
+                              />
+                            </th>
+                            <th className="px-4 py-3">Question</th>
+                            <th className="px-4 py-3">Answer</th>
+                            <th className="px-4 py-3">Tags</th>
+                            <th className="px-4 py-3">Source</th>
+                            <th className="px-4 py-3">ELO</th>
+                            <th className="px-4 py-3">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {folderProbs.map(p => (
+                            <tr key={p.id} className="border-t">
+                              <td className="px-4 py-3">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedProblemIds.includes(p.id)}
+                                  onChange={(e) =>
+                                    setSelectedProblemIds(prev =>
+                                      e.target.checked ? [...prev, p.id] : prev.filter(id => id !== p.id)
+                                    )
+                                  }
+                                  className="rounded"
+                                  onClick={ev => ev.stopPropagation()}
+                                />
+                              </td>
+                              <td className="px-4 py-3 max-w-md">
+                                <div>
+                                  <RenderLatex text={p.question} />
+                                  {p.image_url && (
+                                    <ProblemImage url={p.image_url} token={token} />
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">{p.answer}</td>
+                              <td className="px-4 py-3">{p.tag_names?.length ? p.tag_names.join(', ') : '—'}</td>
+                              <td className="px-4 py-3">{p.source ?? '—'}</td>
+                              <td className="px-4 py-3">{p.elo}</td>
+                              <td className="px-4 py-3 space-x-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '', folder_id: p.folder_id ?? null, tag_ids: p.tag_ids ?? [] })}
+                                  className="text-[#007f8f] hover:underline font-medium"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setProblemToDelete(p.id)}
+                                  className="text-red-600 hover:underline font-medium"
+                                >
+                                  Delete
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
-                  </td>
-                  <td className="px-4 py-3">{p.answer}</td>
-                  <td className="px-4 py-3">{p.folder_name ?? '—'}</td>
-                  <td className="px-4 py-3">{p.tag_names?.length ? p.tag_names.join(', ') : '—'}</td>
-                  <td className="px-4 py-3">{p.source ?? '—'}</td>
-                  <td className="px-4 py-3">{p.elo}</td>
-                  <td className="px-4 py-3 space-x-2">
-                    <button
-                      type="button"
-                      onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '', folder_id: p.folder_id ?? null, tag_ids: p.tag_ids ?? [] })}
-                      className="text-[#007f8f] hover:underline font-medium"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setProblemToDelete(p.id)}
-                      className="text-red-600 hover:underline font-medium"
-                    >
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  )}
+                </div>
+              );
+            });
+          })()}
         </div>
       </div>
     </div>

@@ -244,7 +244,7 @@ CRITICAL RULES:
           const is429 = /RESOURCE_EXHAUSTED|quota|429|rate.?limit/i.test(errStr);
           if (is404) break;
           if (is429 && attempt >= 2) break;
-          await new Promise((r) => setTimeout(r, is429 ? 60000 : 3000));
+          await new Promise((r) => setTimeout(r, is429 ? 20000 : 2000));
           if (attempt >= 2) throw err;
         }
       }
@@ -273,7 +273,7 @@ CRITICAL RULES:
   };
 
   const sourceProblems = splitIntoProblems(text);
-  const MAX_CORRECTIONS = 3;
+  const MAX_CORRECTIONS = 1; // Keep within Render free tier 5-min limit
   let content = await callAI(baseUserPrompt);
   let results = [];
   let batchErrors = [];
@@ -339,7 +339,7 @@ CRITICAL RULES:
     }
 
     const correctivePrompt = `${baseUserPrompt}\n\n---\n\nCORRECTION NEEDED: Your output had these fidelity issues. Fix the indicated problems to match the source text exactly, and return the complete corrected JSON array. Keep all other problems unchanged.\n\nIssues:\n${fidelityWarnings.join('\n')}`;
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 500));
     content = await callAI(correctivePrompt);
   }
 
