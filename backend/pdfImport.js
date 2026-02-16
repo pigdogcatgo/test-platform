@@ -137,21 +137,24 @@ async function processFullTextWithAI(text, answerMap, allowedTagNames) {
     ? `\n\nAnswer key (use these when the problem number matches):\n${Object.entries(answerMap).map(([n, a]) => `${n}. ${a}`).join('\n')}`
     : '';
 
-  const systemPrompt = `You are a math competition problem processor. You will receive raw text extracted from a PDF. The formatting is often inconsistent: problems may be numbered as "1.", "17.", "Problem 1", "1) ", with varying spacing, underscores for answer blanks, page breaks, etc. Your job is to:
-1. Identify and extract ALL math problems from the text
+  const systemPrompt = `You are a math competition problem processor. You will receive raw text from the FIRST section of a PDF only (e.g. Sprint Round). Your job is to:
+1. Extract EVERY problem from this section—Sprint Round has 30 problems. Count them. Do not skip any.
 2. For each problem: convert to LaTeX (use $...$ and $$...$$ for math only), assign topics, and solve for the answer
 3. Return a JSON array of objects: { "number": N, "questionLatex": "...", "topics": ["tag1", "tag2"], "answer": "numeric" }
-4. Use "number" as the problem order (1, 2, 3, ...) based on appearance in the document
+4. Use "number" as 1, 2, 3, ... in order. Do not include problems from other sections (Target, Countdown, or a different competition).
 5. For "topics" use only from: [${tagList}]
 6. In questionLatex, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly
 7. Solve each problem and provide the numeric answer. If an answer key is provided, use those answers for matching problem numbers.
 
 CRITICAL RULES:
 - Write each problem EXACTLY word for word, character for character. Do not paraphrase, simplify, or "fix" the wording. Preserve the original problem text verbatim—changing even one word can make it a different problem.
-- Dollar sign ($) starts LaTeX math mode. If the problem contains a literal dollar sign (e.g. "$7" for price, "costs $10"), you MUST escape it as \\\\$ so it displays correctly. Never use unescaped $ outside of math delimiters.
+- ZERO TYPOS. No approximations, no "close enough" substitutions. One wrong character invalidates the problem. Proofread each problem against the source text before including it.
+- Dollar sign ($) starts LaTeX math mode. For a literal dollar (price), use \\\\$ so it displays as $. Example: "cost \$7" → write "cost \\\\$7" in the JSON. NEVER write \\\\7 or \\\\8—that is wrong. The output must be \\\\$ followed by the number.
+- Never change variable names, labels, or circle names. If the problem says "Circle D" or "centers A and D", do NOT write "Circle B". If it says "m³/n³ = 3³/4³", do NOT change to "m/n = 0" or any other form.
+- Keep numbers, coordinates, and variables IN the sentence where they belong. "A line passes through the points (3,-1), (5,5) and (9,m)" must stay as one coherent sentence. Do not split coordinates into separate fragments.
 - For "not equal" use \\\\ne (not \\\\neq). For repeating decimals use \\\\overline{digits}, e.g. 0.\\\\overline{123} for 0.123 repeating.`;
 
-  const userPrompt = `Extract all math problems from this raw PDF text. Handle any formatting - the document structure may be inconsistent.\n\n---\n\n${text}${answerKeyHint}`;
+  const userPrompt = `Extract all math problems from this raw PDF text. Handle any formatting - the document structure may be inconsistent. Copy each problem character-for-character from the source; do not introduce any typos or changes.\n\n---\n\n${text}${answerKeyHint}`;
 
   const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
   let content = '[]';
@@ -164,7 +167,7 @@ CRITICAL RULES:
           contents: userPrompt,
           config: {
             systemInstruction: systemPrompt,
-            temperature: 0.2,
+            temperature: 0,
             responseMimeType: 'application/json',
           },
         });
@@ -232,8 +235,10 @@ CRITICAL RULES:
     }
     let question = (item.questionLatex || item.question || '').trim();
     if (!question) continue;
-    // Fix LaTeX commands that don't render in KaTeX: \neq -> \ne
+    // Fix LaTeX: \neq -> \ne
     question = question.replace(/\\neq\b/g, '\\ne');
+    // Fix common AI mistake: "cost \7" should be "cost \$7" (literal dollar for price)
+    question = question.replace(/(\b(?:cost|costs|spent)\s+)\\(\d+)/gi, '$1\\$$2');
     results.push({
       question,
       answer: answerNum !== null ? answerNum : 0,
@@ -295,10 +300,14 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
   const errors = [];
   const answerMap = parseAnswerKey(answerKeyText);
 
-  const text = await extractTextFromPdf(pdfBuffer);
+  let text = await extractTextFromPdf(pdfBuffer);
   if (!text || text.length < 100) {
     throw new Error('Could not extract meaningful text from PDF. The file may be scanned/image-based.');
   }
+  // Only use the FIRST competition section. Stop at Target Round, Countdown, or a new year's competition.
+  const nextSection = /(?:Target Round|Countdown Round|Team Round|\n\d{4}\s*\n\s*Mock)/i;
+  const idx = text.search(nextSection);
+  if (idx > 500) text = text.slice(0, idx);
 
   const sourceName = extractSourceName(text);
   const problems = splitIntoProblems(text);
