@@ -149,14 +149,14 @@ async function processFullTextWithAI(text, answerMap, allowedTagNames) {
 CRITICAL RULES:
 - Write each problem EXACTLY word for word, character for character. Do not paraphrase, simplify, or "fix" the wording. Preserve the original problem text verbatim—changing even one word can make it a different problem.
 - ZERO TYPOS. No approximations, no "close enough" substitutions. One wrong character invalidates the problem. Proofread each problem against the source text before including it.
-- Dollar sign ($) starts LaTeX math mode. For a literal dollar (price), use \\\\$ so it displays as $. Example: "cost \$7" → write "cost \\\\$7" in the JSON. NEVER write \\\\7 or \\\\8—that is wrong. The output must be \\\\$ followed by the number.
+- Dollar sign ($) starts LaTeX math mode. To display a literal dollar sign (e.g. for prices), the LaTeX command is \\\\$ — so "cost \$7" in LaTeX. In your JSON output, write "cost \\\\$7". NEVER write \\\\7 or \\\\8—that is wrong. The command is always \\\\$ followed by the number.
 - Never change variable names, labels, or circle names. If the problem says "Circle D" or "centers A and D", do NOT write "Circle B". If it says "m³/n³ = 3³/4³", do NOT change to "m/n = 0" or any other form.
 - Keep numbers, coordinates, and variables IN the sentence where they belong. "A line passes through the points (3,-1), (5,5) and (9,m)" must stay as one coherent sentence. Do not split coordinates into separate fragments.
 - For "not equal" use \\\\ne (not \\\\neq). For repeating decimals use \\\\overline{digits}, e.g. 0.\\\\overline{123} for 0.123 repeating.`;
 
   const userPrompt = `Extract all math problems from this raw PDF text. Handle any formatting - the document structure may be inconsistent. Copy each problem character-for-character from the source; do not introduce any typos or changes.\n\n---\n\n${text}${answerKeyHint}`;
 
-  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  const models = ['gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'];
   let content = '[]';
   let lastErr;
   for (const model of models) {
