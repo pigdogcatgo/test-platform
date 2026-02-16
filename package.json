@@ -1,0 +1,11 @@
+{
+  "name": "test-platform",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:pdf": "node e2e-pdf-import.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

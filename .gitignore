@@ -3,3 +3,5 @@ node_modules/
 *.log
 .DS_Store
 backend/uploads/
+backend/test-import.pdf
+e2e-login-failed.png

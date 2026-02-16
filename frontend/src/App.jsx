@@ -629,8 +629,8 @@ const App = () => {
       alert('Select a PDF file first');
       return;
     }
-    if (!pdfImportUseAI && !pdfImportAnswerKey.trim()) {
-      alert('Answer key is required when not using AI. Paste answers (one per line): 1. 42, 2. 3/4, etc.');
+    if (!pdfImportAnswerKey.trim()) {
+      alert('Answer key is required. Paste answers (one per line): 1. 42, 2. 3/4, etc.');
       return;
     }
     setPdfImportLoading(true);
@@ -1611,7 +1611,7 @@ if (view === 'admin-dashboard' && user) {
             </button>
           </div>
           <div className="mb-2">
-            <label className="block text-xs text-gray-500 mb-1">Answer key {pdfImportUseAI ? '(optional with AI)' : '(required — one per line)'} — format: 1. 42, 2. 3/4, 3. 90000</label>
+            <label className="block text-xs text-gray-500 mb-1">Answer key (required — one per line) — format: 1. 42, 2. 3/4, 3. 90000</label>
             <textarea
               value={pdfImportAnswerKey}
               onChange={(e) => setPdfImportAnswerKey(e.target.value)}
