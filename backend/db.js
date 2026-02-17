@@ -84,6 +84,7 @@ export async function initDatabase() {
           PRIMARY KEY (user_id, tag_id)
         )
       `);
+      await client.query('ALTER TABLE student_tag_elo ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0');
       console.log('student_tag_elo table ensured');
     } catch (migErr) {
       console.warn('Migration student_tag_elo (non-fatal):', migErr.message);

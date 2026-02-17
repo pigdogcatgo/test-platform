@@ -155,8 +155,9 @@ const App = () => {
   const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudent, setSelectedStudent] = useState(null);
+  const [leaderboardSortBy, setLeaderboardSortBy] = useState('cumulative'); // 'cumulative' | 'elo'
 
-  // Create axios instance with useMemo to prevent recreation on every render
+  // Create axios instance with useMemo with useMemo to prevent recreation on every render
   const api = useMemo(() => {
     return axios.create({
       baseURL: API_URL,
@@ -1171,38 +1172,63 @@ if (view === 'teacher-dashboard' && user) {
             )}
           </div>
 
-          {/* Student leaderboard (ranked by cumulative score) */}
+          {/* Student leaderboard */}
           <div>
             <h2 className="text-lg font-semibold mb-4 text-gray-800">
               Student Leaderboard
             </h2>
-            <p className="text-sm text-gray-500 mb-3">
-              Ranked by cumulative score. Click a name to view their profile. Only students you register can see your tests.
-            </p>
+            <div className="flex flex-wrap items-center gap-4 mb-3">
+              <p className="text-sm text-gray-500">
+                Click a name to view their profile. Only students you register can see your tests.
+              </p>
+              <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
+                <span className="text-sm text-gray-600">Rank by:</span>
+                <select
+                  value={leaderboardSortBy}
+                  onChange={(e) => setLeaderboardSortBy(e.target.value)}
+                  className="text-sm border border-gray-200 rounded px-2 py-1 bg-white"
+                >
+                  <option value="cumulative">Cumulative score</option>
+                  <option value="elo">ELO</option>
+                </select>
+              </div>
+            </div>
             <div className="bg-white rounded-xl shadow divide-y">
               {students.length === 0 ? (
                 <div className="p-6 text-center text-gray-500 text-sm">
                   No students yet. <button type="button" onClick={() => setView('register-students')} className="text-[#007f8f] font-medium hover:underline">Register students</button> to get started.
                 </div>
               ) : (
-                students.map((s, i) => (
-                  <div key={s.id} className="p-4">
-                    <div className="flex justify-between items-center">
-                      <button
-                        type="button"
-                        onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                        className="font-medium text-left hover:text-[#007f8f] hover:underline"
-                      >
-                        {i + 1}. {s.username}
-                      </button>
-                      {typeof s.cumulative_score === 'number' && (
-                        <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
-                          Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
-                        </span>
-                      )}
+                [...students]
+                  .sort((a, b) => {
+                    if (leaderboardSortBy === 'elo') {
+                      return (b.elo ?? 0) - (a.elo ?? 0);
+                    }
+                    return (b.cumulative_score ?? 0) - (a.cumulative_score ?? 0);
+                  })
+                  .map((s, i) => (
+                    <div key={s.id} className="p-4">
+                      <div className="flex justify-between items-center">
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
+                          className="font-medium text-left hover:text-[#007f8f] hover:underline"
+                        >
+                          {i + 1}. {s.username}
+                        </button>
+                        <div className="flex gap-4">
+                          {typeof s.cumulative_score === 'number' && (
+                            <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
+                              Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
+                            </span>
+                          )}
+                          <span className="text-[#007f8f] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                            ELO: {s.elo}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  ))
               )}
             </div>
           </div>
@@ -1368,33 +1394,58 @@ if (view === 'register-students' && user) {
 
         <div className="bg-white rounded-xl shadow">
           <h2 className="text-base font-semibold text-gray-800 p-4 pb-2">My students</h2>
-          <p className="text-sm text-gray-500 px-4 pb-4">
-            Only these students can see and take your tests.
-          </p>
+          <div className="flex flex-wrap items-center gap-4 px-4 pb-4">
+            <p className="text-sm text-gray-500">
+              Only these students can see and take your tests.
+            </p>
+            <div className="flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-2">
+              <span className="text-sm text-gray-600">Rank by:</span>
+              <select
+                value={leaderboardSortBy}
+                onChange={(e) => setLeaderboardSortBy(e.target.value)}
+                className="text-sm border border-gray-200 rounded px-2 py-1 bg-white"
+              >
+                <option value="cumulative">Cumulative score</option>
+                <option value="elo">ELO</option>
+              </select>
+            </div>
+          </div>
           <div className="divide-y">
             {students.length === 0 ? (
               <div className="p-6 text-center text-gray-500 text-sm">
                 No students yet. Add one above.
               </div>
             ) : (
-              students.map((s, i) => (
-                <div key={s.id} className="p-4">
-                  <div className="flex justify-between items-center">
-                    <button
-                      type="button"
-                      onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                      className="font-medium text-left hover:text-[#007f8f] hover:underline"
-                    >
-                      {i + 1}. {s.username}
-                    </button>
-                    {typeof s.cumulative_score === 'number' && (
-                      <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
-                        Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
-                      </span>
-                    )}
+              [...students]
+                .sort((a, b) => {
+                  if (leaderboardSortBy === 'elo') {
+                    return (b.elo ?? 0) - (a.elo ?? 0);
+                  }
+                  return (b.cumulative_score ?? 0) - (a.cumulative_score ?? 0);
+                })
+                .map((s, i) => (
+                  <div key={s.id} className="p-4">
+                    <div className="flex justify-between items-center">
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
+                        className="font-medium text-left hover:text-[#007f8f] hover:underline"
+                      >
+                        {i + 1}. {s.username}
+                      </button>
+                      <div className="flex gap-4">
+                        {typeof s.cumulative_score === 'number' && (
+                          <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
+                            Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
+                          </span>
+                        )}
+                        <span className="text-[#007f8f] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                          ELO: {s.elo}
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              ))
+                ))
             )}
           </div>
         </div>

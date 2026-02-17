@@ -84,6 +84,11 @@ function calculateELO(playerRating, opponentRating, outcome, kFactor = 32) {
   return Math.round(playerRating + kFactor * (outcome - expectedScore));
 }
 
+// Dynamic K: higher when less data (more volatility), lower when more data (less volatility)
+function getKFactor(baseK, attempts) {
+  return baseK / Math.sqrt(1 + (attempts || 0));
+}
+
 // Routes
 
 // Teacher signup
@@ -719,9 +724,13 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     // Use snapshot ELO for grading (so all students in batch face same difficulties)
     const getProblemElo = (problem) => snapshot[problem.id] ?? problem.elo;
     
-    // Get current user ELO
-    const userResult = await client.query('SELECT elo FROM users WHERE id = $1', [req.user.id]);
+    // Get current user ELO and attempt count (for dynamic K)
+    const userResult = await client.query(
+      'SELECT u.elo, (SELECT COUNT(*)::int FROM elo_history WHERE user_id = $1) AS attempt_count FROM users u WHERE u.id = $1',
+      [req.user.id]
+    );
     const currentUserElo = userResult.rows[0].elo;
+    let userAttemptCount = userResult.rows[0].attempt_count || 0;
     
     // Grade and calculate ELO using snapshot problem ELOs
     let score = 0;
@@ -739,8 +748,11 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
       
       const problemElo = getProblemElo(problem);
       const outcome = isCorrect ? 1 : 0;
-      const tempNewUserElo = calculateELO(newUserElo, problemElo, outcome, 32);
-      const newProblemElo = calculateELO(problemElo, newUserElo, 1 - outcome, 16);
+      const userK = getKFactor(32, userAttemptCount);
+      const problemK = getKFactor(24, problem.times_used || 0);
+      const tempNewUserElo = calculateELO(newUserElo, problemElo, outcome, userK);
+      const newProblemElo = calculateELO(problemElo, newUserElo, 1 - outcome, problemK);
+      userAttemptCount++;
       
       // Update problem in DB (global difficulty still evolves)
       await client.query(
@@ -764,14 +776,16 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
       const problemTagIds = tagsByProblem[problem.id] || [];
       for (const tagId of problemTagIds) {
         const tagEloRows = await client.query(
-          'SELECT elo FROM student_tag_elo WHERE user_id = $1 AND tag_id = $2',
+          'SELECT elo, COALESCE(attempt_count, 0) AS attempt_count FROM student_tag_elo WHERE user_id = $1 AND tag_id = $2',
           [req.user.id, tagId]
         );
         let currentTagElo = tagEloRows.rows[0]?.elo ?? 1500;
-        const newTagElo = calculateELO(currentTagElo, problemElo, outcome, 32);
+        const tagAttemptCount = tagEloRows.rows[0]?.attempt_count ?? 0;
+        const tagK = getKFactor(32, tagAttemptCount);
+        const newTagElo = calculateELO(currentTagElo, problemElo, outcome, tagK);
         await client.query(
-          `INSERT INTO student_tag_elo (user_id, tag_id, elo) VALUES ($1, $2, $3)
-           ON CONFLICT (user_id, tag_id) DO UPDATE SET elo = $3`,
+          `INSERT INTO student_tag_elo (user_id, tag_id, elo, attempt_count) VALUES ($1, $2, $3, 1)
+           ON CONFLICT (user_id, tag_id) DO UPDATE SET elo = $3, attempt_count = student_tag_elo.attempt_count + 1`,
           [req.user.id, tagId, newTagElo]
         );
       }
