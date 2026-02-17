@@ -395,13 +395,22 @@ const App = () => {
     }
   };
 
+  const katexOptions = {
+    displayMode: false,
+    throwOnError: false,
+    macros: {
+      '\\usepackage': '',
+    },
+    strict: false,
+  };
+
   const RenderLatex = ({ text }) => {
     if (!text) return null;
     const fixLatex = (math) => (math || '').replace(/\\neq\b/g, '\\ne');
     const renderMath = (math, display, key) => {
       try {
         const fixed = fixLatex(math);
-        const html = katex.renderToString(fixed, { displayMode: display, throwOnError: false });
+        const html = katex.renderToString(fixed, { ...katexOptions, displayMode: display });
         return <span key={key} dangerouslySetInnerHTML={{ __html: html }} />;
       } catch {
         return <span className="text-red-600">[{math}]</span>;

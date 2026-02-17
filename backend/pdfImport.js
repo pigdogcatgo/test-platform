@@ -49,7 +49,7 @@ async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames) {
 6. Do NOT solve. Use the answer key values exactly for the "answer" field.
 7. Extract folderName from the PDF header (e.g. "2021 - National Competition - Sprint Round").
 
-CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. For "not equal" use \\\\ne. For literal $ use \\\\$.`;
+CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath and amssymb commands (\\\\frac, \\\\sqrt, \\\\neq, \\\\leq, \\\\geq, \\\\sum, \\\\int, etc.). For "not equal" use \\\\ne. For literal $ use \\\\$.`;
 
   const userPrompt = `Extract all math problems from this PDF. Use this answer key for answers (do not solve):
 
