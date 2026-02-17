@@ -155,7 +155,6 @@ const App = () => {
   const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudent, setSelectedStudent] = useState(null);
-  const [selectedTestForView, setSelectedTestForView] = useState(null);
 
   // Create axios instance with useMemo to prevent recreation on every render
   const api = useMemo(() => {
@@ -903,6 +902,9 @@ if (view === 'taking-test' && activeTest) {
                 <span className="text-xs font-medium text-gray-500">
                   Question {index + 1} of {testProblems.length}
                 </span>
+                {problem.source && (
+                  <p className="text-xs text-gray-500 mt-0.5">Source: {problem.source}</p>
+                )}
                 <h3 className="text-base font-semibold text-gray-800 mt-1">
                   <RenderLatex text={problem.question} />
                 </h3>
@@ -972,10 +974,38 @@ if (view === 'student-dashboard' && user) {
           <h2 className="text-2xl font-semibold text-gray-800 mb-1">
             Welcome, {user.username}
           </h2>
-          <p className="text-sm text-gray-500">
-            Take available tests below or review your test history.
+          <p className="text-sm text-gray-500 mb-4">
+            Here’s a snapshot of your progress
           </p>
 
+          <div className="flex flex-wrap gap-4 justify-center">
+            <div className="inline-flex flex-col items-center bg-[#e6f6f7] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when you solve harder problems correctly, decreases when you miss easier ones">
+              <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
+              <span className="text-4xl font-bold text-[#007f8f]">
+                {user.elo}
+              </span>
+            </div>
+            {typeof user.cumulative_score === 'number' && (
+              <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
+                <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
+                <span className="text-4xl font-bold text-[#007f8f]">
+                  {user.cumulative_score}
+                </span>
+              </div>
+            )}
+            {user.tag_elos?.length > 0 && (
+              <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
+                <span className="text-xs text-gray-600 mb-2">By Subject</span>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                  {user.tag_elos.map(t => (
+                    <span key={t.name} className="text-gray-800">
+                      {t.name}: <span className="font-semibold text-[#007f8f]">{t.elo}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Content */}
@@ -1119,13 +1149,9 @@ if (view === 'teacher-dashboard' && user) {
               <div className="space-y-3">
                 {tests.map(test => (
                   <div key={test.id} className="bg-white rounded-xl shadow p-4">
-                    <button
-                      type="button"
-                      onClick={() => { setSelectedTestForView(test); setView('test-detail'); }}
-                      className="font-medium text-gray-800 mb-1 text-left hover:text-[#007f8f] hover:underline block w-full"
-                    >
+                    <h3 className="font-medium text-gray-800 mb-1">
                       {test.name}
-                    </button>
+                    </h3>
                     <p className="text-sm text-gray-500 mb-3">
                       {(test.problem_ids || []).length} questions • {test.time_limit} min
                     </p>
@@ -1161,71 +1187,25 @@ if (view === 'teacher-dashboard' && user) {
               ) : (
                 students.map((s, i) => (
                   <div key={s.id} className="p-4">
-                    <button
-                      type="button"
-                      onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                      className="font-medium text-left hover:text-[#007f8f] hover:underline w-full text-left"
-                    >
-                      {i + 1}. {s.username}
-                    </button>
+                    <div className="flex justify-between items-center">
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
+                        className="font-medium text-left hover:text-[#007f8f] hover:underline"
+                      >
+                        {i + 1}. {s.username}
+                      </button>
+                      {typeof s.cumulative_score === 'number' && (
+                        <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
+                          Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
                 ))
               )}
             </div>
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-if (view === 'test-detail' && user && selectedTestForView) {
-  const problemIds = selectedTestForView.problem_ids || [];
-  const testProblemsList = problemIds.map(pid => problems.find(p => p.id === pid)).filter(Boolean);
-  return (
-    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
-      <div className="w-full max-w-4xl p-6">
-        <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
-          <button
-            onClick={() => { setView('teacher-dashboard'); setSelectedTestForView(null); }}
-            className="text-sm text-[#007f8f] hover:underline"
-          >
-            ← Back to Dashboard
-          </button>
-          <h1 className="text-lg font-semibold text-gray-800">
-            {selectedTestForView.name}
-          </h1>
-          <span />
-        </div>
-
-        <div className="bg-white rounded-xl shadow p-6">
-          <h2 className="text-base font-semibold text-gray-800 mb-4">Problems & Answers</h2>
-          {testProblemsList.length === 0 ? (
-            <p className="text-gray-500 text-sm">No problems in this test.</p>
-          ) : (
-            <div className="space-y-6">
-              {testProblemsList.map((problem, index) => (
-                <div key={problem.id} className="border border-gray-200 rounded-lg p-4">
-                  <p className="text-xs text-gray-500 mb-2">Question {index + 1} of {testProblemsList.length}</p>
-                  {problem.source && (
-                    <p className="text-xs text-gray-500 mb-1">Source: {problem.source}</p>
-                  )}
-                  <div className="text-sm text-gray-800 mb-3">
-                    <RenderLatex text={problem.question} />
-                  </div>
-                  {problem.image_url && (
-                    <div className="mb-3">
-                      <ProblemImage url={problem.image_url} token={token} />
-                    </div>
-                  )}
-                  <div className="pt-2 border-t border-gray-100">
-                    <span className="text-xs text-gray-500">Answer: </span>
-                    <span className="text-sm font-semibold text-[#007f8f]">{String(problem.answer ?? '')}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </div>
@@ -1399,13 +1379,20 @@ if (view === 'register-students' && user) {
             ) : (
               students.map((s, i) => (
                 <div key={s.id} className="p-4">
-                  <button
-                    type="button"
-                    onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                    className="font-medium text-left hover:text-[#007f8f] hover:underline w-full text-left"
-                  >
-                    {i + 1}. {s.username}
-                  </button>
+                  <div className="flex justify-between items-center">
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
+                      className="font-medium text-left hover:text-[#007f8f] hover:underline"
+                    >
+                      {i + 1}. {s.username}
+                    </button>
+                    {typeof s.cumulative_score === 'number' && (
+                      <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
+                        Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
+                      </span>
+                    )}
+                  </div>
                 </div>
               ))
             )}
@@ -1451,18 +1438,16 @@ if (view === 'student-profile' && user) {
               <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
               <span className="text-2xl font-bold text-[#007f8f]">{selectedStudent.cumulative_score ?? 0}</span>
             </div>
-            <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
-              <span className="text-xs text-gray-600 mb-2">By Subject</span>
-              {selectedStudent.tag_elos?.length > 0 ? (
+            {selectedStudent.tag_elos?.length > 0 && (
+              <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
+                <span className="text-xs text-gray-600 mb-2">By Subject</span>
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                   {selectedStudent.tag_elos.map(t => (
                     <span key={t.name}>{t.name}: <span className="font-semibold text-[#007f8f]">{t.elo}</span></span>
                   ))}
                 </div>
-              ) : (
-                <p className="text-sm text-gray-500">No subject ratings yet. Complete tagged problems to build subject-specific ELOs.</p>
-              )}
-            </div>
+              </div>
+            )}
           </div>
         </div>
 
