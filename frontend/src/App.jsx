@@ -153,6 +153,8 @@ const App = () => {
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
   const [selectedProblemIds, setSelectedProblemIds] = useState([]);
   const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
+  const [selectedStudentId, setSelectedStudentId] = useState(null);
+  const [selectedStudent, setSelectedStudent] = useState(null);
 
   // Create axios instance with useMemo to prevent recreation on every render
   const api = useMemo(() => {
@@ -361,6 +363,20 @@ const App = () => {
       setExpandedFolders(new Set());
     }
   }, [view]);
+
+  // Load student profile when viewing student-profile
+  useEffect(() => {
+    if (view === 'student-profile' && selectedStudentId && user?.role === 'teacher') {
+      setSelectedStudent(null);
+      api.get(`/api/students/${selectedStudentId}`)
+        .then(({ data }) => setSelectedStudent(data))
+        .catch(() => {
+          alert('Error loading student profile');
+          setView('teacher-dashboard');
+          setSelectedStudentId(null);
+        });
+    }
+  }, [view, selectedStudentId, user?.role, api]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -963,17 +979,17 @@ if (view === 'student-dashboard' && user) {
           </p>
 
           <div className="flex flex-wrap gap-4 justify-center">
-            <div className="inline-flex flex-col items-center bg-[#e6f6f7] px-6 py-4 rounded-xl">
+            <div className="inline-flex flex-col items-center bg-[#e6f6f7] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when you solve harder problems correctly, decreases when you miss easier ones">
               <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
               <span className="text-4xl font-bold text-[#007f8f]">
                 {user.elo}
               </span>
             </div>
-            {typeof user.mathcounts_score === 'number' && (
-              <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl">
-                <span className="text-xs text-gray-600 mb-1">MATHCOUNTS Score</span>
+            {typeof user.cumulative_score === 'number' && (
+              <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
+                <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
                 <span className="text-4xl font-bold text-[#007f8f]">
-                  {user.mathcounts_score}
+                  {user.cumulative_score}
                 </span>
               </div>
             )}
@@ -1155,13 +1171,13 @@ if (view === 'teacher-dashboard' && user) {
             )}
           </div>
 
-          {/* My students (only students you registered) */}
+          {/* Student leaderboard (ranked by cumulative score) */}
           <div>
             <h2 className="text-lg font-semibold mb-4 text-gray-800">
-              My Students
+              Student Leaderboard
             </h2>
             <p className="text-sm text-gray-500 mb-3">
-              Only students you register can see your tests. Use the Register Students button to add students.
+              Ranked by cumulative score. Click a name to view their profile. Only students you register can see your tests.
             </p>
             <div className="bg-white rounded-xl shadow divide-y">
               {students.length === 0 ? (
@@ -1172,12 +1188,22 @@ if (view === 'teacher-dashboard' && user) {
                 students.map((s, i) => (
                   <div key={s.id} className="p-4">
                     <div className="flex justify-between items-center">
-                      <span className="font-medium">{i + 1}. {s.username}</span>
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
+                        className="font-medium text-left hover:text-[#007f8f] hover:underline"
+                      >
+                        {i + 1}. {s.username}
+                      </button>
                       <div className="flex gap-4">
-                        {typeof s.mathcounts_score === 'number' && (
-                          <span className="text-gray-600">MATHCOUNTS: <span className="font-semibold text-[#007f8f]">{s.mathcounts_score}</span></span>
+                        {typeof s.cumulative_score === 'number' && (
+                          <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
+                            Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
+                          </span>
                         )}
-                        <span className="text-[#007f8f] font-semibold">ELO: {s.elo}</span>
+                        <span className="text-[#007f8f] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                          ELO: {s.elo}
+                        </span>
                       </div>
                     </div>
                     {s.tag_elos?.length > 0 && (
@@ -1366,12 +1392,22 @@ if (view === 'register-students' && user) {
               students.map((s, i) => (
                 <div key={s.id} className="p-4">
                   <div className="flex justify-between items-center">
-                    <span className="font-medium">{i + 1}. {s.username}</span>
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
+                      className="font-medium text-left hover:text-[#007f8f] hover:underline"
+                    >
+                      {i + 1}. {s.username}
+                    </button>
                     <div className="flex gap-4">
-                      {typeof s.mathcounts_score === 'number' && (
-                        <span className="text-gray-600">MATHCOUNTS: <span className="font-semibold text-[#007f8f]">{s.mathcounts_score}</span></span>
+                      {typeof s.cumulative_score === 'number' && (
+                        <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
+                          Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
+                        </span>
                       )}
-                      <span className="text-[#007f8f] font-semibold">ELO: {s.elo}</span>
+                      <span className="text-[#007f8f] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                        ELO: {s.elo}
+                      </span>
                     </div>
                   </div>
                   {s.tag_elos?.length > 0 && (
@@ -1385,6 +1421,93 @@ if (view === 'register-students' && user) {
               ))
             )}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+if (view === 'student-profile' && user) {
+  if (!selectedStudent) {
+    return (
+      <div className="min-h-screen bg-[#f5f7f8] flex items-center justify-center">
+        <p className="text-gray-500">Loading student profile...</p>
+      </div>
+    );
+  }
+  return (
+    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
+      <div className="w-full max-w-4xl p-6">
+        <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
+          <button
+            onClick={() => { setView('teacher-dashboard'); setSelectedStudentId(null); setSelectedStudent(null); }}
+            className="text-sm text-[#007f8f] hover:underline"
+          >
+            ← Back to Dashboard
+          </button>
+          <h1 className="text-lg font-semibold text-gray-800">
+            Student Profile: {selectedStudent.username}
+          </h1>
+          <span />
+        </div>
+
+        <div className="bg-white rounded-xl shadow p-6 mb-6">
+          <h2 className="text-base font-semibold text-gray-800 mb-4">Ratings</h2>
+          <div className="flex flex-wrap gap-4">
+            <div className="inline-flex flex-col items-center bg-[#e6f6f7] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when solving harder problems correctly, decreases when missing easier ones">
+              <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
+              <span className="text-2xl font-bold text-[#007f8f]">{selectedStudent.elo}</span>
+            </div>
+            <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
+              <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
+              <span className="text-2xl font-bold text-[#007f8f]">{selectedStudent.cumulative_score ?? 0}</span>
+            </div>
+            {selectedStudent.tag_elos?.length > 0 && (
+              <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
+                <span className="text-xs text-gray-600 mb-2">By Subject</span>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                  {selectedStudent.tag_elos.map(t => (
+                    <span key={t.name}>{t.name}: <span className="font-semibold text-[#007f8f]">{t.elo}</span></span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl shadow p-6">
+          <h2 className="text-base font-semibold text-gray-800 mb-4">Recent Problem History</h2>
+          {!selectedStudent.problem_history?.length ? (
+            <p className="text-gray-500 text-sm">No problems attempted yet.</p>
+          ) : (
+            <div className="space-y-4 max-h-[500px] overflow-y-auto">
+              {selectedStudent.problem_history.map((item, idx) => (
+                <div key={`${item.problem_id}-${item.completed_at}-${idx}`} className="border border-gray-200 rounded-lg p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-gray-500 mb-1">{item.test_name} • {new Date(item.completed_at).toLocaleDateString()}</p>
+                      <div className="text-sm text-gray-800">
+                        <RenderLatex text={item.question} />
+                      </div>
+                      {item.image_url && (
+                        <div className="mt-2">
+                          <ProblemImage url={item.image_url} token={token} />
+                        </div>
+                      )}
+                      {!item.correct && item.student_answer != null && (
+                        <p className="text-sm mt-2 text-red-600">
+                          Your answer: <span className="font-medium">{String(item.student_answer)}</span>
+                        </p>
+                      )}
+                    </div>
+                    <span className={`flex-shrink-0 px-2 py-1 rounded text-xs font-medium ${item.correct ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                      {item.correct ? 'Correct' : 'Incorrect'}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

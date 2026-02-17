@@ -194,7 +194,7 @@ app.get('/api/me', authenticateToken, async (req, res) => {
         if (r.test_type === 'target') target += r.score;
         else sprint += r.score;
       }
-      user.mathcounts_score = sprint + 2 * target;
+      user.cumulative_score = sprint + 2 * target;
     }
     res.json(user);
   } catch (error) {
@@ -837,7 +837,7 @@ app.get('/api/students', authenticateToken, async (req, res) => {
     }
     for (const s of students) {
       const m = byStudent[s.id] || { sprint: 0, target: 0 };
-      s.mathcounts_score = m.sprint + 2 * m.target;
+      s.cumulative_score = m.sprint + 2 * m.target;
     }
     const tagElos = await pool.query(
       `SELECT ste.user_id, t.name, ste.elo FROM student_tag_elo ste
@@ -854,8 +854,92 @@ app.get('/api/students', authenticateToken, async (req, res) => {
     for (const s of students) {
       s.tag_elos = byUser[s.id] || [];
     }
+    students.sort((a, b) => (b.mathcounts_score ?? 0) - (a.mathcounts_score ?? 0));
     res.json(students);
   } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get single student profile (teacher only; must be their student)
+app.get('/api/students/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Teacher access required' });
+  }
+  const studentId = parseInt(req.params.id, 10);
+  if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid student ID' });
+  try {
+    const studentResult = await pool.query(
+      'SELECT id, username, elo FROM users WHERE id = $1 AND role = $2 AND teacher_id = $3',
+      [studentId, 'student', req.user.id]
+    );
+    const student = studentResult.rows[0];
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+
+    const tagElos = await pool.query(
+      `SELECT t.name, ste.elo FROM student_tag_elo ste
+       JOIN tags t ON t.id = ste.tag_id WHERE ste.user_id = $1 ORDER BY t.name`,
+      [studentId]
+    );
+    student.tag_elos = tagElos.rows;
+
+    const mathcounts = await pool.query(
+      `SELECT t.test_type, ta.score FROM test_attempts ta
+       JOIN tests t ON t.id = ta.test_id WHERE ta.student_id = $1`,
+      [studentId]
+    );
+    let sprint = 0, target = 0;
+    for (const r of mathcounts.rows) {
+      if (r.test_type === 'target') target += r.score;
+      else sprint += r.score;
+    }
+    student.cumulative_score = sprint + 2 * target;
+
+    const attemptsResult = await pool.query(
+      `SELECT ta.id, ta.test_id, ta.answers, ta.results, ta.completed_at, t.name AS test_name, t.problem_ids
+       FROM test_attempts ta
+       JOIN tests t ON t.id = ta.test_id
+       WHERE ta.student_id = $1
+       ORDER BY ta.completed_at DESC
+       LIMIT 30`,
+      [studentId]
+    );
+    const problemHistory = [];
+    const seenProblemAttempts = new Set();
+    for (const a of attemptsResult.rows) {
+      const answers = typeof a.answers === 'string' ? JSON.parse(a.answers) : (a.answers || {});
+      const results = typeof a.results === 'string' ? JSON.parse(a.results) : (a.results || {});
+      const problemIds = a.problem_ids || [];
+      if (problemIds.length === 0) continue;
+      const probsResult = await pool.query(
+        'SELECT id, question, answer FROM problems WHERE id = ANY($1)',
+        [problemIds]
+      );
+      const probMap = Object.fromEntries(probsResult.rows.map(p => [p.id, p]));
+      for (const pid of problemIds) {
+        const p = probMap[pid];
+        if (!p) continue;
+        const key = `${a.id}-${pid}`;
+        if (seenProblemAttempts.has(key)) continue;
+        seenProblemAttempts.add(key);
+        const correct = results[pid] === true;
+        const studentAnswer = answers[pid] ?? '';
+        problemHistory.push({
+          problem_id: pid,
+          question: p.question,
+          image_url: p.image_url,
+          correct,
+          student_answer: correct ? null : studentAnswer,
+          test_name: a.test_name,
+          completed_at: a.completed_at
+        });
+      }
+    }
+    problemHistory.sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at));
+    student.problem_history = problemHistory.slice(0, 50);
+    res.json(student);
+  } catch (error) {
+    console.error('Get student profile error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
