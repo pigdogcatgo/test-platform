@@ -148,7 +148,7 @@ const App = () => {
   const [pdfImportLoading, setPdfImportLoading] = useState(false);
   const [pdfImportResult, setPdfImportResult] = useState(null);
   const [pdfImportUseAI, setPdfImportUseAI] = useState(true);
-  const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
+  const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
   const [selectedProblemIds, setSelectedProblemIds] = useState([]);
@@ -485,9 +485,10 @@ const App = () => {
         name: newTest.name,
         problemIds: newTest.problemIds,
         dueDate: newTest.dueDate,
-        timeLimit: newTest.timeLimit
+        timeLimit: newTest.timeLimit,
+        testType: newTest.testType
       });
-      setNewTest({ name: '', problemIds: [], dueDate: '', timeLimit: 30 });
+      setNewTest({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
       loadUserData();
       alert('Test created successfully!');
     } catch (error) {
@@ -968,6 +969,14 @@ if (view === 'student-dashboard' && user) {
                 {user.elo}
               </span>
             </div>
+            {typeof user.mathcounts_score === 'number' && (
+              <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl">
+                <span className="text-xs text-gray-600 mb-1">MATHCOUNTS Score</span>
+                <span className="text-4xl font-bold text-[#007f8f]">
+                  {user.mathcounts_score}
+                </span>
+              </div>
+            )}
             {user.tag_elos?.length > 0 && (
               <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
                 <span className="text-xs text-gray-600 mb-2">By Subject</span>
@@ -1164,7 +1173,12 @@ if (view === 'teacher-dashboard' && user) {
                   <div key={s.id} className="p-4">
                     <div className="flex justify-between items-center">
                       <span className="font-medium">{i + 1}. {s.username}</span>
-                      <span className="text-[#007f8f] font-semibold">Overall: {s.elo}</span>
+                      <div className="flex gap-4">
+                        {typeof s.mathcounts_score === 'number' && (
+                          <span className="text-gray-600">MATHCOUNTS: <span className="font-semibold text-[#007f8f]">{s.mathcounts_score}</span></span>
+                        )}
+                        <span className="text-[#007f8f] font-semibold">ELO: {s.elo}</span>
+                      </div>
                     </div>
                     {s.tag_elos?.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-600">
@@ -1353,7 +1367,12 @@ if (view === 'register-students' && user) {
                 <div key={s.id} className="p-4">
                   <div className="flex justify-between items-center">
                     <span className="font-medium">{i + 1}. {s.username}</span>
-                    <span className="text-[#007f8f] font-semibold">Overall: {s.elo}</span>
+                    <div className="flex gap-4">
+                      {typeof s.mathcounts_score === 'number' && (
+                        <span className="text-gray-600">MATHCOUNTS: <span className="font-semibold text-[#007f8f]">{s.mathcounts_score}</span></span>
+                      )}
+                      <span className="text-[#007f8f] font-semibold">ELO: {s.elo}</span>
+                    </div>
                   </div>
                   {s.tag_elos?.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-600">
@@ -1412,6 +1431,38 @@ if (view === 'create-test' && user) {
                 setNewTest({ ...newTest, timeLimit: +e.target.value || 30 })
               }
             />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Test type</label>
+            <div className="flex gap-6">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="radio"
+                  name="testType"
+                  checked={newTest.testType === 'sprint'}
+                  onChange={() => setNewTest({ ...newTest, testType: 'sprint' })}
+                  className="mt-1"
+                />
+                <div>
+                  <span className="font-medium text-gray-800">Sprint</span>
+                  <p className="text-sm text-gray-500 mt-0.5">30 problems, 1 point each. Counts toward MATHCOUNTS score as 1× correct answers.</p>
+                </div>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="radio"
+                  name="testType"
+                  checked={newTest.testType === 'target'}
+                  onChange={() => setNewTest({ ...newTest, testType: 'target' })}
+                  className="mt-1"
+                />
+                <div>
+                  <span className="font-medium text-gray-800">Target</span>
+                  <p className="text-sm text-gray-500 mt-0.5">8 problems, 2 points each. Counts toward MATHCOUNTS score as 2× correct answers.</p>
+                </div>
+              </label>
+            </div>
           </div>
 
           <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-1">

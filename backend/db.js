@@ -30,6 +30,13 @@ export async function initDatabase() {
       console.warn('Migration problem_elo_snapshot (non-fatal):', migErr.message);
     }
     try {
+      await client.query(`ALTER TABLE tests ADD COLUMN IF NOT EXISTS test_type VARCHAR(20) DEFAULT 'sprint'`);
+      await client.query(`UPDATE tests SET test_type = 'sprint' WHERE test_type IS NULL`);
+      console.log('Tests test_type column ensured');
+    } catch (migErr) {
+      console.warn('Migration test_type (non-fatal):', migErr.message);
+    }
+    try {
       await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS source TEXT');
       console.log('Problems source column ensured');
     } catch (migErr) {

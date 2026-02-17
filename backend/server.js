@@ -184,6 +184,17 @@ app.get('/api/me', authenticateToken, async (req, res) => {
         [req.user.id]
       );
       user.tag_elos = tagElos.rows;
+      const mathcounts = await pool.query(
+        `SELECT t.test_type, ta.score FROM test_attempts ta
+         JOIN tests t ON t.id = ta.test_id WHERE ta.student_id = $1`,
+        [req.user.id]
+      );
+      let sprint = 0, target = 0;
+      for (const r of mathcounts.rows) {
+        if (r.test_type === 'target') target += r.score;
+        else sprint += r.score;
+      }
+      user.mathcounts_score = sprint + 2 * target;
     }
     res.json(user);
   } catch (error) {
@@ -592,10 +603,11 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
   }
   
   try {
-    const { name, problemIds, dueDate, timeLimit } = req.body;
+    const { name, problemIds, dueDate, timeLimit, testType } = req.body;
+    const type = testType === 'target' ? 'target' : 'sprint';
     const result = await pool.query(
-      'INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [name, problemIds, dueDate, timeLimit, req.user.id]
+      'INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [name, problemIds, dueDate, timeLimit, req.user.id, type]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -810,6 +822,23 @@ app.get('/api/students', authenticateToken, async (req, res) => {
       ['student', req.user.id]
     );
     const students = result.rows;
+    const mathcounts = await pool.query(
+      `SELECT ta.student_id, t.test_type, ta.score
+       FROM test_attempts ta
+       JOIN tests t ON t.id = ta.test_id
+       JOIN users u ON u.id = ta.student_id AND u.role = 'student' AND u.teacher_id = $1`,
+      [req.user.id]
+    );
+    const byStudent = {};
+    for (const r of mathcounts.rows) {
+      if (!byStudent[r.student_id]) byStudent[r.student_id] = { sprint: 0, target: 0 };
+      if (r.test_type === 'target') byStudent[r.student_id].target += r.score;
+      else byStudent[r.student_id].sprint += r.score;
+    }
+    for (const s of students) {
+      const m = byStudent[s.id] || { sprint: 0, target: 0 };
+      s.mathcounts_score = m.sprint + 2 * m.target;
+    }
     const tagElos = await pool.query(
       `SELECT ste.user_id, t.name, ste.elo FROM student_tag_elo ste
        JOIN tags t ON t.id = ste.tag_id
