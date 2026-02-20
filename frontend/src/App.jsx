@@ -1133,6 +1133,12 @@ if (view === 'teacher-dashboard' && user) {
           >
             Create New Test
           </button>
+          <button
+            onClick={() => setView('teacher-admin')}
+            className="bg-gray-700 hover:bg-gray-800 text-white px-6 py-3 rounded-lg font-medium"
+          >
+            Team Problem Bank
+          </button>
         </div>
 
         <div className="grid lg:grid-cols-2 gap-6">
@@ -1710,18 +1716,31 @@ if (view === 'create-test' && user) {
   );
 }
 
-if (view === 'admin-dashboard' && user) {
+if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
+  const isTeacherAdmin = user.role === 'teacher';
   return (
     <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
       <div className="w-full max-w-6xl p-6">
         <div className="bg-white rounded-xl shadow p-4 mb-6 flex justify-between">
-          <h1 className="font-semibold text-gray-800">Admin Portal</h1>
-          <button
-            onClick={handleLogout}
-            className="text-sm text-[#007f8f] hover:underline"
-          >
-            Logout
-          </button>
+          <h1 className="font-semibold text-gray-800">
+            {isTeacherAdmin ? 'Team Problem Bank' : 'Admin Portal'}
+          </h1>
+          <div className="flex gap-4">
+            {isTeacherAdmin && (
+              <button
+                onClick={() => setView('teacher-dashboard')}
+                className="text-sm text-[#007f8f] hover:underline"
+              >
+                ← Back to Dashboard
+              </button>
+            )}
+            <button
+              onClick={handleLogout}
+              className="text-sm text-[#007f8f] hover:underline"
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
         <div className="mb-6 p-4 bg-white rounded-xl shadow">
@@ -1789,6 +1808,11 @@ if (view === 'admin-dashboard' && user) {
 
         <div className="mb-6 p-4 bg-white rounded-xl shadow">
           <h3 className="font-semibold text-gray-800 mb-3">Import from PDF</h3>
+          {isTeacherAdmin && (
+            <p className="text-sm text-amber-700 bg-amber-50 px-3 py-2 rounded mb-3">
+              Problems you import are for your team only. Public problems (from Admin) are available to all teachers.
+            </p>
+          )}
           <p className="text-sm text-gray-600 mb-3">
             Upload a competition PDF (e.g. MathCounts, AMC). Problems are auto-extracted and placed in a folder. <strong>No AI mode</strong> (default): paste the answer key — no API key needed. <strong>Use AI</strong>: converts to LaTeX, auto-tags, can solve — requires <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code>.
           </p>

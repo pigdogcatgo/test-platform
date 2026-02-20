@@ -50,7 +50,9 @@ export async function initDatabase() {
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
       `);
+      await client.query('ALTER TABLE folders ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
       await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES folders(id)');
+      await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
       await client.query(`INSERT INTO folders (name) SELECT 'Uncategorized' WHERE NOT EXISTS (SELECT 1 FROM folders LIMIT 1)`);
       console.log('Folders table and problems.folder_id ensured');
     } catch (migErr) {
@@ -64,6 +66,10 @@ export async function initDatabase() {
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
       `);
+      await client.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
+      await client.query('ALTER TABLE tags DROP CONSTRAINT IF EXISTS tags_name_key');
+      await client.query('CREATE UNIQUE INDEX IF NOT EXISTS tags_name_public ON tags (name) WHERE created_by IS NULL');
+      await client.query('CREATE UNIQUE INDEX IF NOT EXISTS tags_name_teacher ON tags (name, created_by) WHERE created_by IS NOT NULL');
       await client.query(`
         CREATE TABLE IF NOT EXISTS problem_tags (
           problem_id INTEGER REFERENCES problems(id) ON DELETE CASCADE,
@@ -196,6 +202,14 @@ export async function initDatabase() {
     
     await client.query('COMMIT');
     console.log('Database tables created successfully');
+
+    // Migrations that need users to exist (run after main schema)
+    try {
+      await client.query('ALTER TABLE uploads ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
+      console.log('Uploads created_by ensured');
+    } catch (migErr) {
+      console.warn('Migration uploads created_by (non-fatal):', migErr.message);
+    }
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Error initializing database:', error);

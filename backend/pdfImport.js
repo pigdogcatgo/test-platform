@@ -188,15 +188,32 @@ export function splitIntoProblems(text) {
   return problems;
 }
 
-async function ensureTags(client) {
+async function ensureTags(client, createdBy) {
   const tagNames = ['Algebra', 'Number Theory', 'Counting', 'Geometry', 'Probability', 'Arithmetic'];
   const tagMap = {};
   for (const name of tagNames) {
-    const r = await client.query('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING id', [name]);
-    if (r.rows[0]) tagMap[name] = r.rows[0].id;
-    else {
-      const existing = await client.query('SELECT id FROM tags WHERE name = $1', [name]);
-      tagMap[name] = existing.rows[0]?.id;
+    try {
+      if (createdBy === null) {
+        const r = await client.query(
+          'INSERT INTO tags (name, created_by) VALUES ($1, NULL) RETURNING id',
+          [name]
+        );
+        if (r.rows[0]) tagMap[name] = r.rows[0].id;
+      } else {
+        const r = await client.query(
+          'INSERT INTO tags (name, created_by) VALUES ($1, $2) RETURNING id',
+          [name, createdBy]
+        );
+        if (r.rows[0]) tagMap[name] = r.rows[0].id;
+      }
+    } catch (err) {
+      if (err.code === '23505') {
+        const existing = await client.query(
+          'SELECT id FROM tags WHERE name = $1 AND (created_by IS NOT DISTINCT FROM $2)',
+          [name, createdBy]
+        );
+        tagMap[name] = existing.rows[0]?.id;
+      } else throw err;
     }
   }
   return tagMap;
@@ -211,16 +228,22 @@ function processProblemNoAI(problem, answerFromKey) {
 
 /**
  * Main import: send PDF to Gemini (AI) or parse text (no-AI).
+ * @param {Buffer} pdfBuffer
+ * @param {string} answerKeyText
+ * @param {boolean} useAI
+ * @param {number|null} createdBy - user id for teacher-owned; null for admin/public
  */
-export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI = true) {
+export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI = true, createdBy = null) {
   const errors = [];
   const answerMap = parseAnswerKey(answerKeyText);
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await ensureTags(client);
-    const allTags = await client.query('SELECT id, name FROM tags ORDER BY name');
+    await ensureTags(client, createdBy);
+    const allTags = createdBy === null
+      ? await client.query('SELECT id, name FROM tags WHERE created_by IS NULL ORDER BY name')
+      : await client.query('SELECT id, name FROM tags WHERE created_by IS NULL OR created_by = $1 ORDER BY name', [createdBy]);
     const tagMap = Object.fromEntries(allTags.rows.map((r) => [r.name, r.id]));
     const allowedTagNames = allTags.rows.map((r) => r.name);
     const defaultTag = allowedTagNames[0] || 'Arithmetic';
@@ -235,15 +258,15 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
       const { folderName, results: processedList, errors: batchErrors } = await processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames);
       sourceName = folderName;
       for (const err of batchErrors) errors.push(err.message);
-      let folderRow = await client.query('SELECT id FROM folders WHERE name = $1', [sourceName]);
-      if (folderRow.rows.length === 0) folderRow = await client.query('INSERT INTO folders (name) VALUES ($1) RETURNING id', [sourceName]);
+      let folderRow = await client.query('SELECT id FROM folders WHERE name = $1 AND (created_by IS NOT DISTINCT FROM $2)', [sourceName, createdBy]);
+      if (folderRow.rows.length === 0) folderRow = await client.query('INSERT INTO folders (name, created_by) VALUES ($1, $2) RETURNING id', [sourceName, createdBy]);
       folderId = folderRow.rows[0].id;
       for (const processed of processedList) {
         const tagName = (processed.topics[0] || defaultTag).trim();
         const validTag = allowedTagNames.includes(tagName) ? tagName : defaultTag;
         const ins = await client.query(
-          'INSERT INTO problems (question, answer, topic, source, folder_id) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-          [processed.question, processed.answer, validTag, processed.source, folderId]
+          'INSERT INTO problems (question, answer, topic, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+          [processed.question, processed.answer, validTag, processed.source, folderId, createdBy]
         );
         const tagId = tagMap[validTag];
         if (tagId) await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.rows[0].id, tagId]);
@@ -259,15 +282,15 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
       const problems = splitIntoProblems(trimmedText);
       if (problems.length === 0) throw new Error('No problems found in PDF. Expected format: "1. Question text..."');
       if (Object.keys(answerMap).length === 0) throw new Error('Answer key is required when not using AI.');
-      let folderRow = await client.query('SELECT id FROM folders WHERE name = $1', [sourceName]);
-      if (folderRow.rows.length === 0) folderRow = await client.query('INSERT INTO folders (name) VALUES ($1) RETURNING id', [sourceName]);
+      let folderRow = await client.query('SELECT id FROM folders WHERE name = $1 AND (created_by IS NOT DISTINCT FROM $2)', [sourceName, createdBy]);
+      if (folderRow.rows.length === 0) folderRow = await client.query('INSERT INTO folders (name, created_by) VALUES ($1, $2) RETURNING id', [sourceName, createdBy]);
       folderId = folderRow.rows[0].id;
       for (const prob of problems) {
         try {
           const processed = processProblemNoAI(prob, answerMap[prob.number]);
           const ins = await client.query(
-            'INSERT INTO problems (question, answer, topic, source, folder_id) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-            [processed.question, processed.answer, 'Arithmetic', processed.source, folderId]
+            'INSERT INTO problems (question, answer, topic, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [processed.question, processed.answer, 'Arithmetic', processed.source, folderId, createdBy]
           );
           const tagId = tagMap[defaultTag];
           if (tagId) await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.rows[0].id, tagId]);

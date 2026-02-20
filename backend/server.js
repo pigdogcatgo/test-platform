@@ -207,10 +207,23 @@ app.get('/api/me', authenticateToken, async (req, res) => {
   }
 });
 
-// Folders (admin: CRUD; teachers: read-only for test creation)
+// Folders: read = public+own; write = admin all, teacher own only
+function folderReadWhere(user) {
+  if (user.role === 'admin') return { sql: '1=1', params: [] };
+  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
+  return { sql: '1=0', params: [] };
+}
+function folderWriteWhere(user) {
+  if (user.role === 'admin') return { sql: '1=1', params: [] };
+  if (user.role === 'teacher') return { sql: '(created_by = $1)', params: [user.id] };
+  return { sql: '1=0', params: [] };
+}
+
+// Folders (admin: all CRUD; teacher: CRUD for own + public)
 app.get('/api/folders', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM folders ORDER BY name');
+    const { sql, params } = folderReadWhere(req.user);
+    const result = await pool.query(`SELECT * FROM folders WHERE ${sql} ORDER BY name`, params);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -218,13 +231,17 @@ app.get('/api/folders', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/folders', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
   const { name } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Folder name is required' });
   }
   try {
-    const result = await pool.query('INSERT INTO folders (name) VALUES ($1) RETURNING *', [name.trim()]);
+    const createdBy = req.user.role === 'admin' ? null : req.user.id;
+    const result = await pool.query(
+      'INSERT INTO folders (name, created_by) VALUES ($1, $2) RETURNING *',
+      [name.trim(), createdBy]
+    );
     res.status(201).json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message || 'Server error' });
@@ -232,13 +249,19 @@ app.post('/api/folders', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/folders/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
   const { name } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Folder name is required' });
   }
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
   try {
-    const result = await pool.query('UPDATE folders SET name = $1 WHERE id = $2 RETURNING *', [name.trim(), req.params.id]);
+    const { sql, params } = folderWhere(req.user);
+    const result = await pool.query(
+      `UPDATE folders SET name = $1 WHERE id = $2 AND ${sql} RETURNING *`,
+      [name.trim(), id, ...params]
+    );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Folder not found' });
     res.json(result.rows[0]);
   } catch (error) {
@@ -247,12 +270,13 @@ app.put('/api/folders/:id', authenticateToken, async (req, res) => {
 });
 
 app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
   try {
+    const { sql, params } = folderWriteWhere(req.user);
     await pool.query('UPDATE problems SET folder_id = NULL WHERE folder_id = $1', [id]);
-    const del = await pool.query('DELETE FROM folders WHERE id = $1 RETURNING id', [id]);
+    const del = await pool.query(`DELETE FROM folders WHERE id = $1 AND ${sql} RETURNING id`, [id, ...params]);
     if (del.rowCount === 0) return res.status(404).json({ error: 'Folder not found' });
     res.json({ success: true });
   } catch (error) {
@@ -260,23 +284,23 @@ app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Import problems from PDF (admin only)
-// GET handler for diagnostics: if you get 405 here, the route exists; 404 means old deployment
+// Import problems from PDF (admin + teacher)
 app.get('/api/import-pdf', (_req, res) => {
   res.status(405).json({ error: 'Use POST to import a PDF', ok: true });
 });
 app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
   }
   if (!req.file || !req.file.buffer) {
     return res.status(400).json({ error: 'No PDF file provided' });
   }
   const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
   const useAI = req.body.useAI !== 'false' && req.body.useAI !== false;
+  const createdBy = req.user.role === 'admin' ? null : req.user.id;
   try {
     const { importPdfToDatabase } = await import('./pdfImport.js');
-    const result = await importPdfToDatabase(req.file.buffer, answerKey, useAI);
+    const result = await importPdfToDatabase(req.file.buffer, answerKey, useAI, createdBy);
     res.json({
       success: true,
       imported: result.imported,
@@ -290,10 +314,22 @@ app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (r
   }
 });
 
-// Tags (admin + teacher can read)
+// Tags: read = public+own; write (delete) = admin all, teacher own only
+function tagReadWhere(user) {
+  if (user.role === 'admin') return { sql: '1=1', params: [] };
+  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
+  return { sql: '1=0', params: [] };
+}
+function tagWriteWhere(user) {
+  if (user.role === 'admin') return { sql: '1=1', params: [] };
+  if (user.role === 'teacher') return { sql: '(created_by = $1)', params: [user.id] };
+  return { sql: '1=0', params: [] };
+}
+
 app.get('/api/tags', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM tags ORDER BY name');
+    const { sql, params } = tagWhere(req.user);
+    const result = await pool.query(`SELECT * FROM tags WHERE ${sql} ORDER BY name`, params);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -301,26 +337,31 @@ app.get('/api/tags', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/tags', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
   const { name } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Tag name is required' });
   }
   try {
-    const result = await pool.query('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING *', [name.trim()]);
-    if (result.rows.length === 0) return res.status(400).json({ error: 'Tag already exists' });
+    const createdBy = req.user.role === 'admin' ? null : req.user.id;
+    const result = await pool.query(
+      'INSERT INTO tags (name, created_by) VALUES ($1, $2) RETURNING *',
+      [name.trim(), createdBy]
+    );
     res.status(201).json(result.rows[0]);
   } catch (error) {
+    if (error.code === '23505') return res.status(400).json({ error: 'Tag already exists' });
     res.status(500).json({ error: error.message || 'Server error' });
   }
 });
 
 app.delete('/api/tags/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid tag id' });
   try {
-    const del = await pool.query('DELETE FROM tags WHERE id = $1 RETURNING id', [id]);
+    const { sql, params } = tagWriteWhere(req.user);
+    const del = await pool.query(`DELETE FROM tags WHERE id = $1 AND ${sql} RETURNING id`, [id, ...params]);
     if (del.rowCount === 0) return res.status(404).json({ error: 'Tag not found' });
     res.json({ success: true });
   } catch (error) {
@@ -328,15 +369,29 @@ app.delete('/api/tags/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Problems: read = admin all, teacher public+own; write = admin all, teacher own only
+function problemReadWhere(user) {
+  if (user.role === 'admin') return { sql: '1=1', params: [] };
+  if (user.role === 'teacher') return { sql: '(p.created_by IS NULL OR p.created_by = $1)', params: [user.id] };
+  return { sql: '1=0', params: [] };
+}
+function problemWriteWhere(user) {
+  if (user.role === 'admin') return { sql: '1=1', params: [] };
+  if (user.role === 'teacher') return { sql: '(created_by = $1)', params: [user.id] };
+  return { sql: '1=0', params: [] };
+}
+
 // Get all problems (with folder and tags)
 app.get('/api/problems', authenticateToken, async (req, res) => {
   try {
+    const { sql, params } = problemReadWhere(req.user);
     const result = await pool.query(`
       SELECT p.*, f.name as folder_name
       FROM problems p
       LEFT JOIN folders f ON p.folder_id = f.id
+      WHERE ${sql}
       ORDER BY COALESCE(f.name, 'zzz'), p.id
-    `);
+    `, params);
     const tagResult = await pool.query('SELECT problem_id, tag_id FROM problem_tags');
     const tagsByProblem = {};
     for (const row of tagResult.rows) {
@@ -356,10 +411,10 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
   }
 });
 
-// Upload image (admin only) — store in DB so it survives deploys (free on Render)
+// Upload image (admin + teacher)
 app.post('/api/upload', authenticateToken, upload.single('image'), async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
   }
   if (!req.file || !req.file.buffer) {
     return res.status(400).json({ error: 'No image file provided' });
@@ -367,10 +422,11 @@ app.post('/api/upload', authenticateToken, upload.single('image'), async (req, r
   const dataBase64 = req.file.buffer.toString('base64');
   const contentType = req.file.mimetype || 'image/png';
   const filename = req.file.originalname || `problem-${Date.now()}.png`;
+  const createdBy = req.user.role === 'admin' ? null : req.user.id;
   try {
     const result = await pool.query(
-      'INSERT INTO uploads (data, filename, content_type) VALUES ($1, $2, $3) RETURNING id',
-      [dataBase64, filename, contentType]
+      'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
+      [dataBase64, filename, contentType, createdBy]
     );
     const id = result.rows[0].id;
     res.json({ url: '/uploads/db/' + id });
@@ -380,15 +436,19 @@ app.post('/api/upload', authenticateToken, upload.single('image'), async (req, r
   }
 });
 
-// Serve DB-stored image (survives deploys, free) — route must be before /:filename
+// Serve DB-stored image
 app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!Number.isInteger(id) || id < 1) return res.status(400).send('Bad request');
   try {
-    const result = await pool.query('SELECT data, content_type FROM uploads WHERE id = $1', [id]);
+    const result = await pool.query('SELECT data, content_type, created_by FROM uploads WHERE id = $1', [id]);
     if (result.rows.length === 0) return res.status(404).send('Not found');
-    const buf = Buffer.from(result.rows[0].data, 'base64');
-    res.setHeader('Content-Type', result.rows[0].content_type || 'image/png');
+    const row = result.rows[0];
+    if (req.user.role !== 'admin' && row.created_by != null && row.created_by !== req.user.id) {
+      return res.status(403).send('Forbidden');
+    }
+    const buf = Buffer.from(row.data, 'base64');
+    res.setHeader('Content-Type', row.content_type || 'image/png');
     res.send(buf);
   } catch (err) {
     console.error('Upload serve error:', err);
@@ -409,10 +469,10 @@ app.get('/api/uploads/:filename', authenticateToken, (req, res) => {
   res.sendFile(filepath);
 });
 
-// Create problem (admin only)
+// Create problem (admin + teacher)
 app.post('/api/problems', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
   }
   const { question, answer, image_url: imageUrl, source, folder_id: folderId, tag_ids: tagIds } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
@@ -423,11 +483,12 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
   }
   try {
+    const createdBy = req.user.role === 'admin' ? null : req.user.id;
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
-      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [question.trim(), answerNum, '', imageUrl || null, sourceStr, fid]
+      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [question.trim(), answerNum, '', imageUrl || null, sourceStr, fid, createdBy]
     );
     const problem = result.rows[0];
     if (Array.isArray(tagIds) && tagIds.length > 0) {
@@ -444,10 +505,10 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   }
 });
 
-// Bulk move and bulk delete must be defined BEFORE /:id routes (otherwise "bulk" matches as :id)
+// Bulk move and bulk delete
 app.put('/api/problems/bulk-move', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
   }
   const { ids, folder_id: folderId } = req.body;
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -459,9 +520,11 @@ app.put('/api/problems/bulk-move', authenticateToken, async (req, res) => {
   }
   const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
   try {
+    const { sql, params } = problemWhere(req.user);
+    const problemCond = sql.replace(/p\./g, '');
     const result = await pool.query(
-      'UPDATE problems SET folder_id = $1 WHERE id = ANY($2) RETURNING id',
-      [fid, validIds]
+      `UPDATE problems SET folder_id = $1 WHERE id = ANY($2) AND ${problemCond} RETURNING id`,
+      [fid, validIds, ...params]
     );
     res.json({ updated: result.rowCount });
   } catch (error) {
@@ -471,8 +534,8 @@ app.put('/api/problems/bulk-move', authenticateToken, async (req, res) => {
 });
 
 app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
   }
   const ids = req.body?.ids ?? req.query?.ids;
   const idArray = Array.isArray(ids) ? ids : (typeof ids === 'string' ? ids.split(',').map(s => s.trim()) : []);
@@ -483,6 +546,7 @@ app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
   if (validIds.length === 0) {
     return res.status(400).json({ error: 'No valid problem ids' });
   }
+  const { sql, params } = problemWriteWhere(req.user);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -492,7 +556,10 @@ app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
         [id]
       );
     }
-    const del = await client.query('DELETE FROM problems WHERE id = ANY($1) RETURNING id', [validIds]);
+    const del = await client.query(
+      `DELETE FROM problems WHERE id = ANY($1) AND ${sql} RETURNING id`,
+      [validIds, ...params]
+    );
     await client.query('COMMIT');
     res.json({ deleted: del.rowCount });
   } catch (error) {
@@ -504,10 +571,10 @@ app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
   }
 });
 
-// Update problem (admin only)
+// Update problem (admin + teacher, own/public only)
 app.put('/api/problems/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
   }
   const { question, answer, image_url: imageUrl, source, folder_id: folderId, tag_ids: tagIds } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
@@ -518,11 +585,13 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
   }
   try {
+    const { sql, params } = problemWhere(req.user);
+    const problemCond = sql.replace(/p\./g, '');
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
-      'UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = $6 WHERE id = $7 RETURNING *',
-      [question.trim(), answerNum, '', imageUrl || null, sourceStr, fid, req.params.id]
+      `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = $6 WHERE id = $7 AND ${problemCond} RETURNING *`,
+      [question.trim(), answerNum, '', imageUrl || null, sourceStr, fid, req.params.id, ...params]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Problem not found' });
     const problem = result.rows[0];
@@ -541,15 +610,16 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Delete problem (admin only)
+// Delete problem (admin + teacher, own/public only)
 app.delete('/api/problems/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
   }
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) {
     return res.status(400).json({ error: 'Invalid problem id' });
   }
+  const { sql, params } = problemWriteWhere(req.user);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -557,7 +627,10 @@ app.delete('/api/problems/:id', authenticateToken, async (req, res) => {
       'UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids)',
       [id]
     );
-    const del = await client.query('DELETE FROM problems WHERE id = $1 RETURNING id', [id]);
+    const del = await client.query(
+      `DELETE FROM problems WHERE id = $1 AND ${sql} RETURNING id`,
+      [id, ...params]
+    );
     await client.query('COMMIT');
     if (del.rowCount === 0) {
       return res.status(404).json({ error: 'Problem not found' });
