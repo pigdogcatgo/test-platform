@@ -387,7 +387,8 @@ const App = () => {
       setToken(data.token);
       setUser(data.user);
     } catch (error) {
-      alert('Invalid credentials');
+      const msg = error.response?.data?.error || error.response?.status === 401 ? 'Invalid credentials' : (error.message || 'Login failed');
+      alert(msg);
     }
   };
 

@@ -222,8 +222,15 @@ function folderWriteWhere(user) {
 // Folders (admin: all CRUD; teacher: CRUD for own + public)
 app.get('/api/folders', authenticateToken, async (req, res) => {
   try {
-    const { sql, params } = folderReadWhere(req.user);
-    const result = await pool.query(`SELECT * FROM folders WHERE ${sql} ORDER BY name`, params);
+    let result;
+    try {
+      const { sql, params } = folderReadWhere(req.user);
+      result = await pool.query(`SELECT * FROM folders WHERE ${sql} ORDER BY name`, params);
+    } catch (colErr) {
+      if (colErr.message && /created_by|does not exist/i.test(colErr.message)) {
+        result = await pool.query('SELECT * FROM folders ORDER BY name');
+      } else throw colErr;
+    }
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -328,8 +335,15 @@ function tagWriteWhere(user) {
 
 app.get('/api/tags', authenticateToken, async (req, res) => {
   try {
-    const { sql, params } = tagWhere(req.user);
-    const result = await pool.query(`SELECT * FROM tags WHERE ${sql} ORDER BY name`, params);
+    let result;
+    try {
+      const { sql, params } = tagReadWhere(req.user);
+      result = await pool.query(`SELECT * FROM tags WHERE ${sql} ORDER BY name`, params);
+    } catch (colErr) {
+      if (colErr.message && /created_by|does not exist/i.test(colErr.message)) {
+        result = await pool.query('SELECT * FROM tags ORDER BY name');
+      } else throw colErr;
+    }
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -384,14 +398,26 @@ function problemWriteWhere(user) {
 // Get all problems (with folder and tags)
 app.get('/api/problems', authenticateToken, async (req, res) => {
   try {
-    const { sql, params } = problemReadWhere(req.user);
-    const result = await pool.query(`
-      SELECT p.*, f.name as folder_name
-      FROM problems p
-      LEFT JOIN folders f ON p.folder_id = f.id
-      WHERE ${sql}
-      ORDER BY COALESCE(f.name, 'zzz'), p.id
-    `, params);
+    let result;
+    try {
+      const { sql, params } = problemReadWhere(req.user);
+      result = await pool.query(`
+        SELECT p.*, f.name as folder_name
+        FROM problems p
+        LEFT JOIN folders f ON p.folder_id = f.id
+        WHERE ${sql}
+        ORDER BY COALESCE(f.name, 'zzz'), p.id
+      `, params);
+    } catch (colErr) {
+      if (colErr.message && /created_by|does not exist/i.test(colErr.message)) {
+        result = await pool.query(`
+          SELECT p.*, f.name as folder_name
+          FROM problems p
+          LEFT JOIN folders f ON p.folder_id = f.id
+          ORDER BY COALESCE(f.name, 'zzz'), p.id
+        `);
+      } else throw colErr;
+    }
     const tagResult = await pool.query('SELECT problem_id, tag_id FROM problem_tags');
     const tagsByProblem = {};
     for (const row of tagResult.rows) {
