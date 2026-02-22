@@ -7,7 +7,7 @@ import { PDFParse } from 'pdf-parse';
 import { GoogleGenAI, createUserContent } from '@google/genai';
 import { jsonrepair } from 'jsonrepair';
 import pool from './db.js';
-import { parseAnswerToNumber } from './answerUtils.js';
+import { parseAndValidateAnswer } from './answerUtils.js';
 
 const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
@@ -43,11 +43,12 @@ async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames) {
   const systemPrompt = `You are a math competition problem processor. You will receive a PDF of a Sprint Round (or similar). Your job is to:
 1. Extract EVERY problem from the Sprint Round section only. Do not include Target, Countdown, or other sections.
 2. For each problem: convert to LaTeX (use $...$ and $$...$$ for math only), assign topics, and use the answer from the provided answer key.
-3. Return a JSON object: { "folderName": "Year - Title - Round", "problems": [{ "number": N, "questionLatex": "...", "topics": ["tag1"], "answer": "numeric" }] }
-4. For "topics" use only from: [${tagList}]
-5. In questionLatex, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly
-6. Do NOT solve. Use the answer key values exactly for the "answer" field.
-7. Extract folderName from the PDF header (e.g. "2021 - National Competition - Sprint Round").
+3. Return a JSON object: { "folderName": "Year - Title - Round", "problems": [{ "number": N, "questionLatex": "...", "topics": ["tag1"], "answer": "value" }] }
+4. Answer can be: a number (42, 3/4, √2), a string (e.g. Saturday), or an ordered pair (e.g. (-1,-3)). Use the answer key exactly.
+5. For "topics" use only from: [${tagList}]
+6. In questionLatex, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly
+7. Do NOT solve. Use the answer key values exactly for the "answer" field.
+8. Extract folderName from the PDF header (e.g. "2021 - National Competition - Sprint Round").
 
 CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath and amssymb commands (\\\\frac, \\\\sqrt, \\\\neq, \\\\leq, \\\\geq, \\\\sum, \\\\int, etc.). For "not equal" use \\\\ne. For literal $ use \\\\$.`;
 
@@ -109,8 +110,8 @@ function parseAIResponse(rawContent, answerMap) {
     const item = arr[i];
     const num = item?.number ?? i + 1;
     const answer = answerMap[num] !== undefined ? String(answerMap[num]) : (item.answer || '');
-    const answerNum = parseAnswerToNumber(answer);
-    if (answerNum === null && answer !== '') {
+    const answerVal = parseAndValidateAnswer(answer);
+    if (answerVal === null && answer !== '') {
       errors.push({ number: num, message: `Invalid answer for problem ${num}: "${answer}"` });
       continue;
     }
@@ -121,7 +122,10 @@ function parseAIResponse(rawContent, answerMap) {
     question = question.replace(/\\neq\b/g, '\\ne');
     question = question.replace(/(\b(?:cost|costs|spent)\s+)\\(\d+)/gi, '$1\\$$2');
     const tag = topics.find((t) => allowedTagNames.includes(t)) || defaultTag;
-    results.push({ number: num, question, answer: answerNum !== null ? answerNum : 0, topics: [tag], source: `Problem ${num}` });
+    const answerStored = answerVal !== null
+      ? (typeof answerVal === 'number' ? String(answerVal) : answerVal)
+      : '0';
+    results.push({ number: num, question, answer: answerStored, topics: [tag], source: `Problem ${num}` });
   }
   return { folderName, results, errors };
 }
@@ -221,9 +225,10 @@ async function ensureTags(client, createdBy) {
 
 function processProblemNoAI(problem, answerFromKey) {
   if (answerFromKey === undefined) throw new Error(`Answer key required for problem ${problem.number} (no-AI mode)`);
-  const answerNum = parseAnswerToNumber(String(answerFromKey));
-  if (answerNum === null) throw new Error(`Invalid answer for problem ${problem.number}: "${answerFromKey}"`);
-  return { question: problem.raw, answer: answerNum, topic: 'Arithmetic', source: `Problem ${problem.number}` };
+  const answerVal = parseAndValidateAnswer(String(answerFromKey));
+  if (answerVal === null) throw new Error(`Invalid answer for problem ${problem.number}: "${answerFromKey}"`);
+  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
+  return { question: problem.raw, answer: answerStored, topic: 'Arithmetic', source: `Problem ${problem.number}` };
 }
 
 /**

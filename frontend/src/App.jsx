@@ -526,7 +526,7 @@ const App = () => {
       return;
     }
     if (!answerStr) {
-      alert('Please enter an answer (e.g. 42, 3/4, √2, sqrt(2)/2).');
+      alert('Please enter an answer (e.g. 42, 3/4, √2, Saturday, (-1,-3)).');
       return;
     }
 
@@ -1846,7 +1846,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             </button>
           </div>
           <div className="mb-2">
-            <label className="block text-xs text-gray-500 mb-1">Answer key (required — one per line) — format: 1. 42, 2. 3/4, 3. 90000</label>
+            <label className="block text-xs text-gray-500 mb-1">Answer key (required — one per line) — format: 1. 42, 2. 3/4, 3. Saturday, 4. (-1,-3)</label>
             <textarea
               value={pdfImportAnswerKey}
               onChange={(e) => setPdfImportAnswerKey(e.target.value)}
@@ -1941,7 +1941,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   )}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Answer (number, fraction, or radical)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Answer (number, fraction, radical, string, or ordered pair like (-1,-3))</label>
                   <input
                     type="text"
                     value={editingProblem.answer ?? ''}

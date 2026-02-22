@@ -44,6 +44,16 @@ export async function initDatabase() {
     }
     try {
       await client.query(`
+        ALTER TABLE problems 
+        ALTER COLUMN answer TYPE TEXT 
+        USING answer::text
+      `);
+      console.log('Problems answer column migrated to TEXT');
+    } catch (migErr) {
+      console.warn('Migration answer to TEXT (non-fatal):', migErr.message);
+    }
+    try {
+      await client.query(`
         CREATE TABLE IF NOT EXISTS folders (
           id SERIAL PRIMARY KEY,
           name VARCHAR(200) NOT NULL,
@@ -127,7 +137,7 @@ export async function initDatabase() {
       CREATE TABLE IF NOT EXISTS problems (
         id SERIAL PRIMARY KEY,
         question TEXT NOT NULL,
-        answer NUMERIC NOT NULL,
+        answer TEXT NOT NULL,
         topic VARCHAR(100),
         image_url TEXT,
         source TEXT,

@@ -7,7 +7,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import pool, { initDatabase, seedDatabase } from './db.js';
-import { parseAnswerToNumber } from './answerUtils.js';
+import { parseAndValidateAnswer, compareAnswers } from './answerUtils.js';
 
 dotenv.config();
 
@@ -504,17 +504,18 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
-  const answerNum = parseAnswerToNumber(answer);
-  if (answerNum === null) {
-    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
+  const answerVal = parseAndValidateAnswer(answer);
+  if (answerVal === null) {
+    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, Saturday, (-1,-3))' });
   }
+  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
   try {
     const createdBy = req.user.role === 'admin' ? null : req.user.id;
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
       'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [question.trim(), answerNum, '', imageUrl || null, sourceStr, fid, createdBy]
+      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy]
     );
     const problem = result.rows[0];
     if (Array.isArray(tagIds) && tagIds.length > 0) {
@@ -606,10 +607,11 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
-  const answerNum = parseAnswerToNumber(answer);
-  if (answerNum === null) {
-    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
+  const answerVal = parseAndValidateAnswer(answer);
+  if (answerVal === null) {
+    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, Saturday, (-1,-3))' });
   }
+  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
   try {
     const { sql, params } = problemWhere(req.user);
     const problemCond = sql.replace(/p\./g, '');
@@ -617,7 +619,7 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
     const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
       `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = $6 WHERE id = $7 AND ${problemCond} RETURNING *`,
-      [question.trim(), answerNum, '', imageUrl || null, sourceStr, fid, req.params.id, ...params]
+      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, req.params.id, ...params]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Problem not found' });
     const problem = result.rows[0];
@@ -838,9 +840,8 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     
     const TOLERANCE = 0.001;
     for (const problem of problems) {
-      const userAnswer = parseAnswerToNumber(answers[problem.id]);
-      const correctAnswer = parseFloat(problem.answer);
-      const isCorrect = userAnswer !== null && Math.abs(userAnswer - correctAnswer) < TOLERANCE;
+      const userAnswer = answers[problem.id];
+      const isCorrect = compareAnswers(userAnswer, problem.answer, TOLERANCE);
       results[problem.id] = isCorrect;
       
       if (isCorrect) score++;
