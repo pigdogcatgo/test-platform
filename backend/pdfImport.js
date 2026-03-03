@@ -7,13 +7,14 @@ import { PDFParse } from 'pdf-parse';
 import { GoogleGenAI, createUserContent } from '@google/genai';
 import { jsonrepair } from 'jsonrepair';
 import pool from './db.js';
-import { parseAnswerToNumber } from './answerUtils.js';
+import { parseAnswerToNumber, parseAndValidateAnswer } from './answerUtils.js';
 
 const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
 
 /**
- * Parse optional answer key text. Format: "1. 42" or "1) 3/4" or "1: 90000" (one per line)
+ * Parse optional answer key text. Format: "1. 42" or "1) 3/4" or "1: 90000" (one per line).
+ * Use quotes for string/ordered pair: 3. "Saturday" or 4. "(-1,-3)"
  */
 export function parseAnswerKey(text) {
   if (!text || typeof text !== 'string') return {};
@@ -131,8 +132,8 @@ function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'N
     const item = arr[i];
     const num = item?.number ?? i + 1;
     const answer = answerMap[num] !== undefined ? String(answerMap[num]) : (item.answer || '');
-    const answerNum = parseAnswerToNumber(answer);
-    if (answerNum === null && answer !== '') {
+    const answerVal = parseAndValidateAnswer(answer);
+    if (answerVal === null && answer !== '') {
       errors.push({ number: num, message: `Invalid answer for problem ${num}: "${answer}"` });
       continue;
     }
@@ -144,7 +145,10 @@ function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'N
     question = question.replace(/(\b(?:cost|costs|spent)\s+)\\(\d+)/gi, '$1\\$$2');
     const aiTopic = topics.find((t) => t && String(t).trim()) || defaultTag;
     const tag = resolveToAllowedTag(aiTopic, allowedTagNames);
-    results.push({ number: num, question, answer: answerNum !== null ? answerNum : 0, topics: [tag], source: `Problem ${num}` });
+    const answerStored = answerVal !== null
+      ? (typeof answerVal === 'number' ? String(answerVal) : answerVal)
+      : '0';
+    results.push({ number: num, question, answer: answerStored, topics: [tag], source: `Problem ${num}` });
   }
   return { folderName, results, errors };
 }
@@ -236,9 +240,10 @@ async function ensureTags(client, createdBy) {
 
 function processProblemNoAI(problem, answerFromKey) {
   if (answerFromKey === undefined) throw new Error(`Answer key required for problem ${problem.number} (no-AI mode)`);
-  const answerNum = parseAnswerToNumber(String(answerFromKey));
-  if (answerNum === null) throw new Error(`Invalid answer for problem ${problem.number}: "${answerFromKey}"`);
-  return { question: problem.raw, answer: answerNum, topic: 'Arithmetic', source: `Problem ${problem.number}` };
+  const answerVal = parseAndValidateAnswer(String(answerFromKey));
+  if (answerVal === null) throw new Error(`Invalid answer for problem ${problem.number}: "${answerFromKey}"`);
+  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
+  return { question: problem.raw, answer: answerStored, topic: 'Arithmetic', source: `Problem ${problem.number}` };
 }
 
 /**

@@ -527,7 +527,7 @@ const App = () => {
       return;
     }
     if (!answerStr) {
-      alert('Please enter an answer (e.g. 42, 3/4, √2, sqrt(2)/2).');
+      alert('Please enter an answer (e.g. 42, 3/4, √2, or "Saturday", "(-1,-3)" for strings/ordered pairs).');
       return;
     }
 
@@ -1893,7 +1893,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             </button>
           </div>
           <div className="mb-2">
-            <label className="block text-xs text-gray-500 mb-1">Answer key (required — one per line) — format: 1. 42, 2. 3/4, 3. 90000</label>
+            <label className="block text-xs text-gray-500 mb-1">Answer key (required — one per line). Use quotes for strings/ordered pairs: 1. 42, 2. 3/4, 3. &quot;Saturday&quot;, 4. &quot;(-1,-3)&quot;</label>
             <textarea
               value={pdfImportAnswerKey}
               onChange={(e) => setPdfImportAnswerKey(e.target.value)}
