@@ -156,6 +156,7 @@ const App = () => {
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [leaderboardSortBy, setLeaderboardSortBy] = useState('cumulative'); // 'cumulative' | 'elo'
+  const [attemptDetails, setAttemptDetails] = useState(null);
 
   // Create axios instance with useMemo with useMemo to prevent recreation on every render
   const api = useMemo(() => {
@@ -222,16 +223,17 @@ const App = () => {
     
     try {
       const { data } = await api.post(`/api/tests/${activeTest.id}/submit`, { answers: testAnswers });
+      const testId = activeTest.id;
       if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
       sessionStorage.removeItem('testInProgress');
-      sessionStorage.removeItem('testAnswers_' + activeTest.id);
-      alert(`Test submitted! Score: ${data.attempt.score}/${data.attempt.total}\nELO Change: ${data.eloChange >= 0 ? '+' : ''}${data.eloChange}`);
-      
+      sessionStorage.removeItem('testAnswers_' + testId);
       setActiveTest(null);
+      setTestProblems([]);
       setTestAnswers({});
       setTimeRemaining(null);
       setView('student-dashboard');
-      loadUserData();
+      loadUserData().catch(() => {});
+      alert(`Test submitted! Score: ${data.attempt.score}/${data.attempt.total}\nELO Change: ${data.eloChange >= 0 ? '+' : ''}${data.eloChange}`);
     } catch (error) {
       alert(error.response?.data?.error || 'Error submitting test');
     }
@@ -296,12 +298,12 @@ const App = () => {
     if (!test) return;
     (async () => {
       try {
-        const { data: problemsData } = await api.get('/api/problems');
-        const probs = problemIds.map(id => problemsData.find(p => p.id === id)).filter(Boolean);
+        const { data: probs } = await api.get(`/api/tests/${testId}/problems`);
+        const ordered = problemIds.map(id => probs.find(p => p.id === id)).filter(Boolean);
         const savedAnswers = sessionStorage.getItem('testAnswers_' + testId);
         const answers = savedAnswers ? JSON.parse(savedAnswers) : {};
         setActiveTest(test);
-        setTestProblems(probs);
+        setTestProblems(ordered.length ? ordered : probs);
         setTestAnswers(answers);
         setTimeRemaining(Math.max(0, Math.ceil((startTime + durationMin * 60 * 1000 - Date.now()) / 1000)));
         setView('taking-test');
@@ -463,9 +465,7 @@ const App = () => {
     }
 
     try {
-      const { data: problemsData } = await api.get('/api/problems');
-      const problemIds = test.problem_ids || [];
-      const testProbs = problemIds.map(id => problemsData.find(p => p.id === id)).filter(Boolean);
+      const { data: testProbs } = await api.get(`/api/tests/${test.id}/problems`);
       const shuffled = [...testProbs].sort(() => Math.random() - 0.5);
       const startTime = Date.now();
       sessionStorage.setItem('testInProgress', JSON.stringify({
@@ -526,7 +526,7 @@ const App = () => {
       return;
     }
     if (!answerStr) {
-      alert('Please enter an answer (e.g. 42, 3/4, √2, Saturday, (-1,-3)).');
+      alert('Please enter an answer (e.g. 42, 3/4, √2, sqrt(2)/2).');
       return;
     }
 
@@ -1089,6 +1089,19 @@ if (view === 'student-dashboard' && user) {
                         ELO {delta >= 0 ? '+' : ''}
                         {delta}
                       </p>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const { data } = await api.get(`/api/attempts/${attempt.id}/details`);
+                            setAttemptDetails(data);
+                          } catch {
+                            alert('Error loading attempt details');
+                          }
+                        }}
+                        className="mt-2 text-sm text-[#007f8f] font-medium hover:underline"
+                      >
+                        View Details
+                      </button>
                     </div>
                   );
                 })}
@@ -1096,6 +1109,50 @@ if (view === 'student-dashboard' && user) {
             )}
           </div>
         </div>
+
+        {/* Attempt Details Modal */}
+        {attemptDetails && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setAttemptDetails(null)}>
+            <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold text-gray-800">Test Results</h3>
+                <button onClick={() => setAttemptDetails(null)} className="text-gray-500 hover:text-gray-700 text-2xl leading-none">&times;</button>
+              </div>
+              <p className="text-sm text-gray-600 mb-4">
+                Score: {attemptDetails.attempt.score}/{attemptDetails.attempt.total}
+                {attemptDetails.attempt.elo_after != null && (
+                  <span className="ml-2">ELO: {attemptDetails.attempt.elo_before} → {attemptDetails.attempt.elo_after}</span>
+                )}
+              </p>
+              {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
+                <div className="space-y-4">
+                  {attemptDetails.problems.map((item, idx) => (
+                    <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>
+                      <p className="text-xs text-gray-500 mb-1">Question {idx + 1}</p>
+                      <div className="text-sm text-gray-800 mb-2"><RenderLatex text={item.question} /></div>
+                      {item.image_url && <ProblemImage url={item.image_url} token={token} />}
+                      <p className="text-sm mt-2">
+                        <span className="font-medium">Your answer:</span> {String(item.student_answer || '(blank)')}
+                        {item.correct ? (
+                          <span className="text-green-600 ml-2">✓ Correct</span>
+                        ) : (
+                          <>
+                            <span className="text-red-600 ml-2">✗ Incorrect</span>
+                            <span className="block mt-1 text-[#007f8f]"><span className="font-medium">Correct answer:</span> {String(item.correct_answer ?? '')}</span>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">
+                  {attemptDetails.showAnswers ? 'No problem details available.' : 'Answers will be visible after the due date or when all students have submitted.'}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1846,7 +1903,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             </button>
           </div>
           <div className="mb-2">
-            <label className="block text-xs text-gray-500 mb-1">Answer key (required — one per line) — format: 1. 42, 2. 3/4, 3. Saturday, 4. (-1,-3)</label>
+            <label className="block text-xs text-gray-500 mb-1">Answer key (required — one per line) — format: 1. 42, 2. 3/4, 3. 90000</label>
             <textarea
               value={pdfImportAnswerKey}
               onChange={(e) => setPdfImportAnswerKey(e.target.value)}
@@ -1941,7 +1998,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   )}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Answer (number, fraction, radical, string, or ordered pair like (-1,-3))</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Answer (number, fraction, or radical)</label>
                   <input
                     type="text"
                     value={editingProblem.answer ?? ''}

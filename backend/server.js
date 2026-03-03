@@ -7,7 +7,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import pool, { initDatabase, seedDatabase } from './db.js';
-import { parseAndValidateAnswer, compareAnswers } from './answerUtils.js';
+import { parseAnswerToNumber } from './answerUtils.js';
 
 dotenv.config();
 
@@ -215,7 +215,7 @@ function folderReadWhere(user) {
 }
 function folderWriteWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(created_by = $1)', params: [user.id] };
+  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
   return { sql: '1=0', params: [] };
 }
 
@@ -264,7 +264,7 @@ app.put('/api/folders/:id', authenticateToken, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
   try {
-    const { sql, params } = folderWhere(req.user);
+    const { sql, params } = folderReadWhere(req.user);
     const result = await pool.query(
       `UPDATE folders SET name = $1 WHERE id = $2 AND ${sql} RETURNING *`,
       [name.trim(), id, ...params]
@@ -329,7 +329,7 @@ function tagReadWhere(user) {
 }
 function tagWriteWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(created_by = $1)', params: [user.id] };
+  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
   return { sql: '1=0', params: [] };
 }
 
@@ -391,7 +391,7 @@ function problemReadWhere(user) {
 }
 function problemWriteWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(created_by = $1)', params: [user.id] };
+  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
   return { sql: '1=0', params: [] };
 }
 
@@ -504,18 +504,17 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
-  const answerVal = parseAndValidateAnswer(answer);
-  if (answerVal === null) {
-    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, Saturday, (-1,-3))' });
+  const answerNum = parseAnswerToNumber(answer);
+  if (answerNum === null) {
+    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
   }
-  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
   try {
     const createdBy = req.user.role === 'admin' ? null : req.user.id;
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
       'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy]
+      [question.trim(), String(answerNum), '', imageUrl || null, sourceStr, fid, createdBy]
     );
     const problem = result.rows[0];
     if (Array.isArray(tagIds) && tagIds.length > 0) {
@@ -547,7 +546,7 @@ app.put('/api/problems/bulk-move', authenticateToken, async (req, res) => {
   }
   const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
   try {
-    const { sql, params } = problemWhere(req.user);
+    const { sql, params } = problemReadWhere(req.user);
     const problemCond = sql.replace(/p\./g, '');
     const result = await pool.query(
       `UPDATE problems SET folder_id = $1 WHERE id = ANY($2) AND ${problemCond} RETURNING id`,
@@ -607,19 +606,18 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
-  const answerVal = parseAndValidateAnswer(answer);
-  if (answerVal === null) {
-    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, Saturday, (-1,-3))' });
+  const answerNum = parseAnswerToNumber(answer);
+  if (answerNum === null) {
+    return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, √2/2)' });
   }
-  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
   try {
-    const { sql, params } = problemWhere(req.user);
+    const { sql, params } = problemReadWhere(req.user);
     const problemCond = sql.replace(/p\./g, '');
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
       `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = $6 WHERE id = $7 AND ${problemCond} RETURNING *`,
-      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, req.params.id, ...params]
+      [question.trim(), String(answerNum), '', imageUrl || null, sourceStr, fid, req.params.id, ...params]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Problem not found' });
     const problem = result.rows[0];
@@ -734,6 +732,112 @@ app.get('/api/attempts', authenticateToken, async (req, res) => {
   }
 });
 
+// Get attempt details with answers/correct answers (when test complete: due passed or all submitted)
+app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
+  try {
+    const attemptId = parseInt(req.params.id, 10);
+    if (Number.isNaN(attemptId)) return res.status(400).json({ error: 'Invalid attempt id' });
+    const attemptRows = await pool.query(
+      'SELECT ta.*, t.due_date, t.problem_ids, t.created_by FROM test_attempts ta JOIN tests t ON t.id = ta.test_id WHERE ta.id = $1',
+      [attemptId]
+    );
+    const attempt = attemptRows.rows[0];
+    if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
+    if (attempt.student_id !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+    const duePassed = new Date(attempt.due_date) <= new Date();
+    const studentCount = (await pool.query(
+      'SELECT COUNT(*)::int FROM users WHERE role = $1 AND teacher_id = $2',
+      ['student', attempt.created_by]
+    )).rows[0].count;
+    const submittedCount = (await pool.query(
+      'SELECT COUNT(*)::int FROM test_attempts WHERE test_id = $1',
+      [attempt.test_id]
+    )).rows[0].count;
+    const allSubmitted = studentCount > 0 && submittedCount >= studentCount;
+    const showAnswers = duePassed || allSubmitted;
+    const answers = typeof attempt.answers === 'string' ? JSON.parse(attempt.answers) : (attempt.answers || {});
+    const results = typeof attempt.results === 'string' ? JSON.parse(attempt.results) : (attempt.results || {});
+    const problemIds = attempt.problem_ids || [];
+    let problems = [];
+    if (showAnswers && problemIds.length > 0) {
+      const probsRows = await pool.query('SELECT id, question, answer, image_url FROM problems WHERE id = ANY($1)', [problemIds]);
+      const probMap = Object.fromEntries(probsRows.rows.map(p => [p.id, p]));
+      for (const pid of problemIds) {
+        const p = probMap[pid];
+        if (!p) continue;
+        problems.push({
+          problem_id: pid,
+          question: p.question,
+          image_url: p.image_url,
+          student_answer: answers[pid] ?? '',
+          correct: results[pid] === true,
+          correct_answer: showAnswers ? p.answer : undefined
+        });
+      }
+    }
+    res.json({
+      attempt: {
+        id: attempt.id,
+        test_id: attempt.test_id,
+        score: attempt.score,
+        total: attempt.total,
+        elo_before: attempt.elo_before,
+        elo_after: attempt.elo_after,
+        completed_at: attempt.completed_at
+      },
+      showAnswers,
+      problems
+    });
+  } catch (error) {
+    console.error('Attempt details error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get problems for a test (students need this to load test content; verify access via teacher)
+app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
+  try {
+    const testId = parseInt(req.params.id, 10);
+    if (Number.isNaN(testId)) return res.status(400).json({ error: 'Invalid test id' });
+    const testResult = await pool.query('SELECT * FROM tests WHERE id = $1', [testId]);
+    const test = testResult.rows[0];
+    if (!test) return res.status(404).json({ error: 'Test not found' });
+    const problemIds = test.problem_ids || [];
+    if (problemIds.length === 0) return res.json([]);
+    if (req.user.role === 'student') {
+      const studentRow = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
+      if (studentRow.rows[0]?.teacher_id !== test.created_by) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    } else if (req.user.role === 'teacher' && test.created_by !== req.user.id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    const result = await pool.query(
+      'SELECT p.*, f.name as folder_name FROM problems p LEFT JOIN folders f ON p.folder_id = f.id WHERE p.id = ANY($1)',
+      [problemIds]
+    );
+    const tagResult = await pool.query('SELECT problem_id, tag_id FROM problem_tags WHERE problem_id = ANY($1)', [problemIds]);
+    const tagsByProblem = {};
+    for (const row of tagResult.rows) {
+      if (!tagsByProblem[row.problem_id]) tagsByProblem[row.problem_id] = [];
+      tagsByProblem[row.problem_id].push(row.tag_id);
+    }
+    const tagNames = await pool.query('SELECT id, name FROM tags WHERE id = ANY($1)', [
+      [...new Set(tagResult.rows.map(r => r.tag_id))]
+    ]);
+    const tagMap = Object.fromEntries(tagNames.rows.map(r => [r.id, r.name]));
+    const problems = result.rows.map(p => ({
+      ...p,
+      tag_ids: tagsByProblem[p.id] || [],
+      tag_names: (tagsByProblem[p.id] || []).map(tid => tagMap[tid]).filter(Boolean)
+    }));
+    res.json(problems);
+  } catch (error) {
+    console.error('Get test problems error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Get all attempts for a test (teacher only; only their students)
 app.get('/api/tests/:id/attempts', authenticateToken, async (req, res) => {
   if (req.user.role !== 'teacher') {
@@ -840,8 +944,9 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     
     const TOLERANCE = 0.001;
     for (const problem of problems) {
-      const userAnswer = answers[problem.id];
-      const isCorrect = compareAnswers(userAnswer, problem.answer, TOLERANCE);
+      const userAnswer = parseAnswerToNumber(answers[problem.id]);
+      const correctAnswer = parseFloat(problem.answer);
+      const isCorrect = userAnswer !== null && Math.abs(userAnswer - correctAnswer) < TOLERANCE;
       results[problem.id] = isCorrect;
       
       if (isCorrect) score++;
