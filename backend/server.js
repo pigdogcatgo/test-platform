@@ -339,10 +339,18 @@ app.get('/api/tags', authenticateToken, async (req, res) => {
   try {
     let result;
     try {
-      const { sql, params } = tagReadWhere(req.user);
-      result = await pool.query(`SELECT * FROM tags WHERE ${sql} ORDER BY name`, params);
+      if (req.user.role === 'teacher') {
+        const systemNames = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
+        result = await pool.query(
+          'SELECT * FROM tags WHERE name = ANY($1::text[]) ORDER BY name',
+          [systemNames]
+        );
+      } else {
+        const { sql, params } = tagReadWhere(req.user);
+        result = await pool.query(`SELECT * FROM tags WHERE ${sql} ORDER BY name`, params);
+      }
     } catch (colErr) {
-      if (colErr.message && /created_by|does not exist/i.test(colErr.message)) {
+      if (colErr.message && /created_by|is_system|does not exist/i.test(colErr.message)) {
         result = await pool.query('SELECT * FROM tags ORDER BY name');
       } else throw colErr;
     }
@@ -353,22 +361,7 @@ app.get('/api/tags', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/tags', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
-  const { name } = req.body;
-  if (!name || typeof name !== 'string' || !name.trim()) {
-    return res.status(400).json({ error: 'Tag name is required' });
-  }
-  try {
-    const createdBy = req.user.role === 'admin' ? null : req.user.id;
-    const result = await pool.query(
-      'INSERT INTO tags (name, created_by) VALUES ($1, $2) RETURNING *',
-      [name.trim(), createdBy]
-    );
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    if (error.code === '23505') return res.status(400).json({ error: 'Tag already exists' });
-    res.status(500).json({ error: error.message || 'Server error' });
-  }
+  return res.status(403).json({ error: 'Tag creation is disabled. Only the six system tags (Algebra, Arithmetic, Counting, Geometry, Number Theory, Probability) are available.' });
 });
 
 app.delete('/api/tags/:id', authenticateToken, async (req, res) => {
@@ -376,6 +369,13 @@ app.delete('/api/tags/:id', authenticateToken, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid tag id' });
   try {
+    const tagRow = await pool.query('SELECT name, is_system FROM tags WHERE id = $1', [id]);
+    if (tagRow.rows.length === 0) return res.status(404).json({ error: 'Tag not found' });
+    const systemNames = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
+    const isSystem = tagRow.rows[0].is_system === true || systemNames.includes(tagRow.rows[0].name);
+    if (isSystem) {
+      return res.status(403).json({ error: 'System tags cannot be deleted.' });
+    }
     const { sql, params } = tagWriteWhere(req.user);
     const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
     const del = await pool.query(`DELETE FROM tags WHERE id = $1 AND ${sqlBump} RETURNING id`, [id, ...params]);

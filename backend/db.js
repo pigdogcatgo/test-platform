@@ -220,6 +220,24 @@ export async function initDatabase() {
     } catch (migErr) {
       console.warn('Migration created_by (non-fatal):', migErr.message);
     }
+    try {
+      await client.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_system BOOLEAN DEFAULT false');
+      const systemTagNames = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
+      for (const name of systemTagNames) {
+        const exists = await client.query('SELECT 1 FROM tags WHERE name = $1', [name]);
+        if (exists.rows.length === 0) {
+          await client.query(
+            'INSERT INTO tags (name, is_system, created_by) VALUES ($1, true, NULL)',
+            [name]
+          );
+        } else {
+          await client.query('UPDATE tags SET is_system = true WHERE name = $1', [name]);
+        }
+      }
+      console.log('System tags ensured');
+    } catch (migErr) {
+      console.warn('Migration system tags (non-fatal):', migErr.message);
+    }
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Error initializing database:', error);
@@ -270,10 +288,9 @@ export async function seedDatabase() {
     const tagCheck = await client.query('SELECT COUNT(*) FROM tags');
     if (parseInt(tagCheck.rows[0].count) === 0) {
       await client.query(`
-        INSERT INTO tags (name) VALUES
-        ('Algebra'), ('Geometry'), ('Number Theory'), ('Counting'), ('Probability'),
-        ('Arithmetic'), ('Exponents'), ('Percentages'), ('Division'), ('Multiplication'),
-        ('Square Roots'), ('Fractions')
+        INSERT INTO tags (name, is_system) VALUES
+        ('Algebra', true), ('Arithmetic', true), ('Counting', true), ('Geometry', true),
+        ('Number Theory', true), ('Probability', true)
       `);
     }
     

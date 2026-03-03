@@ -44,7 +44,7 @@ async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames) {
 1. Extract EVERY problem from the Sprint Round section only. Do not include Target, Countdown, or other sections.
 2. For each problem: convert to LaTeX (use $...$ and $$...$$ for math only), assign topics, and use the answer from the provided answer key.
 3. Return a JSON object: { "folderName": "Year - Title - Round", "problems": [{ "number": N, "questionLatex": "...", "topics": ["tag1"], "answer": "numeric" }] }
-4. For "topics" use only from: [${tagList}]
+4. TAGS: You MUST use ONLY tags from this exact list — no exceptions: [${tagList}]. Use the exact spelling and casing (e.g. "Geometry" not "Geometric", "Algebra" not "algebraic"). Do NOT invent, create, or use variations of the same category.
 5. In questionLatex, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly
 6. Do NOT solve. Use the answer key values exactly for the "answer" field.
 7. Extract folderName from the PDF header (e.g. "2021 - National Competition - Sprint Round").
@@ -54,6 +54,8 @@ CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath 
   const userPrompt = `Extract all math problems from this PDF. Use this answer key for answers (do not solve):
 
 ${answerKeyText}
+
+For each problem's "topics" field, use ONLY these exact tag names (copy them character-for-character): ${tagList}. No variations or synonyms allowed.
 
 Return JSON: { "folderName": "...", "problems": [...] }`;
 
@@ -88,6 +90,27 @@ Return JSON: { "folderName": "...", "problems": [...] }`;
   throw lastErr || new Error('AI processing failed');
 }
 
+/**
+ * Resolve AI tag to an existing allowed tag. Uses case-insensitive exact match,
+ * then checks for same-category variants (e.g. "Geometric" -> "Geometry", "algebraic" -> "Algebra").
+ * Never returns a new tag — always maps to an allowed one.
+ */
+function resolveToAllowedTag(aiTag, allowedTagNames) {
+  if (!aiTag || typeof aiTag !== 'string') return allowedTagNames[0] || 'Arithmetic';
+  const n = aiTag.trim();
+  if (!n) return allowedTagNames[0] || 'Arithmetic';
+  const lower = n.toLowerCase();
+  const exact = allowedTagNames.find((a) => a.trim().toLowerCase() === lower);
+  if (exact) return exact;
+  const variant = allowedTagNames.find((a) => {
+    const al = a.trim().toLowerCase();
+    if (al.length < 4 || lower.length < 4) return false;
+    return al.includes(lower) || lower.includes(al) ||
+      (lower.length >= 5 && al.length >= 5 && (al.startsWith(lower.slice(0, 5)) || lower.startsWith(al.slice(0, 5))));
+  });
+  return variant || allowedTagNames[0] || 'Arithmetic';
+}
+
 function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'Number Theory', 'Counting', 'Geometry', 'Probability', 'Arithmetic']) {
   let jsonStr = rawContent.replace(/^```json?\s*|\s*```$/g, '').trim();
   const objMatch = jsonStr.match(/\{[\s\S]*\}/);
@@ -119,7 +142,8 @@ function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'N
     if (!question) continue;
     question = question.replace(/\\neq\b/g, '\\ne');
     question = question.replace(/(\b(?:cost|costs|spent)\s+)\\(\d+)/gi, '$1\\$$2');
-    const tag = topics.find((t) => allowedTagNames.includes(t)) || defaultTag;
+    const aiTopic = topics.find((t) => t && String(t).trim()) || defaultTag;
+    const tag = resolveToAllowedTag(aiTopic, allowedTagNames);
     results.push({ number: num, question, answer: answerNum !== null ? answerNum : 0, topics: [tag], source: `Problem ${num}` });
   }
   return { folderName, results, errors };
@@ -188,31 +212,23 @@ export function splitIntoProblems(text) {
 }
 
 async function ensureTags(client, createdBy) {
-  const tagNames = ['Algebra', 'Number Theory', 'Counting', 'Geometry', 'Probability', 'Arithmetic'];
+  const tagNames = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
   const tagMap = {};
   for (const name of tagNames) {
-    try {
-      if (createdBy === null) {
+    const existing = await client.query('SELECT id FROM tags WHERE name = $1', [name]);
+    if (existing.rows[0]) {
+      tagMap[name] = existing.rows[0].id;
+    } else {
+      try {
         const r = await client.query(
-          'INSERT INTO tags (name, created_by) VALUES ($1, NULL) RETURNING id',
+          'INSERT INTO tags (name, is_system, created_by) VALUES ($1, true, NULL) RETURNING id',
           [name]
         );
         if (r.rows[0]) tagMap[name] = r.rows[0].id;
-      } else {
-        const r = await client.query(
-          'INSERT INTO tags (name, created_by) VALUES ($1, $2) RETURNING id',
-          [name, createdBy]
-        );
-        if (r.rows[0]) tagMap[name] = r.rows[0].id;
+      } catch (err) {
+        const retry = await client.query('SELECT id FROM tags WHERE name = $1', [name]);
+        tagMap[name] = retry.rows[0]?.id;
       }
-    } catch (err) {
-      if (err.code === '23505') {
-        const existing = await client.query(
-          'SELECT id FROM tags WHERE name = $1 AND (created_by IS NOT DISTINCT FROM $2)',
-          [name, createdBy]
-        );
-        tagMap[name] = existing.rows[0]?.id;
-      } else throw err;
     }
   }
   return tagMap;
@@ -240,11 +256,15 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
   try {
     await client.query('BEGIN');
     await ensureTags(client, createdBy);
-    const allTags = createdBy === null
-      ? await client.query('SELECT id, name FROM tags WHERE created_by IS NULL ORDER BY name')
-      : await client.query('SELECT id, name FROM tags WHERE created_by IS NULL OR created_by = $1 ORDER BY name', [createdBy]);
+    const SYSTEM_TAG_NAMES = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
+    const allTags = await client.query(
+      'SELECT id, name FROM tags WHERE name = ANY($1::text[]) ORDER BY name',
+      [SYSTEM_TAG_NAMES]
+    );
     const tagMap = Object.fromEntries(allTags.rows.map((r) => [r.name, r.id]));
-    const allowedTagNames = allTags.rows.map((r) => r.name);
+    const allowedTagNames = allTags.rows.map((r) => r.name).length > 0
+      ? allTags.rows.map((r) => r.name)
+      : SYSTEM_TAG_NAMES;
     const defaultTag = allowedTagNames[0] || 'Arithmetic';
     let imported = 0;
     let sourceName = 'Imported from PDF';
