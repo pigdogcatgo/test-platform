@@ -547,7 +547,7 @@ app.put('/api/problems/bulk-move', authenticateToken, async (req, res) => {
   const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
   try {
     const { sql, params } = problemReadWhere(req.user);
-    const problemCond = sql.replace(/p\./g, '');
+    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$3' : '$1');
     const result = await pool.query(
       `UPDATE problems SET folder_id = $1 WHERE id = ANY($2) AND ${problemCond} RETURNING id`,
       [fid, validIds, ...params]
@@ -573,6 +573,7 @@ app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'No valid problem ids' });
   }
   const { sql, params } = problemWriteWhere(req.user);
+  const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -583,7 +584,7 @@ app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
       );
     }
     const del = await client.query(
-      `DELETE FROM problems WHERE id = ANY($1) AND ${sql} RETURNING id`,
+      `DELETE FROM problems WHERE id = ANY($1) AND ${sqlBump} RETURNING id`,
       [validIds, ...params]
     );
     await client.query('COMMIT');
