@@ -305,7 +305,7 @@ app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (r
     return res.status(400).json({ error: 'No PDF file provided' });
   }
   const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
-  const useAI = req.body.useAI !== 'false' && req.body.useAI !== false;
+  const useAI = req.user.role === 'teacher' ? true : (req.body.useAI !== 'false' && req.body.useAI !== false);
   const createdBy = req.user.role === 'admin' ? null : req.user.id;
   try {
     const { importPdfToDatabase } = await import('./pdfImport.js');

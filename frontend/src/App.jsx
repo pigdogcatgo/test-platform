@@ -668,7 +668,7 @@ const App = () => {
       const formData = new FormData();
       formData.append('pdf', pdfImportFile);
       if (pdfImportAnswerKey.trim()) formData.append('answerKey', pdfImportAnswerKey.trim());
-      formData.append('useAI', pdfImportUseAI ? 'true' : 'false');
+      formData.append('useAI', (user?.role === 'teacher' ? true : pdfImportUseAI) ? 'true' : 'false');
       const { data } = await api.post('/api/import-pdf', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 300000, // 5 min (Render free tier limit)
@@ -1862,16 +1862,23 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             </p>
           )}
           <p className="text-sm text-gray-600 mb-3">
-            Upload a competition PDF (e.g. MathCounts, AMC). Problems are auto-extracted and placed in a folder. <strong>No AI mode</strong> (default): paste the answer key — no API key needed. <strong>Use AI</strong>: converts to LaTeX, auto-tags, can solve — requires <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code>.
+            Upload a PDF of problems and enter an answer key. AI is used to auto-extract problems, sort them, and place them in a separate folder.
+            {user?.role === 'teacher' ? (
+              <span> Teachers must use AI mode (LaTeX, auto-tags) — requires <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code>.</span>
+            ) : (
+              <span> <strong>Use AI</strong>: converts to LaTeX, auto-tags — requires <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code>.</span>
+            )}
           </p>
-          <label className="flex items-center gap-2 mb-3 text-sm cursor-pointer">
-            <input
-              type="checkbox"
-              checked={pdfImportUseAI}
-              onChange={(e) => setPdfImportUseAI(e.target.checked)}
-            />
-            Use AI (LaTeX, auto-tags, optional solving) — requires API key
-          </label>
+          {user?.role !== 'teacher' && (
+            <label className="flex items-center gap-2 mb-3 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={pdfImportUseAI}
+                onChange={(e) => setPdfImportUseAI(e.target.checked)}
+              />
+              Use AI (LaTeX, auto-tags, optional solving) — requires API key
+            </label>
+          )}
           <div className="flex flex-wrap gap-3 items-end mb-3">
             <div className="flex-1 min-w-[200px]">
               <label className="block text-xs text-gray-500 mb-1">PDF file</label>
