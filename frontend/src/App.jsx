@@ -174,13 +174,14 @@ const App = () => {
     setActiveTest(null);
   }, []);
 
-  const loadUserData = useCallback(async () => {
+  const loadUserData = useCallback(async (opts = {}) => {
+    const preserveView = opts.preserveView ?? false;
     try {
       const { data: userData } = await api.get('/api/me');
       setUser(userData);
       
       if (userData.role === 'student') {
-        setView('student-dashboard');
+        if (!preserveView) setView('student-dashboard');
         const [testsRes, attemptsRes] = await Promise.all([
           api.get('/api/tests'),
           api.get('/api/attempts')
@@ -188,7 +189,7 @@ const App = () => {
         setTests(testsRes.data);
         setAttempts(attemptsRes.data);
       } else if (userData.role === 'teacher') {
-        setView('teacher-dashboard');
+        if (!preserveView) setView('teacher-dashboard');
         const [problemsRes, testsRes, studentsRes, foldersRes, tagsRes] = await Promise.all([
           api.get('/api/problems'),
           api.get('/api/tests'),
@@ -202,7 +203,7 @@ const App = () => {
         setFolders(foldersRes.data);
         setTags(tagsRes.data);
       } else if (userData.role === 'admin') {
-        setView('admin-dashboard');
+        if (!preserveView) setView('admin-dashboard');
         const [problemsRes, foldersRes, tagsRes] = await Promise.all([
           api.get('/api/problems'),
           api.get('/api/folders'),
@@ -547,7 +548,7 @@ const App = () => {
         await api.post('/api/problems', payload);
       }
       setEditingProblem(null);
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       const status = error.response?.status;
       const data = error.response?.data;
@@ -564,7 +565,7 @@ const App = () => {
     setProblemToDelete(null);
     try {
       await api.delete(`/api/problems/${id}`);
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting problem');
     }
@@ -577,7 +578,7 @@ const App = () => {
       await api.put('/api/problems/bulk-move', { ids: selectedProblemIds, folder_id: folderId });
       setSelectedProblemIds([]);
       setBulkMoveFolderId('');
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error moving problems');
     }
@@ -589,7 +590,7 @@ const App = () => {
     try {
       await api.delete('/api/problems/bulk', { data: { ids: selectedProblemIds } });
       setSelectedProblemIds([]);
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting problems');
     }
@@ -600,7 +601,7 @@ const App = () => {
     try {
       await api.post('/api/folders', { name: newFolderName.trim() });
       setNewFolderName('');
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error creating folder');
     }
@@ -611,7 +612,7 @@ const App = () => {
     try {
       await api.delete(`/api/folders/${id}`);
       setAdminExpandedFolders(prev => { const next = new Set(prev); next.delete(id); return next; });
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting folder');
     }
@@ -624,7 +625,7 @@ const App = () => {
       await api.put(`/api/folders/${id}`, { name });
       setEditingFolderId(null);
       setEditingFolderName('');
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error updating folder');
     }
@@ -634,7 +635,7 @@ const App = () => {
     if (!confirm('Delete this tag? It will be removed from all problems.')) return;
     try {
       await api.delete(`/api/tags/${id}`);
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting tag');
     }
@@ -646,7 +647,7 @@ const App = () => {
     try {
       await api.post('/api/tags', { name: n });
       setNewTagName('');
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error creating tag');
     }
@@ -677,7 +678,7 @@ const App = () => {
       setPdfImportAnswerKey('');
       const input = document.getElementById('pdf-import-input');
       if (input) input.value = '';
-      loadUserData();
+      loadUserData({ preserveView: true });
     } catch (error) {
       setPdfImportResult({ error: error.response?.data?.error || error.message || 'Import failed' });
     } finally {

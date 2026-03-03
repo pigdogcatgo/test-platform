@@ -265,8 +265,9 @@ app.put('/api/folders/:id', authenticateToken, async (req, res) => {
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
   try {
     const { sql, params } = folderReadWhere(req.user);
+    const sqlBump = params.length ? sql.replace(/\$1/g, '$3') : sql;
     const result = await pool.query(
-      `UPDATE folders SET name = $1 WHERE id = $2 AND ${sql} RETURNING *`,
+      `UPDATE folders SET name = $1 WHERE id = $2 AND ${sqlBump} RETURNING *`,
       [name.trim(), id, ...params]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Folder not found' });
@@ -282,8 +283,9 @@ app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
   try {
     const { sql, params } = folderWriteWhere(req.user);
+    const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
     await pool.query('UPDATE problems SET folder_id = NULL WHERE folder_id = $1', [id]);
-    const del = await pool.query(`DELETE FROM folders WHERE id = $1 AND ${sql} RETURNING id`, [id, ...params]);
+    const del = await pool.query(`DELETE FROM folders WHERE id = $1 AND ${sqlBump} RETURNING id`, [id, ...params]);
     if (del.rowCount === 0) return res.status(404).json({ error: 'Folder not found' });
     res.json({ success: true });
   } catch (error) {
@@ -375,7 +377,8 @@ app.delete('/api/tags/:id', authenticateToken, async (req, res) => {
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid tag id' });
   try {
     const { sql, params } = tagWriteWhere(req.user);
-    const del = await pool.query(`DELETE FROM tags WHERE id = $1 AND ${sql} RETURNING id`, [id, ...params]);
+    const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
+    const del = await pool.query(`DELETE FROM tags WHERE id = $1 AND ${sqlBump} RETURNING id`, [id, ...params]);
     if (del.rowCount === 0) return res.status(404).json({ error: 'Tag not found' });
     res.json({ success: true });
   } catch (error) {
@@ -647,6 +650,7 @@ app.delete('/api/problems/:id', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'Invalid problem id' });
   }
   const { sql, params } = problemWriteWhere(req.user);
+  const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -655,7 +659,7 @@ app.delete('/api/problems/:id', authenticateToken, async (req, res) => {
       [id]
     );
     const del = await client.query(
-      `DELETE FROM problems WHERE id = $1 AND ${sql} RETURNING id`,
+      `DELETE FROM problems WHERE id = $1 AND ${sqlBump} RETURNING id`,
       [id, ...params]
     );
     await client.query('COMMIT');
