@@ -2,12 +2,26 @@
  * PDF Problem Import Service
  * Sends PDF directly to Gemini for extraction, or uses text parsing for no-AI mode.
  * Uses Google Gemini (free tier) - get API key at https://aistudio.google.com/app/apikey
+ * Extracts diagrams from PDF pages when AI identifies them.
  */
 import { PDFParse } from 'pdf-parse';
 import { GoogleGenAI, createUserContent } from '@google/genai';
 import { jsonrepair } from 'jsonrepair';
 import pool from './db.js';
 import { parseAnswerToNumber, parseAndValidateAnswer } from './answerUtils.js';
+
+// Lazy-load pdfRender (requires canvas native module); diagram extraction is optional
+let _renderPdfPageToPng = null;
+async function getRenderPdfPageToPng() {
+  if (_renderPdfPageToPng) return _renderPdfPageToPng;
+  try {
+    const pdfRender = await import('./pdfRender.js');
+    _renderPdfPageToPng = pdfRender.renderPdfPageToPng;
+    return _renderPdfPageToPng;
+  } catch (_) {
+    return null;
+  }
+}
 
 const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
@@ -44,11 +58,12 @@ async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames) {
   const systemPrompt = `You are a math competition problem processor. You will receive a PDF of a Sprint Round (or similar). Your job is to:
 1. Extract EVERY problem from the Sprint Round section only. Do not include Target, Countdown, or other sections.
 2. For each problem: convert to LaTeX (use $...$ and $$...$$ for math only), assign topics, and use the answer from the provided answer key.
-3. Return a JSON object: { "folderName": "Year - Title - Round", "problems": [{ "number": N, "questionLatex": "...", "topics": ["tag1"], "answer": "numeric" }] }
+3. Return a JSON object: { "folderName": "Year - Title - Round", "problems": [{ "number": N, "questionLatex": "...", "topics": ["tag1"], "answer": "numeric", "hasDiagram": boolean, "diagramPage": number?, "diagramRegion": { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 }? }] }
 4. TAGS: You MUST use ONLY tags from this exact list — no exceptions: [${tagList}]. Use the exact spelling and casing (e.g. "Geometry" not "Geometric", "Algebra" not "algebraic"). Do NOT invent, create, or use variations of the same category.
 5. In questionLatex, escape backslashes: write \\\\sqrt, \\\\frac (double backslash) so JSON parses correctly
 6. Do NOT solve. Use the answer key values exactly for the "answer" field.
 7. Extract folderName from the PDF header (e.g. "2021 - National Competition - Sprint Round").
+8. DIAGRAMS: If a problem has a diagram, figure, or picture (geometry, graph, illustration), set "hasDiagram": true. Set "diagramPage" to the 1-based page number where the diagram appears. Optionally set "diagramRegion" with normalized coordinates (0-1) for the diagram area: x=left, y=top, w=width, h=height. If unsure of region, omit diagramRegion and the full page will be used. If no diagram, set "hasDiagram": false and omit diagramPage/diagramRegion.
 
 CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath and amssymb commands (\\\\frac, \\\\sqrt, \\\\neq, \\\\leq, \\\\geq, \\\\sum, \\\\int, etc.). For "not equal" use \\\\ne. For literal $ use \\\\$.`;
 
@@ -57,6 +72,8 @@ CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath 
 ${answerKeyText}
 
 For each problem's "topics" field, use ONLY these exact tag names (copy them character-for-character): ${tagList}. No variations or synonyms allowed.
+
+For each problem that has a diagram/figure/picture, set "hasDiagram": true, "diagramPage": <1-based page number>, and optionally "diagramRegion": { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } for the diagram's bounding box. If no diagram, set "hasDiagram": false.
 
 Return JSON: { "folderName": "...", "problems": [...] }`;
 
@@ -148,7 +165,12 @@ function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'N
     const answerStored = answerVal !== null
       ? (typeof answerVal === 'number' ? String(answerVal) : answerVal)
       : '0';
-    results.push({ number: num, question, answer: answerStored, topics: [tag], source: `Problem ${num}` });
+    const hasDiagram = Boolean(item.hasDiagram && item.diagramPage);
+    const diagramPage = hasDiagram ? Math.max(1, parseInt(item.diagramPage, 10) || 1) : null;
+    const diagramRegion = hasDiagram && item.diagramRegion && typeof item.diagramRegion === 'object'
+      ? item.diagramRegion
+      : null;
+    results.push({ number: num, question, answer: answerStored, topics: [tag], source: `Problem ${num}`, hasDiagram, diagramPage, diagramRegion });
   }
   return { folderName, results, errors };
 }
@@ -288,9 +310,26 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
       for (const processed of processedList) {
         const tagName = (processed.topics[0] || defaultTag).trim();
         const validTag = allowedTagNames.includes(tagName) ? tagName : defaultTag;
+        let imageUrl = null;
+        if (processed.hasDiagram && processed.diagramPage) {
+          const renderFn = await getRenderPdfPageToPng();
+          if (renderFn) {
+            try {
+              const pngBuffer = await renderFn(pdfBuffer, processed.diagramPage, processed.diagramRegion);
+              const base64 = pngBuffer.toString('base64');
+              const uploadRes = await client.query(
+                'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
+                [base64, `problem-${processed.number}-diagram.png`, 'image/png', createdBy]
+              );
+              imageUrl = '/uploads/db/' + uploadRes.rows[0].id;
+            } catch (renderErr) {
+              console.warn('Diagram extraction failed for problem', processed.number, renderErr.message);
+            }
+          }
+        }
         const ins = await client.query(
-          'INSERT INTO problems (question, answer, topic, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-          [processed.question, String(processed.answer), validTag, processed.source, folderId, createdBy]
+          'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+          [processed.question, String(processed.answer), validTag, imageUrl, processed.source, folderId, createdBy]
         );
         const tagId = tagMap[validTag];
         if (tagId) await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.rows[0].id, tagId]);
