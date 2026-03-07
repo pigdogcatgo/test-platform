@@ -473,7 +473,15 @@ app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
     const result = await pool.query('SELECT data, content_type, created_by FROM uploads WHERE id = $1', [id]);
     if (result.rows.length === 0) return res.status(404).send('Not found');
     const row = result.rows[0];
-    if (req.user.role !== 'admin' && row.created_by != null && row.created_by !== req.user.id) {
+    if (req.user.role === 'admin') {
+      // Admin can see all
+    } else if (req.user.role === 'teacher') {
+      if (row.created_by != null && row.created_by !== req.user.id) return res.status(403).send('Forbidden');
+    } else if (req.user.role === 'student') {
+      const studentRow = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
+      const teacherId = studentRow.rows[0]?.teacher_id;
+      if (row.created_by != null && row.created_by !== teacherId) return res.status(403).send('Forbidden');
+    } else {
       return res.status(403).send('Forbidden');
     }
     const buf = Buffer.from(row.data, 'base64');
@@ -833,7 +841,9 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
       [...new Set(tagResult.rows.map(r => r.tag_id))]
     ]);
     const tagMap = Object.fromEntries(tagNames.rows.map(r => [r.id, r.name]));
-    const problems = result.rows.map(p => ({
+    const problemMap = Object.fromEntries(result.rows.map(p => [p.id, p]));
+    const ordered = problemIds.map(id => problemMap[id]).filter(Boolean);
+    const problems = ordered.map(p => ({
       ...p,
       tag_ids: tagsByProblem[p.id] || [],
       tag_names: (tagsByProblem[p.id] || []).map(tid => tagMap[tid]).filter(Boolean)

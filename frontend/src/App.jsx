@@ -467,19 +467,21 @@ const App = () => {
 
     try {
       const { data: testProbs } = await api.get(`/api/tests/${test.id}/problems`);
-      const shuffled = [...testProbs].sort(() => Math.random() - 0.5);
+      const folderIds = [...new Set(testProbs.map(p => p.folder_id ?? 'uncategorized'))];
+      const allSameFolder = folderIds.length <= 1;
+      const ordered = allSameFolder ? testProbs : [...testProbs].sort(() => Math.random() - 0.5);
       const startTime = Date.now();
       sessionStorage.setItem('testInProgress', JSON.stringify({
         testId: test.id,
         startTime,
         durationMin: test.time_limit,
         testName: test.name,
-        problemIds: shuffled.map(p => p.id)
+        problemIds: ordered.map(p => p.id)
       }));
       sessionStorage.removeItem('testAnswers_' + test.id);
       
       setActiveTest(test);
-      setTestProblems(shuffled);
+      setTestProblems(ordered);
       setTimeRemaining(test.time_limit * 60);
       setTestAnswers({});
       setView('taking-test');
