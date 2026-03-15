@@ -29,12 +29,15 @@ export async function renderPdfPageToPng(pdfBuffer, pageNum, crop = null, scale 
 
   let outCanvas = canvas;
   if (crop && typeof crop.x === 'number' && typeof crop.y === 'number' && typeof crop.w === 'number' && typeof crop.h === 'number') {
-    const x = Math.max(0, Math.min(1, crop.x)) * viewport.width;
-    const y = Math.max(0, Math.min(1, crop.y)) * viewport.height;
-    const maxW = viewport.width - x;
-    const maxH = viewport.height - y;
-    const w = Math.max(1, Math.min(maxW, crop.w * viewport.width));
-    const h = Math.max(1, Math.min(maxH, crop.h * viewport.height));
+    const pad = 0.04;
+    const x0 = Math.max(0, crop.x - pad);
+    const y0 = Math.max(0, crop.y - pad);
+    const x1 = Math.min(1, crop.x + crop.w + pad);
+    const y1 = Math.min(1, crop.y + crop.h + pad);
+    const x = x0 * viewport.width;
+    const y = y0 * viewport.height;
+    const w = Math.max(1, (x1 - x0) * viewport.width);
+    const h = Math.max(1, (y1 - y0) * viewport.height);
     const cropCanvas = createCanvas(Math.round(w), Math.round(h));
     const cropCtx = cropCanvas.getContext('2d');
     cropCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);

@@ -519,7 +519,7 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   if (answerVal === null) {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, or "Saturday", "(-1,-3)" for strings/ordered pairs)' });
   }
-  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
+  const answerStored = typeof answer === 'string' && answer.trim() ? answer.trim() : (typeof answerVal === 'number' ? String(answerVal) : answerVal);
   try {
     const createdBy = req.user.role === 'admin' ? null : req.user.id;
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
@@ -623,7 +623,7 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (answerVal === null) {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, or "Saturday", "(-1,-3)" for strings/ordered pairs)' });
   }
-  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
+  const answerStored = typeof answer === 'string' && answer.trim() ? answer.trim() : (typeof answerVal === 'number' ? String(answerVal) : answerVal);
   try {
     const { sql, params } = problemReadWhere(req.user);
     const problemCond = sql.replace(/p\./g, '');
@@ -734,6 +734,37 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
   }
 });
 
+// Update test (teacher only) - solutions_link, answers_released
+app.put('/api/tests/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Teacher access required' });
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid test id' });
+  const { solutions_link: solutionsLink, answers_released: answersReleased } = req.body;
+  try {
+    const updates = [];
+    const params = [];
+    let i = 1;
+    if (typeof solutionsLink === 'string') {
+      updates.push(`solutions_link = $${i++}`);
+      params.push(solutionsLink.trim() || null);
+    }
+    if (typeof answersReleased === 'boolean') {
+      updates.push(`answers_released = $${i++}`);
+      params.push(answersReleased);
+    }
+    if (updates.length === 0) return res.status(400).json({ error: 'No updates provided' });
+    params.push(id, req.user.id);
+    const result = await pool.query(
+      `UPDATE tests SET ${updates.join(', ')} WHERE id = $${i++} AND created_by = $${i} RETURNING *`,
+      params
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Test not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
 // Get student's test attempts
 app.get('/api/attempts', authenticateToken, async (req, res) => {
   try {
@@ -753,12 +784,14 @@ app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
     const attemptId = parseInt(req.params.id, 10);
     if (Number.isNaN(attemptId)) return res.status(400).json({ error: 'Invalid attempt id' });
     const attemptRows = await pool.query(
-      'SELECT ta.*, t.due_date, t.problem_ids, t.created_by FROM test_attempts ta JOIN tests t ON t.id = ta.test_id WHERE ta.id = $1',
+      'SELECT ta.*, t.due_date, t.problem_ids, t.created_by, t.solutions_link, t.answers_released FROM test_attempts ta JOIN tests t ON t.id = ta.test_id WHERE ta.id = $1',
       [attemptId]
     );
     const attempt = attemptRows.rows[0];
     if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
-    if (attempt.student_id !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+    const isOwner = attempt.student_id === req.user.id;
+    const isTeacher = req.user.role === 'teacher' && attempt.created_by === req.user.id;
+    if (!isOwner && !isTeacher) return res.status(403).json({ error: 'Access denied' });
     const duePassed = new Date(attempt.due_date) <= new Date();
     const studentCount = (await pool.query(
       'SELECT COUNT(*)::int FROM users WHERE role = $1 AND teacher_id = $2',
@@ -769,7 +802,8 @@ app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
       [attempt.test_id]
     )).rows[0].count;
     const allSubmitted = studentCount > 0 && submittedCount >= studentCount;
-    const showAnswers = duePassed || allSubmitted;
+    const answersReleased = attempt.answers_released === true;
+    const showAnswers = (duePassed || allSubmitted) && (answersReleased || isTeacher);
     const answers = typeof attempt.answers === 'string' ? JSON.parse(attempt.answers) : (attempt.answers || {});
     const results = typeof attempt.results === 'string' ? JSON.parse(attempt.results) : (attempt.results || {});
     const problemIds = attempt.problem_ids || [];
@@ -798,9 +832,11 @@ app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
         total: attempt.total,
         elo_before: attempt.elo_before,
         elo_after: attempt.elo_after,
-        completed_at: attempt.completed_at
+        completed_at: attempt.completed_at,
+        student_id: attempt.student_id
       },
       showAnswers,
+      solutionsLink: attempt.solutions_link || null,
       problems
     });
   } catch (error) {

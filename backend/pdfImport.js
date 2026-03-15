@@ -65,7 +65,8 @@ async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames) {
 7. Extract folderName from the PDF header (e.g. "2021 - National Competition - Sprint Round").
 8. DIAGRAMS: If a problem has a diagram, figure, or picture (geometry, graph, illustration), set "hasDiagram": true. Set "diagramPage" to the 1-based page number where the diagram appears. Optionally set "diagramRegion" with normalized coordinates (0-1) for the diagram area: x=left, y=top, w=width, h=height. If unsure of region, omit diagramRegion and the full page will be used. If no diagram, set "hasDiagram": false and omit diagramPage/diagramRegion.
 
-CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath and amssymb commands (\\\\frac, \\\\sqrt, \\\\neq, \\\\leq, \\\\geq, \\\\sum, \\\\int, etc.). For "not equal" use \\\\ne. For literal $ use \\\\$.`;
+CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath and amssymb commands (\\\\frac, \\\\sqrt, \\\\neq, \\\\leq, \\\\geq, \\\\sum, \\\\int, etc.). For "not equal" use \\\\ne. For literal $ use \\\\$.
+TRANSCRIPTION: Preserve geometry labels exactly. "triangle GFD" not "triangle AGFD". "segment AB" not "segment AAB". Do not add extra letters to point/vertex names.`;
 
   const userPrompt = `Extract all math problems from this PDF. Use this answer key for answers (do not solve):
 

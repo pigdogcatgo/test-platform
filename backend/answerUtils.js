@@ -61,7 +61,8 @@ export function parseAndValidateAnswer(input) {
   if (pair !== null) return `(${pair[0]},${pair[1]})`;
   const num = parseAnswerToNumber(s);
   if (num !== null) return num;
-  return null;
+  // Fallback: accept any non-empty string (e.g. "Saturday", "N/A", "—") for teacher flexibility
+  return s;
 }
 
 /**

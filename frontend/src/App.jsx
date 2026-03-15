@@ -132,7 +132,7 @@ const App = () => {
   const [testProblems, setTestProblems] = useState([]);
   const [testAnswers, setTestAnswers] = useState({});
   const [timeRemaining, setTimeRemaining] = useState(null);
-  const testSubmitRef = useRef({ activeTest: null, testAnswers: {} });
+  const testSubmitRef = useRef({ activeTest: null, testAnswers: {}, testProblems: [] });
   const handleSubmitTestRef = useRef(() => {});
   
   const [editingProblem, setEditingProblem] = useState(null);
@@ -151,6 +151,8 @@ const App = () => {
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
+  const [analyticsSolutionsLink, setAnalyticsSolutionsLink] = useState('');
+  const [analyticsAnswersReleased, setAnalyticsAnswersReleased] = useState(false);
   const [selectedProblemIds, setSelectedProblemIds] = useState([]);
   const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
@@ -221,9 +223,12 @@ const App = () => {
 
   const handleSubmitTest = useCallback(async () => {
     if (!activeTest) return;
-    
+    const payload = {};
+    for (const p of testProblems) {
+      payload[p.id] = (testAnswers[p.id] ?? '').trim();
+    }
     try {
-      const { data } = await api.post(`/api/tests/${activeTest.id}/submit`, { answers: testAnswers });
+      const { data } = await api.post(`/api/tests/${activeTest.id}/submit`, { answers: payload });
       const testId = activeTest.id;
       if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
       sessionStorage.removeItem('testInProgress');
@@ -238,7 +243,7 @@ const App = () => {
     } catch (error) {
       alert(error.response?.data?.error || 'Error submitting test');
     }
-  }, [activeTest, testAnswers, api, loadUserData]);
+  }, [activeTest, testAnswers, testProblems, api, loadUserData]);
 
   handleSubmitTestRef.current = handleSubmitTest;
 
@@ -315,25 +320,32 @@ const App = () => {
   // Keep ref updated so beforeunload can submit with latest answers
   useEffect(() => {
     if (view === 'taking-test' && activeTest) {
-      testSubmitRef.current = { activeTest, testAnswers };
+      testSubmitRef.current = { activeTest, testAnswers, testProblems };
     }
-  }, [view, activeTest, testAnswers]);
+  }, [view, activeTest, testAnswers, testProblems]);
 
   // Lockdown: auto-submit on leave / tab switch
   useEffect(() => {
     if (view !== 'taking-test' || !activeTest) return;
     let leftWhileHidden = false;
     const onBeforeUnload = (e) => {
-      const { activeTest: at, testAnswers: ta } = testSubmitRef.current;
-      if (at && ta && Object.keys(ta).length >= 0) {
-        const t = localStorage.getItem('token');
-        if (t) {
-          fetch(`${API_URL}/api/tests/${at.id}/submit`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
-            body: JSON.stringify({ answers: ta }),
-            keepalive: true
-          });
+      const { activeTest: at, testAnswers: ta, testProblems: tp } = testSubmitRef.current;
+      if (at && ta) {
+        const payload = {};
+        for (const p of tp || []) {
+          payload[p.id] = (ta[p.id] ?? '').trim();
+        }
+        if (Object.keys(payload).length > 0 || Object.keys(ta).length > 0) {
+          const t = localStorage.getItem('token');
+          if (t) {
+            const body = Object.keys(payload).length > 0 ? payload : ta;
+            fetch(`${API_URL}/api/tests/${at.id}/submit`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
+              body: JSON.stringify({ answers: body }),
+              keepalive: true
+            });
+          }
         }
       }
       e.preventDefault();
@@ -692,6 +704,11 @@ const App = () => {
     try {
       const { data } = await api.get(`/api/tests/${testId}/attempts`);
       setSelectedTestAnalytics({ testId, attempts: data });
+      const t = tests.find(x => x.id === testId);
+      if (t) {
+        setAnalyticsSolutionsLink(t.solutions_link ?? '');
+        setAnalyticsAnswersReleased(t.answers_released ?? false);
+      }
     } catch (error) {
       alert('Error loading analytics');
     }
@@ -885,6 +902,11 @@ if (view === 'taking-test' && activeTest) {
           </div>
         </div>
 
+        {/* Answer formatting instructions */}
+        <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
+          <strong>How to format answers:</strong> Use numbers (42), fractions (3/4), radicals (√2, √2/2, 2√3), or decimals. For ordered pairs use (x,y) e.g. (-1,-3). No spaces in numbers. Click Submit when done.
+        </div>
+
         {/* Lockdown warning — prominent */}
         <div className="mb-4 rounded-xl border-2 border-amber-500 bg-amber-100 px-4 py-4 text-center text-base font-semibold text-amber-900 shadow-sm">
           ⚠ Do not reload, switch tabs, exit, or go back. If you do, your answers will be auto-submitted immediately.
@@ -930,6 +952,23 @@ if (view === 'taking-test' && activeTest) {
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:border-[#00A3AD] focus:outline-none text-center text-sm"
                 placeholder="e.g. 42, 3/4, √2, √2/2"
               />
+              {(testAnswers[problem.id] || '').trim() && (() => {
+                const raw = String(testAnswers[problem.id] || '').trim();
+                let latex = raw
+                  .replace(/(\d+)\/(\d+)/g, '\\\\frac{$1}{$2}')
+                  .replace(/\u221A(\d+)/g, '\\\\sqrt{$1}')
+                  .replace(/\u221A\(([^)]+)\)/g, '\\\\sqrt{$1}')
+                  .replace(/sqrt\(([^)]+)\)/gi, '\\\\sqrt{$1}')
+                  .replace(/(\d+)\u221A(\d+)/g, '$1\\\\sqrt{$2}');
+                return (
+                  <div className="mt-2 text-sm text-gray-500 flex items-center gap-2">
+                    <span>Preview:</span>
+                    <span className="inline-flex items-center min-h-[1.5em] px-2 py-1 bg-gray-100 rounded">
+                      <RenderLatex text={'$' + latex + '$'} />
+                    </span>
+                  </div>
+                );
+              })()}
             </div>
           ))}
         </div>
@@ -1129,6 +1168,11 @@ if (view === 'student-dashboard' && user) {
               </p>
               {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                 <div className="space-y-4">
+                  {attemptDetails.solutionsLink && (
+                    <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="inline-block text-[#007f8f] hover:underline font-medium mb-2">
+                      View solutions →
+                    </a>
+                  )}
                   {attemptDetails.problems.map((item, idx) => (
                     <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>
                       <p className="text-xs text-gray-500 mb-1">Question {idx + 1}</p>
@@ -1150,7 +1194,7 @@ if (view === 'student-dashboard' && user) {
                 </div>
               ) : (
                 <p className="text-sm text-gray-500">
-                  {attemptDetails.showAnswers ? 'No problem details available.' : 'Answers will be visible after the due date or when all students have submitted.'}
+                  {attemptDetails.showAnswers ? 'No problem details available.' : 'Answers will be visible when your teacher releases them.'}
                 </p>
               )}
             </div>
@@ -1312,6 +1356,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
 
   // Student accuracies (already have score/total per attempt)
   const studentAccuracies = attempts.map(a => ({
+    id: a.id,
     username: a.username,
     score: a.score,
     total: a.total,
@@ -1360,6 +1405,51 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
 
         <div className="space-y-6">
           <div className="bg-white rounded-xl shadow p-6">
+            <h2 className="text-base font-semibold text-gray-800 mb-4">Test Settings</h2>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Solutions link (shown to students when answers are released)</label>
+                <input
+                  type="url"
+                  value={analyticsSolutionsLink}
+                  onChange={(e) => setAnalyticsSolutionsLink(e.target.value)}
+                  placeholder="https://..."
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={analyticsAnswersReleased}
+                  onChange={(e) => setAnalyticsAnswersReleased(e.target.checked)}
+                />
+                <span className="text-sm">Release answers to students (they can see correct answers and solutions link)</span>
+              </label>
+              <button
+                onClick={async () => {
+                  try {
+                    await api.put(`/api/tests/${test?.id}`, {
+                      solutions_link: analyticsSolutionsLink,
+                      answers_released: analyticsAnswersReleased
+                    });
+                    const t = tests.find(x => x.id === test?.id);
+                    if (t) {
+                      t.solutions_link = analyticsSolutionsLink;
+                      t.answers_released = analyticsAnswersReleased;
+                    }
+                    alert('Settings saved');
+                  } catch (err) {
+                    alert(err.response?.data?.error || 'Failed to save');
+                  }
+                }}
+                className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm font-medium hover:bg-[#006b78]"
+              >
+                Save settings
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl shadow p-6">
             <h2 className="text-base font-semibold text-gray-800 mb-4">Student Accuracies</h2>
             {studentAccuracies.length === 0 ? (
               <p className="text-gray-500 text-sm">No attempts yet</p>
@@ -1370,7 +1460,8 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                     <tr className="text-left text-gray-600 border-b">
                       <th className="pb-2 pr-4">Student</th>
                       <th className="pb-2 pr-4">Score</th>
-                      <th className="pb-2">Accuracy</th>
+                      <th className="pb-2 pr-4">Accuracy</th>
+                      <th className="pb-2">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1378,7 +1469,22 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                       <tr key={i} className="border-b last:border-0">
                         <td className="py-2 pr-4 font-medium">{s.username}</td>
                         <td className="py-2 pr-4">{s.score}/{s.total}</td>
-                        <td className="py-2">{s.accuracy}%</td>
+                        <td className="py-2 pr-4">{s.accuracy}%</td>
+                        <td className="py-2">
+                          <button
+                            onClick={async () => {
+                              try {
+                                const { data } = await api.get(`/api/attempts/${s.id}/details`);
+                                setAttemptDetails(data);
+                              } catch {
+                                alert('Error loading submission');
+                              }
+                            }}
+                            className="text-sm text-[#007f8f] font-medium hover:underline"
+                          >
+                            View submission
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1386,6 +1492,56 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
               </div>
             )}
           </div>
+
+          {attemptDetails && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setAttemptDetails(null)}>
+              <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-semibold text-gray-800">
+                    Submission — {studentAccuracies.find(s => s.id === attemptDetails.attempt?.id)?.username || 'Student'}
+                  </h3>
+                  <button onClick={() => setAttemptDetails(null)} className="text-gray-500 hover:text-gray-700 text-2xl leading-none">&times;</button>
+                </div>
+                <p className="text-sm text-gray-600 mb-4">
+                  Score: {attemptDetails.attempt?.score}/{attemptDetails.attempt?.total}
+                  {attemptDetails.attempt?.elo_after != null && (
+                    <span className="ml-2">ELO: {attemptDetails.attempt.elo_before} → {attemptDetails.attempt.elo_after}</span>
+                  )}
+                </p>
+                {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
+                  <div className="space-y-4">
+                    {attemptDetails.solutionsLink && (
+                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="inline-block text-[#007f8f] hover:underline font-medium mb-2">
+                        View solutions →
+                      </a>
+                    )}
+                    {attemptDetails.problems.map((item, idx) => (
+                      <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>
+                        <p className="text-xs text-gray-500 mb-1">Question {idx + 1}</p>
+                        <div className="text-sm text-gray-800 mb-2"><RenderLatex text={item.question} /></div>
+                        {item.image_url && <ProblemImage url={item.image_url} token={token} />}
+                        <p className="text-sm mt-2">
+                          <span className="font-medium">Answer:</span> {String(item.student_answer || '(blank)')}
+                          {item.correct ? (
+                            <span className="text-green-600 ml-2">✓ Correct</span>
+                          ) : (
+                            <>
+                              <span className="text-red-600 ml-2">✗ Incorrect</span>
+                              <span className="block mt-1 text-[#007f8f]"><span className="font-medium">Correct:</span> {String(item.correct_answer ?? '')}</span>
+                            </>
+                          )}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500">
+                    {attemptDetails.showAnswers ? 'No problem details available.' : 'Full submission details visible to teacher.'}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="bg-white rounded-xl shadow p-6">
             <h2 className="text-base font-semibold text-gray-800 mb-4">Most Missed Problems by Topic</h2>

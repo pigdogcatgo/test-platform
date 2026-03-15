@@ -37,6 +37,13 @@ export async function initDatabase() {
       console.warn('Migration test_type (non-fatal):', migErr.message);
     }
     try {
+      await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS solutions_link TEXT');
+      await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS answers_released BOOLEAN DEFAULT false');
+      console.log('Tests solutions_link and answers_released columns ensured');
+    } catch (migErr) {
+      console.warn('Migration solutions_link/answers_released (non-fatal):', migErr.message);
+    }
+    try {
       await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS source TEXT');
       console.log('Problems source column ensured');
     } catch (migErr) {
