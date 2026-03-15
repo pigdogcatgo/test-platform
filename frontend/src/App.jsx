@@ -796,7 +796,7 @@ if (view === 'login') {
 
       {/* Sign up */}
       <div className="signup">
-        New teacher? <button type="button" onClick={() => setView('signup')} className="text-[#007f8f] hover:underline font-medium">Sign up</button>
+        New teacher? <button type="button" onClick={() => setView('signup')} className="text-[#0085CA] hover:underline font-medium">Sign up</button>
       </div>
 
       {/* Footer */}
@@ -865,7 +865,7 @@ if (view === 'signup') {
 
       {/* Back to login */}
       <div className="signup">
-        Already have an account? <button type="button" onClick={() => setView('login')} className="text-[#007f8f] hover:underline font-medium">Log in</button>
+        Already have an account? <button type="button" onClick={() => setView('login')} className="text-[#0085CA] hover:underline font-medium">Log in</button>
       </div>
 
       {/* Footer */}
@@ -893,7 +893,7 @@ if (view === 'taking-test' && activeTest) {
                 className={`px-4 py-2 rounded-lg font-semibold text-sm ${
                   timeRemaining < 60
                     ? 'bg-red-100 text-red-700'
-                    : 'bg-[#e6f6f7] text-[#007f8f]'
+                    : 'bg-[#e8f4f9] text-[#0085CA]'
                 }`}
               >
                 {formatTime(timeRemaining)}
@@ -949,21 +949,29 @@ if (view === 'taking-test' && activeTest) {
                     [problem.id]: e.target.value
                   })
                 }
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:border-[#00A3AD] focus:outline-none text-center text-sm"
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:border-[#0085CA] focus:outline-none text-center text-sm"
                 placeholder="e.g. 42, 3/4, √2, √2/2"
               />
               {(testAnswers[problem.id] || '').trim() && (() => {
                 const raw = String(testAnswers[problem.id] || '').trim();
-                let latex = raw
-                  .replace(/(\d+)\/(\d+)/g, '\\\\frac{$1}{$2}')
-                  .replace(/\u221A(\d+)/g, '\\\\sqrt{$1}')
-                  .replace(/\u221A\(([^)]+)\)/g, '\\\\sqrt{$1}')
-                  .replace(/sqrt\(([^)]+)\)/gi, '\\\\sqrt{$1}')
-                  .replace(/(\d+)\u221A(\d+)/g, '$1\\\\sqrt{$2}');
+                const pairMatch = raw.match(/^\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)\s*$/);
+                let latex;
+                if (pairMatch) {
+                  const x = pairMatch[1].trim().replace(/(\d+)\/(\d+)/g, '\\\\frac{$1}{$2}').replace(/\u221A(\d+)/g, '\\\\sqrt{$1}');
+                  const y = pairMatch[2].trim().replace(/(\d+)\/(\d+)/g, '\\\\frac{$1}{$2}').replace(/\u221A(\d+)/g, '\\\\sqrt{$1}');
+                  latex = `(${x},\\ ${y})`;
+                } else {
+                  latex = raw
+                    .replace(/(\d+)\/(\d+)/g, '\\\\frac{$1}{$2}')
+                    .replace(/\u221A(\d+)/g, '\\\\sqrt{$1}')
+                    .replace(/\u221A\(([^)]+)\)/g, '\\\\sqrt{$1}')
+                    .replace(/sqrt\(([^)]+)\)/gi, '\\\\sqrt{$1}')
+                    .replace(/(\d+)\u221A(\d+)/g, '$1\\\\sqrt{$2}');
+                }
                 return (
                   <div className="mt-2 text-sm text-gray-500 flex items-center gap-2">
                     <span>Preview:</span>
-                    <span className="inline-flex items-center min-h-[1.5em] px-2 py-1 bg-gray-100 rounded">
+                    <span className="inline-flex items-center min-h-[1.5em] px-2 py-1 bg-[#f5f7f8] rounded">
                       <RenderLatex text={'$' + latex + '$'} />
                     </span>
                   </div>
@@ -977,7 +985,7 @@ if (view === 'taking-test' && activeTest) {
         <div className="mt-6">
           <button
             onClick={handleSubmitTest}
-            className="w-full bg-[#007f8f] hover:bg-[#006b78] text-white py-3 rounded-lg font-semibold"
+            className="w-full bg-[#0085CA] hover:bg-[#006699] text-white py-3 rounded-lg font-semibold"
           >
             Submit Test
           </button>
@@ -1006,7 +1014,7 @@ if (view === 'student-dashboard' && user) {
           <div className="w-1/4 flex justify-end">
             <button
               onClick={handleLogout}
-              className="text-sm text-[#007f8f] font-medium hover:underline"
+              className="text-sm text-[#0085CA] font-medium hover:underline"
             >
               Logout
             </button>
@@ -1023,16 +1031,16 @@ if (view === 'student-dashboard' && user) {
           </p>
 
           <div className="flex flex-wrap gap-4 justify-center">
-            <div className="inline-flex flex-col items-center bg-[#e6f6f7] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when you solve harder problems correctly, decreases when you miss easier ones">
+            <div className="inline-flex flex-col items-center bg-[#e8f4f9] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when you solve harder problems correctly, decreases when you miss easier ones">
               <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
-              <span className="text-4xl font-bold text-[#007f8f]">
+              <span className="text-4xl font-bold text-[#0085CA]">
                 {user.elo}
               </span>
             </div>
             {typeof user.cumulative_score === 'number' && (
               <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
                 <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
-                <span className="text-4xl font-bold text-[#007f8f]">
+                <span className="text-4xl font-bold text-[#0085CA]">
                   {user.cumulative_score}
                 </span>
               </div>
@@ -1043,7 +1051,7 @@ if (view === 'student-dashboard' && user) {
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                   {user.tag_elos.map(t => (
                     <span key={t.name} className="text-gray-800">
-                      {t.name}: <span className="font-semibold text-[#007f8f]">{t.elo}</span>
+                      {t.name}: <span className="font-semibold text-[#0085CA]">{t.elo}</span>
                     </span>
                   ))}
                 </div>
@@ -1078,7 +1086,7 @@ if (view === 'student-dashboard' && user) {
                     </p>
                     <button
                       onClick={() => startTest(test)}
-                      className="w-full bg-[#007f8f] hover:bg-[#006b78] text-white py-2 rounded-lg text-sm font-medium"
+                      className="w-full bg-[#0085CA] hover:bg-[#006699] text-white py-2 rounded-lg text-sm font-medium"
                     >
                       Start Test
                     </button>
@@ -1140,7 +1148,7 @@ if (view === 'student-dashboard' && user) {
                             alert('Error loading attempt details');
                           }
                         }}
-                        className="mt-2 text-sm text-[#007f8f] font-medium hover:underline"
+                        className="mt-2 text-sm text-[#0085CA] font-medium hover:underline"
                       >
                         View Details
                       </button>
@@ -1169,7 +1177,7 @@ if (view === 'student-dashboard' && user) {
               {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                 <div className="space-y-4">
                   {attemptDetails.solutionsLink && (
-                    <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="inline-block text-[#007f8f] hover:underline font-medium mb-2">
+                    <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="inline-block text-[#0085CA] hover:underline font-medium mb-2">
                       View solutions →
                     </a>
                   )}
@@ -1185,7 +1193,7 @@ if (view === 'student-dashboard' && user) {
                         ) : (
                           <>
                             <span className="text-red-600 ml-2">✗ Incorrect</span>
-                            <span className="block mt-1 text-[#007f8f]"><span className="font-medium">Correct answer:</span> {String(item.correct_answer ?? '')}</span>
+                            <span className="block mt-1 text-[#0085CA]"><span className="font-medium">Correct answer:</span> {String(item.correct_answer ?? '')}</span>
                           </>
                         )}
                       </p>
@@ -1217,7 +1225,7 @@ if (view === 'teacher-dashboard' && user) {
           </h1>
           <button
             onClick={handleLogout}
-            className="text-sm text-[#007f8f] font-medium hover:underline"
+            className="text-sm text-[#0085CA] font-medium hover:underline"
           >
             Logout
           </button>
@@ -1228,13 +1236,13 @@ if (view === 'teacher-dashboard' && user) {
         <div className="mb-6 flex gap-3">
           <button
             onClick={() => setView('register-students')}
-            className="bg-[#007f8f] hover:bg-[#006b78] text-white px-6 py-3 rounded-lg font-medium"
+            className="bg-[#0085CA] hover:bg-[#006699] text-white px-6 py-3 rounded-lg font-medium"
           >
             Register Students
           </button>
           <button
             onClick={() => setView('create-test')}
-            className="bg-[#007f8f] hover:bg-[#006b78] text-white px-6 py-3 rounded-lg font-medium"
+            className="bg-[#0085CA] hover:bg-[#006699] text-white px-6 py-3 rounded-lg font-medium"
           >
             Create New Test
           </button>
@@ -1273,7 +1281,7 @@ if (view === 'teacher-dashboard' && user) {
                         await loadTestAnalytics(test.id);
                         setView('test-analytics');
                       }}
-                      className="text-sm text-[#007f8f] font-medium hover:underline"
+                      className="text-sm text-[#0085CA] font-medium hover:underline"
                     >
                       View Analytics →
                     </button>
@@ -1307,7 +1315,7 @@ if (view === 'teacher-dashboard' && user) {
             <div className="bg-white rounded-xl shadow divide-y">
               {students.length === 0 ? (
                 <div className="p-6 text-center text-gray-500 text-sm">
-                  No students yet. <button type="button" onClick={() => setView('register-students')} className="text-[#007f8f] font-medium hover:underline">Register students</button> to get started.
+                  No students yet. <button type="button" onClick={() => setView('register-students')} className="text-[#0085CA] font-medium hover:underline">Register students</button> to get started.
                 </div>
               ) : (
                 [...students]
@@ -1323,17 +1331,17 @@ if (view === 'teacher-dashboard' && user) {
                         <button
                           type="button"
                           onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                          className="font-medium text-left hover:text-[#007f8f] hover:underline"
+                          className="font-medium text-left hover:text-[#0085CA] hover:underline"
                         >
                           {i + 1}. {s.username}
                         </button>
                         <div className="flex gap-4">
                           {typeof s.cumulative_score === 'number' && (
                             <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
-                              Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
+                              Cumulative: <span className="font-semibold text-[#0085CA]">{s.cumulative_score}</span>
                             </span>
                           )}
-                          <span className="text-[#007f8f] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                          <span className="text-[#0085CA] font-semibold" title="Skill rating based on problem difficulty and correctness">
                             ELO: {s.elo}
                           </span>
                         </div>
@@ -1393,7 +1401,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
         <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
           <button
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#007f8f] hover:underline"
+            className="text-sm text-[#0085CA] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1442,7 +1450,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                     alert(err.response?.data?.error || 'Failed to save');
                   }
                 }}
-                className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm font-medium hover:bg-[#006b78]"
+                className="px-4 py-2 bg-[#0085CA] text-white rounded-lg text-sm font-medium hover:bg-[#006699]"
               >
                 Save settings
               </button>
@@ -1480,7 +1488,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                                 alert('Error loading submission');
                               }
                             }}
-                            className="text-sm text-[#007f8f] font-medium hover:underline"
+                            className="text-sm text-[#0085CA] font-medium hover:underline"
                           >
                             View submission
                           </button>
@@ -1511,7 +1519,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                 {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                   <div className="space-y-4">
                     {attemptDetails.solutionsLink && (
-                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="inline-block text-[#007f8f] hover:underline font-medium mb-2">
+                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="inline-block text-[#0085CA] hover:underline font-medium mb-2">
                         View solutions →
                       </a>
                     )}
@@ -1527,7 +1535,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                           ) : (
                             <>
                               <span className="text-red-600 ml-2">✗ Incorrect</span>
-                              <span className="block mt-1 text-[#007f8f]"><span className="font-medium">Correct:</span> {String(item.correct_answer ?? '')}</span>
+                              <span className="block mt-1 text-[#0085CA]"><span className="font-medium">Correct:</span> {String(item.correct_answer ?? '')}</span>
                             </>
                           )}
                         </p>
@@ -1578,7 +1586,7 @@ if (view === 'register-students' && user) {
         <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
           <button
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#007f8f] hover:underline"
+            className="text-sm text-[#0085CA] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1608,7 +1616,7 @@ if (view === 'register-students' && user) {
             <button
               type="button"
               onClick={() => registerStudent()}
-              className="bg-[#007f8f] hover:bg-[#006b78] text-white px-5 py-2 rounded-lg font-medium"
+              className="bg-[#0085CA] hover:bg-[#006699] text-white px-5 py-2 rounded-lg font-medium"
             >
               Add student
             </button>
@@ -1652,17 +1660,17 @@ if (view === 'register-students' && user) {
                       <button
                         type="button"
                         onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                        className="font-medium text-left hover:text-[#007f8f] hover:underline"
+                        className="font-medium text-left hover:text-[#0085CA] hover:underline"
                       >
                         {i + 1}. {s.username}
                       </button>
                       <div className="flex gap-4">
                         {typeof s.cumulative_score === 'number' && (
                           <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
-                            Cumulative: <span className="font-semibold text-[#007f8f]">{s.cumulative_score}</span>
+                            Cumulative: <span className="font-semibold text-[#0085CA]">{s.cumulative_score}</span>
                           </span>
                         )}
-                        <span className="text-[#007f8f] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                        <span className="text-[#0085CA] font-semibold" title="Skill rating based on problem difficulty and correctness">
                           ELO: {s.elo}
                         </span>
                       </div>
@@ -1691,7 +1699,7 @@ if (view === 'student-profile' && user) {
         <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
           <button
             onClick={() => { setView('teacher-dashboard'); setSelectedStudentId(null); setSelectedStudent(null); }}
-            className="text-sm text-[#007f8f] hover:underline"
+            className="text-sm text-[#0085CA] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1704,20 +1712,20 @@ if (view === 'student-profile' && user) {
         <div className="bg-white rounded-xl shadow p-6 mb-6">
           <h2 className="text-base font-semibold text-gray-800 mb-4">Ratings</h2>
           <div className="flex flex-wrap gap-4">
-            <div className="inline-flex flex-col items-center bg-[#e6f6f7] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when solving harder problems correctly, decreases when missing easier ones">
+            <div className="inline-flex flex-col items-center bg-[#e8f4f9] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when solving harder problems correctly, decreases when missing easier ones">
               <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
-              <span className="text-2xl font-bold text-[#007f8f]">{selectedStudent.elo}</span>
+              <span className="text-2xl font-bold text-[#0085CA]">{selectedStudent.elo}</span>
             </div>
             <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
               <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
-              <span className="text-2xl font-bold text-[#007f8f]">{selectedStudent.cumulative_score ?? 0}</span>
+              <span className="text-2xl font-bold text-[#0085CA]">{selectedStudent.cumulative_score ?? 0}</span>
             </div>
             {selectedStudent.tag_elos?.length > 0 && (
               <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
                 <span className="text-xs text-gray-600 mb-2">By Subject</span>
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                   {selectedStudent.tag_elos.map(t => (
-                    <span key={t.name}>{t.name}: <span className="font-semibold text-[#007f8f]">{t.elo}</span></span>
+                    <span key={t.name}>{t.name}: <span className="font-semibold text-[#0085CA]">{t.elo}</span></span>
                   ))}
                 </div>
               </div>
@@ -1771,7 +1779,7 @@ if (view === 'create-test' && user) {
         <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
           <button
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#007f8f] hover:underline"
+            className="text-sm text-[#0085CA] hover:underline"
           >
             ← Back
           </button>
@@ -1909,7 +1917,7 @@ if (view === 'create-test' && user) {
                               {p.tag_names?.length > 0 && (
                                 <span className="text-gray-500 ml-1">[{p.tag_names.join(', ')}]</span>
                               )}
-                              <span className="text-[#007f8f] font-medium ml-2">ELO {p.elo}</span>
+                              <span className="text-[#0085CA] font-medium ml-2">ELO {p.elo}</span>
                             </span>
                           </label>
                         ))}
@@ -1923,7 +1931,7 @@ if (view === 'create-test' && user) {
 
           <button
             onClick={createTest}
-            className="w-full bg-[#007f8f] hover:bg-[#006b78] text-white py-3 rounded-lg font-medium"
+            className="w-full bg-[#0085CA] hover:bg-[#006699] text-white py-3 rounded-lg font-medium"
           >
             Create Test
           </button>
@@ -1946,14 +1954,14 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             {isTeacherAdmin && (
               <button
                 onClick={() => setView('teacher-dashboard')}
-                className="text-sm text-[#007f8f] hover:underline"
+                className="text-sm text-[#0085CA] hover:underline"
               >
                 ← Back to Dashboard
               </button>
             )}
             <button
               onClick={handleLogout}
-              className="text-sm text-[#007f8f] hover:underline"
+              className="text-sm text-[#0085CA] hover:underline"
             >
               Logout
             </button>
@@ -1975,13 +1983,13 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                       className="w-32 px-1 py-0.5 border rounded text-sm"
                       autoFocus
                     />
-                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#007f8f] hover:underline text-xs">✓</button>
+                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#0085CA] hover:underline text-xs">✓</button>
                     <button type="button" onClick={() => { setEditingFolderId(null); setEditingFolderName(''); }} className="text-gray-500 hover:underline text-xs">✗</button>
                   </>
                 ) : (
                   <>
                     {f.name}
-                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#007f8f] hover:underline text-xs">edit</button>
+                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#0085CA] hover:underline text-xs">edit</button>
                     <button type="button" onClick={() => deleteFolder(f.id)} className="text-red-600 hover:underline text-xs">×</button>
                   </>
                 )}
@@ -1996,7 +2004,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               placeholder="New folder name"
               className="flex-1 px-3 py-2 border rounded-lg text-sm"
             />
-            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm">Add</button>
+            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#0085CA] text-white rounded-lg text-sm">Add</button>
           </div>
         </div>
 
@@ -2052,7 +2060,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               type="button"
               onClick={handlePdfImport}
               disabled={pdfImportLoading || !pdfImportFile}
-              className="px-4 py-2 bg-[#007f8f] text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 bg-[#0085CA] text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pdfImportLoading ? 'Importing…' : 'Import'}
             </button>
@@ -2088,7 +2096,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
 
         <button
           onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '', source: '', folder_id: null, tag_ids: [] })}
-          className="mb-6 bg-[#007f8f] text-white px-6 py-3 rounded-lg"
+          className="mb-6 bg-[#0085CA] text-white px-6 py-3 rounded-lg"
         >
           Add Problem
         </button>
@@ -2218,7 +2226,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   <button
                     type="button"
                     onClick={saveProblem}
-                    className="flex-1 bg-[#007f8f] text-white py-2 rounded-lg"
+                    className="flex-1 bg-[#0085CA] text-white py-2 rounded-lg"
                   >
                     Save
                   </button>
@@ -2259,7 +2267,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
         )}
 
         {selectedProblemIds.length > 0 && (
-          <div className="bg-[#007f8f]/10 border border-[#007f8f]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
+          <div className="bg-[#0085CA]/10 border border-[#0085CA]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
             <span className="font-medium text-gray-800">{selectedProblemIds.length} selected</span>
             <select
               value={bulkMoveFolderId}
@@ -2276,7 +2284,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               type="button"
               onClick={bulkMoveProblems}
               disabled={!bulkMoveFolderId}
-              className="px-3 py-1.5 bg-[#007f8f] text-white rounded-lg text-sm hover:bg-[#006b78] disabled:opacity-50"
+              className="px-3 py-1.5 bg-[#0085CA] text-white rounded-lg text-sm hover:bg-[#006699] disabled:opacity-50"
             >
               Move
             </button>
@@ -2338,7 +2346,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     <button
                       type="button"
                       onClick={toggle}
-                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#007f8f]"
+                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#0085CA]"
                     >
                       <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
                       <span>{name}</span>
@@ -2419,7 +2427,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                                 <button
                                   type="button"
                                   onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '', folder_id: p.folder_id ?? null, tag_ids: p.tag_ids ?? [] })}
-                                  className="text-[#007f8f] hover:underline font-medium"
+                                  className="text-[#0085CA] hover:underline font-medium"
                                 >
                                   Edit
                                 </button>
