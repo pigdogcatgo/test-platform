@@ -46,6 +46,67 @@ export function parseAnswerKey(text) {
 }
 
 /**
+ * Retry region for a single problem (when teacher rejects screenshot).
+ */
+export async function retryRegionForProblem(pdfBuffer, processed, renderFn) {
+  if (!ai || !renderFn || !processed.problemPage) return false;
+  const pageNum = processed.problemPage;
+  const num = processed.number;
+  try {
+    const pngBuffer = await renderFn(pdfBuffer, pageNum, null, 2, 0);
+    const pageBase64 = pngBuffer.toString('base64');
+    const prompt = `This image is page ${pageNum} of a math competition PDF. The previous crop for problem ${num} was WRONG.
+
+Return a DIFFERENT region for problem ${num} only. Try adjusting the vertical boundaries.
+Coordinates: y = top edge (0 = top, 1 = bottom), h = height. Use x=0, w=1 (full width).
+Return JSON: { "regions": [{ "number": ${num}, "y": 0.0-1, "h": 0.0-1 }] }`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-pro',
+      contents: createUserContent([
+        { text: prompt },
+        { inlineData: { mimeType: 'image/png', data: pageBase64 } },
+      ]),
+      config: { temperature: 0.3, responseMimeType: 'application/json' },
+    });
+    const raw = (response?.text || '').trim();
+    if (!raw) return false;
+    let jsonStr = raw.replace(/^```json?\s*|\s*```$/g, '').trim();
+    const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (objMatch) jsonStr = objMatch[0];
+    const obj = JSON.parse(jsonrepair(jsonStr));
+    const regions = obj?.regions || [];
+    const r = regions.find((x) => x.number === num);
+    if (r && typeof r.y === 'number' && typeof r.h === 'number') {
+      const y = Math.max(0, Math.min(1, r.y));
+      const h = Math.max(0.02, Math.min(1 - y, r.h));
+      processed.problemRegion = { x: 0, y, w: 1, h };
+      return true;
+    }
+  } catch (err) {
+    console.warn('Retry region failed for problem', num, err.message);
+  }
+  return false;
+}
+
+/**
+ * Render a single problem's screenshot to base64.
+ */
+export async function renderProblemScreenshot(pdfBuffer, processed) {
+  const renderFn = await getRenderPdfPageToPng();
+  if (!renderFn || !processed.problemPage) return null;
+  let region = processed.problemRegion;
+  if (region && typeof region === 'object') {
+    const y = Math.max(0, Math.min(1, Number(region.y) || 0));
+    const h = Math.max(0.02, Math.min(1 - y, Number(region.h) || 0.2));
+    region = { x: 0, y, w: 1, h };
+  }
+  const cropPad = processed.hasDiagram ? 0.08 : 0.04;
+  const pngBuffer = await renderFn(pdfBuffer, processed.problemPage, region, 2, cropPad);
+  return pngBuffer.toString('base64');
+}
+
+/**
  * Refine problem regions using per-page images. The AI sees the actual rendered page
  * and returns regions, which is more accurate than inferring from the raw PDF.
  * @param {Buffer} pdfBuffer
@@ -368,7 +429,7 @@ export function splitIntoProblems(text) {
   return problems;
 }
 
-async function ensureTags(client, createdBy) {
+export async function ensureTags(client, createdBy) {
   const tagNames = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
   const tagMap = {};
   for (const name of tagNames) {
@@ -398,6 +459,16 @@ function processProblemNoAI(problem, answerFromKey) {
   if (answerVal === null) throw new Error(`Invalid answer for problem ${problem.number}: "${answerFromKey}"`);
   const answerStored = raw;
   return { question: problem.raw, answer: answerStored, topic: 'Arithmetic', source: `Problem ${problem.number}` };
+}
+
+/**
+ * Extract problems for image mode (no DB save). Returns processed list for review flow.
+ */
+export async function processPdfForImageMode(pdfBuffer, answerMap, allowedTagNames) {
+  const { folderName, results: processedList, errors: batchErrors } = await processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames, { useImageMode: true });
+  const renderFn = await getRenderPdfPageToPng();
+  if (renderFn && processedList.length > 0) await refineRegionsForImageMode(pdfBuffer, processedList, renderFn);
+  return { folderName, processedList, errors: batchErrors };
 }
 
 /**

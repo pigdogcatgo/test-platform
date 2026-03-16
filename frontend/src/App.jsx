@@ -150,6 +150,7 @@ const App = () => {
   const [pdfImportUseAI, setPdfImportUseAI] = useState(true);
   const [pdfImportUseImageMode, setPdfImportUseImageMode] = useState(false);
   const [pdfImportRunVerification, setPdfImportRunVerification] = useState(true);
+  const [pdfImportReview, setPdfImportReview] = useState(null);
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -680,25 +681,63 @@ const App = () => {
     }
     setPdfImportLoading(true);
     setPdfImportResult(null);
+    setPdfImportReview(null);
     try {
-      const formData = new FormData();
-      formData.append('pdf', pdfImportFile);
-      if (pdfImportAnswerKey.trim()) formData.append('answerKey', pdfImportAnswerKey.trim());
-      formData.append('useAI', (user?.role === 'teacher' ? true : pdfImportUseAI) ? 'true' : 'false');
-      formData.append('useImageMode', pdfImportUseImageMode ? 'true' : 'false');
-      formData.append('runVerification', pdfImportRunVerification ? 'true' : 'false');
-      const { data } = await api.post('/api/import-pdf', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 300000, // 5 min (Render free tier limit)
-      });
-      setPdfImportResult(data);
-      setPdfImportFile(null);
-      setPdfImportAnswerKey('');
-      const input = document.getElementById('pdf-import-input');
-      if (input) input.value = '';
-      loadUserData({ preserveView: true });
+      if (pdfImportUseImageMode) {
+        const formData = new FormData();
+        formData.append('pdf', pdfImportFile);
+        formData.append('answerKey', pdfImportAnswerKey.trim());
+        const { data } = await api.post('/api/import-pdf/start', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 300000,
+        });
+        setPdfImportReview(data);
+        setPdfImportFile(null);
+        setPdfImportAnswerKey('');
+        const input = document.getElementById('pdf-import-input');
+        if (input) input.value = '';
+      } else {
+        const formData = new FormData();
+        formData.append('pdf', pdfImportFile);
+        formData.append('answerKey', pdfImportAnswerKey.trim());
+        formData.append('useAI', (user?.role === 'teacher' ? true : pdfImportUseAI) ? 'true' : 'false');
+        formData.append('useImageMode', 'false');
+        formData.append('runVerification', pdfImportRunVerification ? 'true' : 'false');
+        const { data } = await api.post('/api/import-pdf', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 300000,
+        });
+        setPdfImportResult(data);
+        setPdfImportFile(null);
+        setPdfImportAnswerKey('');
+        const input = document.getElementById('pdf-import-input');
+        if (input) input.value = '';
+        loadUserData({ preserveView: true });
+      }
     } catch (error) {
       setPdfImportResult({ error: error.response?.data?.error || error.message || 'Import failed' });
+    } finally {
+      setPdfImportLoading(false);
+    }
+  };
+
+  const handlePdfImportConfirm = async (accepted) => {
+    if (!pdfImportReview?.importId) return;
+    setPdfImportLoading(true);
+    try {
+      const { data } = await api.post('/api/import-pdf/confirm', {
+        importId: pdfImportReview.importId,
+        accepted,
+      });
+      if (data.done) {
+        setPdfImportResult(data);
+        setPdfImportReview(null);
+        loadUserData({ preserveView: true });
+      } else {
+        setPdfImportReview((prev) => ({ ...prev, ...data }));
+      }
+    } catch (error) {
+      setPdfImportResult({ error: error.response?.data?.error || error.message || 'Confirm failed' });
     } finally {
       setPdfImportLoading(false);
     }
@@ -2111,6 +2150,48 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   )}
                 </>
               )}
+            </div>
+          )}
+
+          {pdfImportReview && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                <h4 className="text-lg font-bold mb-2">
+                  Problem {pdfImportReview.problemNumber} of {pdfImportReview.total}
+                </h4>
+                <p className="text-sm text-gray-600 mb-4">
+                  Does this screenshot contain the right problem?
+                </p>
+                {pdfImportReview.screenshot ? (
+                  <img
+                    src={pdfImportReview.screenshot}
+                    alt={`Problem ${pdfImportReview.problemNumber}`}
+                    className="w-full border rounded-lg mb-4 max-h-[50vh] object-contain bg-gray-50"
+                  />
+                ) : (
+                  <div className="w-full h-48 border rounded-lg mb-4 bg-gray-100 flex items-center justify-center text-gray-500">
+                    No preview available
+                  </div>
+                )}
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handlePdfImportConfirm(true)}
+                    disabled={pdfImportLoading}
+                    className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                  >
+                    {pdfImportLoading ? '…' : 'Yes, correct'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePdfImportConfirm(false)}
+                    disabled={pdfImportLoading}
+                    className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                  >
+                    {pdfImportLoading ? '…' : 'No, try again'}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>

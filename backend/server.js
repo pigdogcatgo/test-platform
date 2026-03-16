@@ -293,6 +293,17 @@ app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Import session storage for image-mode review flow (TTL 20 min)
+const importSessions = new Map();
+const IMPORT_SESSION_TTL = 20 * 60 * 1000;
+function pruneImportSessions() {
+  const now = Date.now();
+  for (const [id, s] of importSessions) {
+    if (now - s.createdAt > IMPORT_SESSION_TTL) importSessions.delete(id);
+  }
+}
+setInterval(pruneImportSessions, 60000);
+
 // Import problems from PDF (admin + teacher)
 app.get('/api/import-pdf', (_req, res) => {
   res.status(405).json({ error: 'Use POST to import a PDF', ok: true });
@@ -309,9 +320,14 @@ app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (r
   const useImageMode = req.body.useImageMode === 'true' || req.body.useImageMode === true;
   const runVerification = req.body.runVerification !== 'false' && req.body.runVerification !== false;
   const createdBy = req.user.role === 'admin' ? null : req.user.id;
+
+  if (useImageMode) {
+    return res.status(400).json({ error: 'Use POST /api/import-pdf/start for image mode (teacher review flow)' });
+  }
+
   try {
     const { importPdfToDatabase } = await import('./pdfImport.js');
-    const result = await importPdfToDatabase(req.file.buffer, answerKey, useAI, createdBy, { useImageMode, runVerification });
+    const result = await importPdfToDatabase(req.file.buffer, answerKey, useAI, createdBy, { useImageMode: false, runVerification });
     res.json({
       success: true,
       imported: result.imported,
@@ -322,6 +338,158 @@ app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (r
   } catch (error) {
     console.error('PDF import error:', error);
     res.status(400).json({ error: error.message || 'Import failed' });
+  }
+});
+
+app.post('/api/import-pdf/start', authenticateToken, uploadPdf.single('pdf'), async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  if (!req.file || !req.file.buffer) {
+    return res.status(400).json({ error: 'No PDF file provided' });
+  }
+  const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
+  if (!answerKey.trim()) {
+    return res.status(400).json({ error: 'Answer key is required for image mode import' });
+  }
+  const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  try {
+    const { processPdfForImageMode, renderProblemScreenshot, parseAnswerKey, ensureTags } = await import('./pdfImport.js');
+    const answerMap = parseAnswerKey(answerKey);
+    const SYSTEM_TAG_NAMES = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
+    const client = await pool.connect();
+    const tagMap = await ensureTags(client, createdBy);
+    client.release();
+    const { folderName, processedList, errors: batchErrors } = await processPdfForImageMode(req.file.buffer, answerMap, SYSTEM_TAG_NAMES);
+    if (processedList.length === 0) {
+      return res.status(400).json({ error: 'No problems extracted from PDF' });
+    }
+    const importId = `img-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    importSessions.set(importId, {
+      pdfBuffer: req.file.buffer,
+      processedList,
+      folderName,
+      errors: batchErrors,
+      tagMap,
+      allowedTagNames: SYSTEM_TAG_NAMES,
+      defaultTag: 'Arithmetic',
+      createdBy,
+      currentIndex: 0,
+      createdAt: Date.now(),
+    });
+    const screenshot = await renderProblemScreenshot(req.file.buffer, processedList[0]);
+    res.json({
+      importId,
+      problemIndex: 0,
+      problemNumber: processedList[0].number,
+      total: processedList.length,
+      folderName,
+      screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
+      errors: batchErrors,
+    });
+  } catch (error) {
+    console.error('PDF import start error:', error);
+    res.status(400).json({ error: error.message || 'Import failed' });
+  }
+});
+
+app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  const { importId, accepted } = req.body;
+  if (!importId || typeof accepted !== 'boolean') {
+    return res.status(400).json({ error: 'importId and accepted (boolean) required' });
+  }
+  const session = importSessions.get(importId);
+  if (!session) {
+    return res.status(404).json({ error: 'Import session expired or not found' });
+  }
+  const { pdfBuffer, processedList, folderName, tagMap, allowedTagNames, defaultTag, createdBy } = session;
+  const idx = session.currentIndex;
+  const processed = processedList[idx];
+  if (!processed) {
+    return res.status(400).json({ error: 'Invalid problem index' });
+  }
+
+  try {
+    const { renderProblemScreenshot, retryRegionForProblem } = await import('./pdfImport.js');
+    let renderFn = null;
+    try {
+      const pdfRender = await import('./pdfRender.js');
+      renderFn = pdfRender.renderPdfPageToPng;
+    } catch {
+      /* canvas not available */
+    }
+
+    if (accepted) {
+      const base64 = await renderProblemScreenshot(pdfBuffer, processed);
+      if (base64) {
+        const uploadRes = await pool.query(
+          'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
+          [base64, `problem-${processed.number}.png`, 'image/png', createdBy]
+        );
+        processed.confirmedImageUrl = '/uploads/db/' + uploadRes.rows[0].id;
+      }
+      session.currentIndex = idx + 1;
+      if (session.currentIndex >= processedList.length) {
+        importSessions.delete(importId);
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          let folderRow = await client.query('SELECT id FROM folders WHERE name = $1 AND (created_by IS NOT DISTINCT FROM $2)', [folderName, createdBy]);
+          if (folderRow.rows.length === 0) {
+            folderRow = await client.query('INSERT INTO folders (name, created_by) VALUES ($1, $2) RETURNING id', [folderName, createdBy]);
+          }
+          const folderId = folderRow.rows[0].id;
+          let imported = 0;
+          for (const p of processedList) {
+            const tagName = (p.topics?.[0] || defaultTag).trim();
+            const validTag = allowedTagNames.includes(tagName) ? tagName : defaultTag;
+            const imageUrl = p.confirmedImageUrl || null;
+            const ins = await client.query(
+              'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+              [p.question, String(p.answer), validTag, imageUrl, p.source, folderId, createdBy]
+            );
+            const tagId = tagMap[validTag];
+            if (tagId) {
+              await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.rows[0].id, tagId]);
+            }
+            imported++;
+          }
+          await client.query('COMMIT');
+          return res.json({ success: true, done: true, imported, folderId, folderName, errors: session.errors });
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+      }
+      const nextProcessed = processedList[session.currentIndex];
+      const screenshot = await renderProblemScreenshot(pdfBuffer, nextProcessed);
+      return res.json({
+        importId,
+        problemIndex: session.currentIndex,
+        problemNumber: nextProcessed.number,
+        total: processedList.length,
+        screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
+      });
+    } else {
+      const ok = renderFn && (await retryRegionForProblem(pdfBuffer, processed, renderFn));
+      const screenshot = await renderProblemScreenshot(pdfBuffer, processed);
+      return res.json({
+        importId,
+        problemIndex: idx,
+        problemNumber: processed.number,
+        total: processedList.length,
+        screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
+        retried: ok,
+      });
+    }
+  } catch (error) {
+    console.error('PDF import confirm error:', error);
+    res.status(400).json({ error: error.message || 'Confirm failed' });
   }
 });
 
