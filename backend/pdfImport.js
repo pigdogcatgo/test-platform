@@ -46,6 +46,72 @@ export function parseAnswerKey(text) {
 }
 
 /**
+ * Refine problem regions using per-page images. The AI sees the actual rendered page
+ * and returns regions, which is more accurate than inferring from the raw PDF.
+ * @param {Buffer} pdfBuffer
+ * @param {Array} processedList - from first pass, must have problemPage, problemRegion, number, hasDiagram
+ * @param {Function} renderFn - renderPdfPageToPng
+ * @returns {Promise<void>} - mutates processedList in place with refined problemRegion
+ */
+async function refineRegionsForImageMode(pdfBuffer, processedList, renderFn) {
+  if (!ai || !renderFn || processedList.length === 0) return;
+  const byPage = new Map();
+  for (const p of processedList) {
+    if (!p.problemPage) continue;
+    const page = p.problemPage;
+    if (!byPage.has(page)) byPage.set(page, []);
+    byPage.get(page).push(p);
+  }
+  for (const [pageNum, problems] of byPage) {
+    const nums = problems.map((p) => p.number).sort((a, b) => a - b);
+    try {
+      const pngBuffer = await renderFn(pdfBuffer, pageNum, null, 2, 0);
+      const pageBase64 = pngBuffer.toString('base64');
+      const prompt = `This image is page ${pageNum} of a math competition PDF. Problems on this page: ${nums.join(', ')}.
+
+For EACH problem number, return the exact region that contains ONLY that problem (no adjacent problems).
+Coordinates: y = top edge (0 = top of page, 1 = bottom), h = height. Always use full width: x=0, w=1.
+Return JSON: { "regions": [{ "number": N, "y": 0.0-1, "h": 0.0-1 }] }
+Each region must be tight vertically — only that problem. Add small margin (0.01-0.02) above/below to avoid cutting off text.
+If a problem has a diagram, include the full diagram in its region.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: createUserContent([
+          { text: prompt },
+          { inlineData: { mimeType: 'image/png', data: pageBase64 } },
+        ]),
+        config: { temperature: 0, responseMimeType: 'application/json' },
+      });
+      const raw = (response?.text || '').trim();
+      if (!raw) continue;
+      let jsonStr = raw.replace(/^```json?\s*|\s*```$/g, '').trim();
+      const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (objMatch) jsonStr = objMatch[0];
+      let obj;
+      try {
+        obj = JSON.parse(jsonStr);
+      } catch {
+        obj = JSON.parse(jsonrepair(jsonStr));
+      }
+      const regions = obj?.regions || [];
+      const regionByNum = Object.fromEntries(regions.map((r) => [r.number, r]));
+      for (const p of problems) {
+        const r = regionByNum[p.number];
+        if (r && typeof r.y === 'number' && typeof r.h === 'number') {
+          const y = Math.max(0, Math.min(1, r.y));
+          const h = Math.max(0.02, Math.min(1 - y, r.h));
+          p.problemRegion = { x: 0, y, w: 1, h };
+        }
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    } catch (err) {
+      console.warn('Region refinement failed for page', pageNum, err.message);
+    }
+  }
+}
+
+/**
  * Run verification pass: compare extracted problems with PDF, return corrections.
  */
 async function runVerificationPass(pdfBuffer, extractedProblems, answerMap, allowedTagNames) {
@@ -373,6 +439,11 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
       sourceName = folderName;
       for (const err of batchErrors) errors.push(err.message);
 
+      if (useImageMode && processedList.length > 0) {
+        const renderFn = await getRenderPdfPageToPng();
+        if (renderFn) await refineRegionsForImageMode(pdfBuffer, processedList, renderFn);
+      }
+
       if (runVerification && !useImageMode && processedList.length > 0) {
         const corrections = await runVerificationPass(pdfBuffer, processedList, answerMap, allowedTagNames);
         if (Object.keys(corrections).length > 0) {
@@ -394,8 +465,14 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
         if (renderFn) {
           if (useImageMode && processed.problemPage) {
             try {
+              let region = processed.problemRegion;
+              if (region && typeof region === 'object') {
+                const y = Math.max(0, Math.min(1, Number(region.y) || 0));
+                const h = Math.max(0.02, Math.min(1 - y, Number(region.h) || 0.2));
+                region = { x: 0, y, w: 1, h };
+              }
               const cropPad = processed.hasDiagram ? 0.08 : 0.04;
-              const pngBuffer = await renderFn(pdfBuffer, processed.problemPage, processed.problemRegion, 2, cropPad);
+              const pngBuffer = await renderFn(pdfBuffer, processed.problemPage, region, 2, cropPad);
               const base64 = pngBuffer.toString('base64');
               const uploadRes = await client.query(
                 'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
