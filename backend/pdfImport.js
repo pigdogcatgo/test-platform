@@ -69,11 +69,11 @@ async function refineRegionsForImageMode(pdfBuffer, processedList, renderFn) {
       const pageBase64 = pngBuffer.toString('base64');
       const prompt = `This image is page ${pageNum} of a math competition PDF. Problems on this page: ${nums.join(', ')}.
 
-For EACH problem number, return the exact region that contains ONLY that problem (no adjacent problems).
+For EACH problem number, return the exact region that contains ONLY that problem.
+CRITICAL: Use the problem NUMBER labels (1., 2., 3., etc.) to determine boundaries — NOT spacing or visual gaps. Problem N starts where "N." appears and ends where the next problem number appears (or end of page).
 Coordinates: y = top edge (0 = top of page, 1 = bottom), h = height. Always use full width: x=0, w=1.
 Return JSON: { "regions": [{ "number": N, "y": 0.0-1, "h": 0.0-1 }] }
-Each region must be tight vertically — only that problem. Add small margin (0.01-0.02) above/below to avoid cutting off text.
-If a problem has a diagram, include the full diagram in its region.`;
+Add small margin (0.01-0.02) above/below to avoid cutting off text. If a problem has a diagram, include the full diagram in its region.`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.0-flash',
@@ -174,8 +174,9 @@ async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames, opt
 
   const imageModeInstructions = useImageMode ? `
 IMAGE MODE: For each problem, return "problemPage" (1-based page number) and "problemRegion" { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } — the bounding box on the page.
-WIDTH: Every screenshot must be the full width of the PDF. Always use x=0 and w=1. You may add small vertical margin (above/below) if there is no diagram, to avoid cutting off text — but keep the region tight vertically so ONLY this problem appears, no adjacent problems above or below.
-EXCEPTION: If the problem has a diagram (hasDiagram: true), the diagram MUST be fully included. If the diagram cannot fit within a region that excludes other problems, include the full diagram anyway — the diagram takes priority. When a problem has a diagram, problemRegion must encompass both the question text AND the complete diagram (still full width: x=0, w=1).
+BOUNDARIES: Use the problem NUMBER (1., 2., 3., etc.) to determine where each problem starts and ends — NOT spacing or visual gaps. Problem N starts where "N." appears; it ends where the next problem number appears (or end of page). Do NOT rely on blank space between problems.
+WIDTH: Every screenshot must be the full width of the PDF. Always use x=0 and w=1. Add small vertical margin (0.01-0.02) above/below if no diagram.
+EXCEPTION: If the problem has a diagram (hasDiagram: true), the diagram MUST be fully included. When a problem has a diagram, problemRegion must encompass both the question text AND the complete diagram (still full width: x=0, w=1).
 Set "questionLatex" to "Problem N" only. The system will screenshot each region.` : '';
 
   const systemPrompt = `You are a math competition problem processor. You will receive a PDF of a Sprint Round (or similar). Your job is to:
@@ -198,7 +199,7 @@ ${answerKeyText}
 For each problem's "topics" field, use ONLY these exact tag names (copy them character-for-character): ${tagList}. No variations or synonyms allowed.
 
 For each problem that has a diagram/figure/picture, set "hasDiagram": true, "diagramPage": <1-based page number>, and optionally "diagramRegion": { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } for the diagram's bounding box. If no diagram, set "hasDiagram": false.
-${useImageMode ? 'IMAGE MODE: Every problem MUST have "problemPage" (1-based) and "problemRegion" { "x", "y", "w", "h" }. Use x=0 and w=1 (full page width) for every problem. Keep y and h tight vertically so ONLY this problem appears — no adjacent problems above or below. Add small vertical margin if no diagram to avoid cutting off text. If the problem has a diagram, the diagram MUST be fully included.' : ''}
+${useImageMode ? 'IMAGE MODE: Every problem MUST have "problemPage" (1-based) and "problemRegion" { "x", "y", "w", "h" }. Use x=0 and w=1. Use the problem NUMBER (1., 2., 3.) to determine boundaries — problem N starts at "N." and ends at the next number. Do NOT use spacing or gaps. If the problem has a diagram, the diagram MUST be fully included.' : ''}
 
 Return JSON: { "folderName": "...", "problems": [...] }`;
 
