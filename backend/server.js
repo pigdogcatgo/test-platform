@@ -399,10 +399,11 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const { importId, accepted } = req.body;
+  const { importId, accepted, direction } = req.body;
   if (!importId || typeof accepted !== 'boolean') {
     return res.status(400).json({ error: 'importId and accepted (boolean) required' });
   }
+  const dir = direction === 'up' || direction === 'down' ? direction : null;
   const session = importSessions.get(importId);
   if (!session) {
     return res.status(404).json({ error: 'Import session expired or not found' });
@@ -474,7 +475,7 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
       });
     } else {
       session.retryCount = (session.retryCount || 0) + 1;
-      const ok = await retryRegionForProblem(pdfBuffer, processed, session.retryCount);
+      const ok = await retryRegionForProblem(pdfBuffer, processed, session.retryCount, dir);
       const screenshot = await renderProblemScreenshot(pdfBuffer, processed);
       session.reviewVersion = (session.reviewVersion || 0) + 1;
       return res.json({

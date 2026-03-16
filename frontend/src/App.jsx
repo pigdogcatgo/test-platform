@@ -721,14 +721,13 @@ const App = () => {
     }
   };
 
-  const handlePdfImportConfirm = async (accepted) => {
+  const handlePdfImportConfirm = async (accepted, direction = null) => {
     if (!pdfImportReview?.importId) return;
     setPdfImportLoading(true);
     try {
-      const { data } = await api.post('/api/import-pdf/confirm', {
-        importId: pdfImportReview.importId,
-        accepted,
-      });
+      const body = { importId: pdfImportReview.importId, accepted };
+      if (!accepted && direction) body.direction = direction;
+      const { data } = await api.post('/api/import-pdf/confirm', body);
       if (data.done) {
         setPdfImportResult(data);
         setPdfImportReview(null);
@@ -2174,7 +2173,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     No preview available
                   </div>
                 )}
-                <div className="flex gap-3">
+                <div className="flex flex-wrap gap-3">
                   <button
                     type="button"
                     onClick={() => handlePdfImportConfirm(true)}
@@ -2185,11 +2184,21 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => handlePdfImportConfirm(false)}
+                    onClick={() => handlePdfImportConfirm(false, 'up')}
                     disabled={pdfImportLoading}
                     className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                    title="Region should move up (include more from above)"
                   >
-                    {pdfImportLoading ? '…' : 'No, try again'}
+                    {pdfImportLoading ? '…' : 'No — move up'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePdfImportConfirm(false, 'down')}
+                    disabled={pdfImportLoading}
+                    className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                    title="Region should move down (include more from below)"
+                  >
+                    {pdfImportLoading ? '…' : 'No — move down'}
                   </button>
                 </div>
               </div>

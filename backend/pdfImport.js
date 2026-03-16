@@ -49,22 +49,29 @@ export function parseAnswerKey(text) {
  * Retry region for a single problem (when teacher rejects screenshot).
  * Uses getRenderPdfPageToPng internally so render is always available.
  * @param {number} [attempt] - 1-based attempt number, used to vary the prompt
+ * @param {string} [direction] - "up" | "down" - teacher says region should move up or down
  */
-export async function retryRegionForProblem(pdfBuffer, processed, attempt = 1) {
+export async function retryRegionForProblem(pdfBuffer, processed, attempt = 1, direction = null) {
   if (!ai || !processed.problemPage) return false;
   const renderFn = await getRenderPdfPageToPng();
   if (!renderFn) return false;
   const pageNum = processed.problemPage;
   const num = processed.number;
   const prev = processed.problemRegion;
+  const dirHint = direction === 'up'
+    ? ' The teacher says to move the screenshot higher up on the page. Use a SMALLER y value.'
+    : direction === 'down'
+      ? ' The teacher says to move the screenshot down on the page. Use a LARGER y value or extend the height.'
+      : '';
   try {
     const pngBuffer = await renderFn(pdfBuffer, pageNum, null, 2, 0);
     const pageBase64 = pngBuffer.toString('base64');
     const attemptHint = attempt > 1 ? ` (Attempt ${attempt} - try a noticeably different region)` : '';
     const prompt = `This image is page ${pageNum} of a math competition PDF. The previous crop for problem ${num} was WRONG.
 ${prev ? `Previous region was approximately y=${(prev.y || 0).toFixed(2)}, h=${(prev.h || 0).toFixed(2)}.` : ''}
+${dirHint}
 
-Return a DIFFERENT region for problem ${num} only. Adjust the vertical boundaries - move the top (y) or change the height (h).${attemptHint}
+Return a DIFFERENT region for problem ${num} only. Adjust the vertical boundaries.${attemptHint}
 Coordinates: y = top edge (0 = top, 1 = bottom), h = height. Use x=0, w=1 (full width).
 Return JSON: { "regions": [{ "number": ${num}, "y": 0.0-1, "h": 0.0-1 }] }`;
 
@@ -97,12 +104,20 @@ Return JSON: { "regions": [{ "number": ${num}, "y": 0.0-1, "h": 0.0-1 }] }`;
   if (fallbackPrev && typeof fallbackPrev.y === 'number' && typeof fallbackPrev.h === 'number') {
     const y = fallbackPrev.y;
     const h = fallbackPrev.h;
-    const offsets = [
-      { y: Math.max(0, y - 0.06), h: Math.min(1 - Math.max(0, y - 0.06), h + 0.08) },
-      { y: Math.min(1 - 0.02, y + 0.04), h: Math.max(0.02, h - 0.04) },
-      { y: Math.max(0, y - 0.03), h: Math.max(0.02, h - 0.02) },
-    ];
-    const pick = offsets[Math.min(attempt - 1, offsets.length - 1)];
+    let pick;
+    if (direction === 'up') {
+      pick = { y: Math.max(0, y - 0.08), h: Math.min(1 - Math.max(0, y - 0.08), h + 0.06) };
+    } else if (direction === 'down') {
+      const yNew = Math.min(1 - 0.02, y + 0.06);
+      pick = { y: yNew, h: Math.max(0.02, Math.min(1 - yNew, h + 0.04)) };
+    } else {
+      const offsets = [
+        { y: Math.max(0, y - 0.06), h: Math.min(1 - Math.max(0, y - 0.06), h + 0.08) },
+        { y: Math.min(1 - 0.02, y + 0.04), h: Math.max(0.02, h - 0.04) },
+        { y: Math.max(0, y - 0.03), h: Math.max(0.02, h - 0.02) },
+      ];
+      pick = offsets[Math.min(attempt - 1, offsets.length - 1)];
+    }
     processed.problemRegion = { x: 0, y: pick.y, w: 1, h: pick.h };
     return true;
   }
