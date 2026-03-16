@@ -2164,6 +2164,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                 </p>
                 {pdfImportReview.screenshot ? (
                   <img
+                    key={`${pdfImportReview.problemIndex}-${pdfImportReview.reviewVersion ?? 0}`}
                     src={pdfImportReview.screenshot}
                     alt={`Problem ${pdfImportReview.problemNumber}`}
                     className="w-full border rounded-lg mb-4 max-h-[50vh] object-contain bg-gray-50"

@@ -375,6 +375,7 @@ app.post('/api/import-pdf/start', authenticateToken, uploadPdf.single('pdf'), as
       defaultTag: 'Arithmetic',
       createdBy,
       currentIndex: 0,
+      retryCount: 0,
       createdAt: Date.now(),
     });
     const screenshot = await renderProblemScreenshot(req.file.buffer, processedList[0]);
@@ -386,6 +387,7 @@ app.post('/api/import-pdf/start', authenticateToken, uploadPdf.single('pdf'), as
       folderName,
       screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
       errors: batchErrors,
+      reviewVersion: 0,
     });
   } catch (error) {
     console.error('PDF import start error:', error);
@@ -414,15 +416,9 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
 
   try {
     const { renderProblemScreenshot, retryRegionForProblem } = await import('./pdfImport.js');
-    let renderFn = null;
-    try {
-      const pdfRender = await import('./pdfRender.js');
-      renderFn = pdfRender.renderPdfPageToPng;
-    } catch {
-      /* canvas not available */
-    }
 
     if (accepted) {
+      session.retryCount = 0;
       const base64 = await renderProblemScreenshot(pdfBuffer, processed);
       if (base64) {
         const uploadRes = await pool.query(
@@ -474,10 +470,13 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
         problemNumber: nextProcessed.number,
         total: processedList.length,
         screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
+        reviewVersion: 0,
       });
     } else {
-      const ok = renderFn && (await retryRegionForProblem(pdfBuffer, processed, renderFn));
+      session.retryCount = (session.retryCount || 0) + 1;
+      const ok = await retryRegionForProblem(pdfBuffer, processed, session.retryCount);
       const screenshot = await renderProblemScreenshot(pdfBuffer, processed);
+      session.reviewVersion = (session.reviewVersion || 0) + 1;
       return res.json({
         importId,
         problemIndex: idx,
@@ -485,6 +484,7 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
         total: processedList.length,
         screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
         retried: ok,
+        reviewVersion: session.reviewVersion,
       });
     }
   } catch (error) {

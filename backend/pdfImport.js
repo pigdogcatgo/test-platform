@@ -47,17 +47,24 @@ export function parseAnswerKey(text) {
 
 /**
  * Retry region for a single problem (when teacher rejects screenshot).
+ * Uses getRenderPdfPageToPng internally so render is always available.
+ * @param {number} [attempt] - 1-based attempt number, used to vary the prompt
  */
-export async function retryRegionForProblem(pdfBuffer, processed, renderFn) {
-  if (!ai || !renderFn || !processed.problemPage) return false;
+export async function retryRegionForProblem(pdfBuffer, processed, attempt = 1) {
+  if (!ai || !processed.problemPage) return false;
+  const renderFn = await getRenderPdfPageToPng();
+  if (!renderFn) return false;
   const pageNum = processed.problemPage;
   const num = processed.number;
+  const prev = processed.problemRegion;
   try {
     const pngBuffer = await renderFn(pdfBuffer, pageNum, null, 2, 0);
     const pageBase64 = pngBuffer.toString('base64');
+    const attemptHint = attempt > 1 ? ` (Attempt ${attempt} - try a noticeably different region)` : '';
     const prompt = `This image is page ${pageNum} of a math competition PDF. The previous crop for problem ${num} was WRONG.
+${prev ? `Previous region was approximately y=${(prev.y || 0).toFixed(2)}, h=${(prev.h || 0).toFixed(2)}.` : ''}
 
-Return a DIFFERENT region for problem ${num} only. Try adjusting the vertical boundaries.
+Return a DIFFERENT region for problem ${num} only. Adjust the vertical boundaries - move the top (y) or change the height (h).${attemptHint}
 Coordinates: y = top edge (0 = top, 1 = bottom), h = height. Use x=0, w=1 (full width).
 Return JSON: { "regions": [{ "number": ${num}, "y": 0.0-1, "h": 0.0-1 }] }`;
 
@@ -67,7 +74,7 @@ Return JSON: { "regions": [{ "number": ${num}, "y": 0.0-1, "h": 0.0-1 }] }`;
         { text: prompt },
         { inlineData: { mimeType: 'image/png', data: pageBase64 } },
       ]),
-      config: { temperature: 0.3, responseMimeType: 'application/json' },
+      config: { temperature: 0.5, responseMimeType: 'application/json' },
     });
     const raw = (response?.text || '').trim();
     if (!raw) return false;
@@ -85,6 +92,19 @@ Return JSON: { "regions": [{ "number": ${num}, "y": 0.0-1, "h": 0.0-1 }] }`;
     }
   } catch (err) {
     console.warn('Retry region failed for problem', num, err.message);
+  }
+  const fallbackPrev = processed.problemRegion;
+  if (fallbackPrev && typeof fallbackPrev.y === 'number' && typeof fallbackPrev.h === 'number') {
+    const y = fallbackPrev.y;
+    const h = fallbackPrev.h;
+    const offsets = [
+      { y: Math.max(0, y - 0.06), h: Math.min(1 - Math.max(0, y - 0.06), h + 0.08) },
+      { y: Math.min(1 - 0.02, y + 0.04), h: Math.max(0.02, h - 0.04) },
+      { y: Math.max(0, y - 0.03), h: Math.max(0.02, h - 0.02) },
+    ];
+    const pick = offsets[Math.min(attempt - 1, offsets.length - 1)];
+    processed.problemRegion = { x: 0, y: pick.y, w: 1, h: pick.h };
+    return true;
   }
   return false;
 }
