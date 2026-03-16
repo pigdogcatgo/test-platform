@@ -11,9 +11,10 @@ import { createCanvas } from 'canvas';
  * @param {number} pageNum - 1-based page number
  * @param {object} [crop] - Optional normalized crop { x, y, w, h } in 0-1 range
  * @param {number} [scale=2] - Scale factor for resolution
+ * @param {number} [cropPadding=0.04] - Padding around crop (0-1) to avoid cutting off content; use larger (e.g. 0.08) for full problem screenshots
  * @returns {Promise<Buffer>} PNG buffer
  */
-export async function renderPdfPageToPng(pdfBuffer, pageNum, crop = null, scale = 2) {
+export async function renderPdfPageToPng(pdfBuffer, pageNum, crop = null, scale = 2, cropPadding = 0.04) {
   const loadingTask = getDocument({ data: new Uint8Array(pdfBuffer) });
   const pdfDoc = await loadingTask.promise;
   const page = await pdfDoc.getPage(pageNum);
@@ -29,7 +30,7 @@ export async function renderPdfPageToPng(pdfBuffer, pageNum, crop = null, scale 
 
   let outCanvas = canvas;
   if (crop && typeof crop.x === 'number' && typeof crop.y === 'number' && typeof crop.w === 'number' && typeof crop.h === 'number') {
-    const pad = 0.04;
+    const pad = typeof cropPadding === 'number' ? Math.max(0, Math.min(0.2, cropPadding)) : 0.04;
     const x0 = Math.max(0, crop.x - pad);
     const y0 = Math.max(0, crop.y - pad);
     const x1 = Math.min(1, crop.x + crop.w + pad);

@@ -148,6 +148,8 @@ const App = () => {
   const [pdfImportLoading, setPdfImportLoading] = useState(false);
   const [pdfImportResult, setPdfImportResult] = useState(null);
   const [pdfImportUseAI, setPdfImportUseAI] = useState(true);
+  const [pdfImportUseImageMode, setPdfImportUseImageMode] = useState(false);
+  const [pdfImportRunVerification, setPdfImportRunVerification] = useState(true);
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -683,6 +685,8 @@ const App = () => {
       formData.append('pdf', pdfImportFile);
       if (pdfImportAnswerKey.trim()) formData.append('answerKey', pdfImportAnswerKey.trim());
       formData.append('useAI', (user?.role === 'teacher' ? true : pdfImportUseAI) ? 'true' : 'false');
+      formData.append('useImageMode', pdfImportUseImageMode ? 'true' : 'false');
+      formData.append('runVerification', pdfImportRunVerification ? 'true' : 'false');
       const { data } = await api.post('/api/import-pdf', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 300000, // 5 min (Render free tier limit)
@@ -903,8 +907,15 @@ if (view === 'taking-test' && activeTest) {
         </div>
 
         {/* Answer formatting instructions */}
-        <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
-          <strong>How to format answers:</strong> Use numbers (42), fractions (3/4), radicals (√2, √2/2, 2√3), or decimals. For ordered pairs use (x,y) e.g. (-1,-3). No spaces in numbers. Click Submit when done.
+        <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700 space-y-2">
+          <p><strong>How to format answers:</strong></p>
+          <ul className="list-disc list-inside space-y-1 ml-1">
+            <li>Numbers: <code className="bg-gray-200 px-1 rounded">42</code></li>
+            <li>Fractions: <code className="bg-gray-200 px-1 rounded">3/4</code> (not LaTeX)</li>
+            <li>Radicals: <code className="bg-gray-200 px-1 rounded">√2</code>, <code className="bg-gray-200 px-1 rounded">√2/2</code>, <code className="bg-gray-200 px-1 rounded">2√3</code></li>
+            <li>Ordered pairs: <code className="bg-gray-200 px-1 rounded">(-1,-3)</code> or <code className="bg-gray-200 px-1 rounded">(1/2,-3/4)</code></li>
+          </ul>
+          <p><strong>Do not use LaTeX</strong> (e.g. <code className="bg-gray-200 px-1 rounded">\frac{3}{4}</code>) — it will not be graded correctly. Use plain format above. Questions use LaTeX for display; your answers use simple text.</p>
         </div>
 
         {/* Lockdown warning — prominent */}
@@ -952,31 +963,14 @@ if (view === 'taking-test' && activeTest) {
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:border-[#0085CA] focus:outline-none text-center text-sm"
                 placeholder="e.g. 42, 3/4, √2, √2/2"
               />
-              {(testAnswers[problem.id] || '').trim() && (() => {
-                const raw = String(testAnswers[problem.id] || '').trim();
-                const pairMatch = raw.match(/^\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)\s*$/);
-                let latex;
-                if (pairMatch) {
-                  const x = pairMatch[1].trim().replace(/(\d+)\/(\d+)/g, '\\\\frac{$1}{$2}').replace(/\u221A(\d+)/g, '\\\\sqrt{$1}');
-                  const y = pairMatch[2].trim().replace(/(\d+)\/(\d+)/g, '\\\\frac{$1}{$2}').replace(/\u221A(\d+)/g, '\\\\sqrt{$1}');
-                  latex = `(${x},\\ ${y})`;
-                } else {
-                  latex = raw
-                    .replace(/(\d+)\/(\d+)/g, '\\\\frac{$1}{$2}')
-                    .replace(/\u221A(\d+)/g, '\\\\sqrt{$1}')
-                    .replace(/\u221A\(([^)]+)\)/g, '\\\\sqrt{$1}')
-                    .replace(/sqrt\(([^)]+)\)/gi, '\\\\sqrt{$1}')
-                    .replace(/(\d+)\u221A(\d+)/g, '$1\\\\sqrt{$2}');
-                }
-                return (
-                  <div className="mt-2 text-sm text-gray-500 flex items-center gap-2">
-                    <span>Preview:</span>
-                    <span className="inline-flex items-center min-h-[1.5em] px-2 py-1 bg-[#f5f7f8] rounded">
-                      <RenderLatex text={'$' + latex + '$'} />
-                    </span>
-                  </div>
-                );
-              })()}
+              {(testAnswers[problem.id] || '').trim() && (
+                <div className="mt-2 text-sm text-gray-500 flex items-center gap-2">
+                  <span>Will be interpreted as:</span>
+                  <code className="px-2 py-1 bg-[#f5f7f8] rounded border border-gray-200 font-mono text-gray-800">
+                    {String(testAnswers[problem.id] || '').trim()}
+                  </code>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -2051,9 +2045,27 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                 checked={pdfImportUseAI}
                 onChange={(e) => setPdfImportUseAI(e.target.checked)}
               />
-              Use AI (LaTeX, auto-tags, optional solving) — requires API key
+              Use AI (LaTeX, auto-tags) — requires API key
             </label>
           )}
+          <label className="flex items-center gap-2 mb-3 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={pdfImportUseImageMode}
+              onChange={(e) => setPdfImportUseImageMode(e.target.checked)}
+            />
+            Use problem images (screenshot each problem from PDF instead of LaTeX — preserves exact appearance)
+          </label>
+          <label className={`flex items-center gap-2 mb-3 text-sm cursor-pointer ${pdfImportUseImageMode ? 'opacity-60' : ''}`}>
+            <input
+              type="checkbox"
+              checked={pdfImportRunVerification}
+              onChange={(e) => setPdfImportRunVerification(e.target.checked)}
+              disabled={pdfImportUseImageMode}
+            />
+            Run verification pass (second AI pass to catch LaTeX transcription errors)
+            {pdfImportUseImageMode && <span className="text-gray-500">— skipped in image mode</span>}
+          </label>
           <div className="flex flex-wrap gap-3 items-end mb-3">
             <div className="flex-1 min-w-[200px]">
               <label className="block text-xs text-gray-500 mb-1">PDF file</label>

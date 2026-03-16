@@ -306,10 +306,12 @@ app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (r
   }
   const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
   const useAI = req.user.role === 'teacher' ? true : (req.body.useAI !== 'false' && req.body.useAI !== false);
+  const useImageMode = req.body.useImageMode === 'true' || req.body.useImageMode === true;
+  const runVerification = req.body.runVerification !== 'false' && req.body.runVerification !== false;
   const createdBy = req.user.role === 'admin' ? null : req.user.id;
   try {
     const { importPdfToDatabase } = await import('./pdfImport.js');
-    const result = await importPdfToDatabase(req.file.buffer, answerKey, useAI, createdBy);
+    const result = await importPdfToDatabase(req.file.buffer, answerKey, useAI, createdBy, { useImageMode, runVerification });
     res.json({
       success: true,
       imported: result.imported,

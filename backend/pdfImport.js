@@ -46,14 +46,68 @@ export function parseAnswerKey(text) {
 }
 
 /**
- * Send PDF directly to Gemini. One API call, no parsing or batching.
+ * Run verification pass: compare extracted problems with PDF, return corrections.
  */
-async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames) {
+async function runVerificationPass(pdfBuffer, extractedProblems, answerMap, allowedTagNames) {
+  if (!ai || extractedProblems.length === 0) return {};
+  const problemsJson = JSON.stringify(extractedProblems.map(p => ({
+    number: p.number,
+    questionLatex: p.question,
+    answer: p.answer,
+    topics: p.topics
+  })));
+  const pdfBase64 = Buffer.from(pdfBuffer).toString('base64');
+  const verifyPrompt = `You are verifying extracted math problems against a PDF. Compare each extracted problem with the PDF. For any problem where the questionLatex does NOT match the PDF exactly (transcription errors, wrong symbols, paraphrasing, extra/missing text), return the corrected questionLatex.
+
+Extracted problems:
+${problemsJson}
+
+Return JSON: { "corrections": [{ "number": N, "questionLatex": "corrected text matching PDF exactly" }] }
+Only include problems that need correction. If all match, return { "corrections": [] }.
+Use same LaTeX escaping: \\\\sqrt, \\\\frac, etc.`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: createUserContent([
+        { text: verifyPrompt },
+        { inlineData: { mimeType: 'application/pdf', data: pdfBase64 } },
+      ]),
+      config: { temperature: 0, responseMimeType: 'application/json' },
+    });
+    const raw = (response?.text || '').trim();
+    if (!raw) return {};
+    let jsonStr = raw.replace(/^```json?\s*|\s*```$/g, '').trim();
+    const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (objMatch) jsonStr = objMatch[0];
+    let obj;
+    try {
+      obj = JSON.parse(jsonStr);
+    } catch {
+      obj = JSON.parse(jsonrepair(jsonStr));
+    }
+    const corrections = obj?.corrections || [];
+    return Object.fromEntries((corrections || []).map(c => [c.number, c.questionLatex]));
+  } catch (err) {
+    console.warn('Verification pass failed:', err.message);
+    return {};
+  }
+}
+
+/**
+ * Send PDF directly to Gemini. One API call, no parsing or batching.
+ * @param {object} opts - { useImageMode: boolean } when true, extract problem regions as images instead of LaTeX
+ */
+async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames, opts = {}) {
+  const useImageMode = opts.useImageMode === true;
   if (!ai) {
     throw new Error('GEMINI_API_KEY is required for PDF import. Get a free key at https://aistudio.google.com/app/apikey');
   }
   const tagList = allowedTagNames.length > 0 ? allowedTagNames.map(t => `"${t}"`).join(', ') : '"Arithmetic"';
   const answerKeyText = Object.entries(answerMap).map(([n, a]) => `${n}. ${a}`).join('\n');
+
+  const imageModeInstructions = useImageMode ? `
+IMAGE MODE: For each problem, return "problemPage" (1-based page number) and "problemRegion" { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } — the bounding box of the ENTIRE problem (question text + any diagram) on the page. Set "questionLatex" to "Problem N" only. The system will screenshot each region.` : '';
 
   const systemPrompt = `You are a math competition problem processor. You will receive a PDF of a Sprint Round (or similar). Your job is to:
 1. Extract EVERY problem from the Sprint Round section only. Do not include Target, Countdown, or other sections.
@@ -66,7 +120,7 @@ async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames) {
 8. DIAGRAMS: If a problem has a diagram, figure, or picture (geometry, graph, illustration), set "hasDiagram": true. Set "diagramPage" to the 1-based page number where the diagram appears. Optionally set "diagramRegion" with normalized coordinates (0-1) for the diagram area: x=left, y=top, w=width, h=height. If unsure of region, omit diagramRegion and the full page will be used. If no diagram, set "hasDiagram": false and omit diagramPage/diagramRegion.
 
 CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath and amssymb commands (\\\\frac, \\\\sqrt, \\\\neq, \\\\leq, \\\\geq, \\\\sum, \\\\int, etc.). For "not equal" use \\\\ne. For literal $ use \\\\$.
-TRANSCRIPTION: Preserve geometry labels exactly. "triangle GFD" not "triangle AGFD". "segment AB" not "segment AAB". Do not add extra letters to point/vertex names.`;
+TRANSCRIPTION: Preserve geometry labels exactly. "triangle GFD" not "triangle AGFD". "segment AB" not "segment AAB". Do not add extra letters to point/vertex names.${imageModeInstructions}`;
 
   const userPrompt = `Extract all math problems from this PDF. Use this answer key for answers (do not solve):
 
@@ -75,6 +129,7 @@ ${answerKeyText}
 For each problem's "topics" field, use ONLY these exact tag names (copy them character-for-character): ${tagList}. No variations or synonyms allowed.
 
 For each problem that has a diagram/figure/picture, set "hasDiagram": true, "diagramPage": <1-based page number>, and optionally "diagramRegion": { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } for the diagram's bounding box. If no diagram, set "hasDiagram": false.
+${useImageMode ? 'IMAGE MODE: Every problem MUST have "problemPage" (1-based) and "problemRegion" { "x", "y", "w", "h" } — the bounding box of the entire problem (text + diagram) on the page.' : ''}
 
 Return JSON: { "folderName": "...", "problems": [...] }`;
 
@@ -94,7 +149,7 @@ Return JSON: { "folderName": "...", "problems": [...] }`;
       });
       const raw = (response?.text || '').trim();
       if (!raw) throw new Error('Empty response from AI');
-      return parseAIResponse(raw, answerMap, allowedTagNames);
+      return parseAIResponse(raw, answerMap, allowedTagNames, useImageMode);
     } catch (err) {
       lastErr = err;
       const errStr = String(err?.message || err?.toString?.() || err);
@@ -130,7 +185,7 @@ function resolveToAllowedTag(aiTag, allowedTagNames) {
   return variant || allowedTagNames[0] || 'Arithmetic';
 }
 
-function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'Number Theory', 'Counting', 'Geometry', 'Probability', 'Arithmetic']) {
+function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'Number Theory', 'Counting', 'Geometry', 'Probability', 'Arithmetic'], useImageMode = false) {
   let jsonStr = rawContent.replace(/^```json?\s*|\s*```$/g, '').trim();
   const objMatch = jsonStr.match(/\{[\s\S]*\}/);
   if (objMatch) jsonStr = objMatch[0];
@@ -158,20 +213,25 @@ function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'N
     let topics = item.topics;
     if (!Array.isArray(topics)) topics = item.topic ? [item.topic] : [defaultTag];
     let question = (item.questionLatex || item.question || '').trim();
+    if (useImageMode) question = `Problem ${num}`;
     if (!question) continue;
     question = question.replace(/\\neq\b/g, '\\ne');
     question = question.replace(/(\b(?:cost|costs|spent)\s+)\\(\d+)/gi, '$1\\$$2');
     const aiTopic = topics.find((t) => t && String(t).trim()) || defaultTag;
     const tag = resolveToAllowedTag(aiTopic, allowedTagNames);
-    const answerStored = answerVal !== null
-      ? (typeof answerVal === 'number' ? String(answerVal) : answerVal)
-      : '0';
+    const answerStored = answerMap[num] !== undefined && answer.trim()
+      ? answer.trim()
+      : (answerVal !== null ? (typeof answerVal === 'number' ? String(answerVal) : answerVal) : '0');
     const hasDiagram = Boolean(item.hasDiagram && item.diagramPage);
     const diagramPage = hasDiagram ? Math.max(1, parseInt(item.diagramPage, 10) || 1) : null;
     const diagramRegion = hasDiagram && item.diagramRegion && typeof item.diagramRegion === 'object'
       ? item.diagramRegion
       : null;
-    results.push({ number: num, question, answer: answerStored, topics: [tag], source: `Problem ${num}`, hasDiagram, diagramPage, diagramRegion });
+    const problemPage = item.problemPage != null ? Math.max(1, parseInt(item.problemPage, 10) || 1) : null;
+    const problemRegion = problemPage && item.problemRegion && typeof item.problemRegion === 'object'
+      ? item.problemRegion
+      : null;
+    results.push({ number: num, question, answer: answerStored, topics: [tag], source: `Problem ${num}`, hasDiagram, diagramPage, diagramRegion, problemPage, problemRegion });
   }
   return { folderName, results, errors };
 }
@@ -275,8 +335,11 @@ function processProblemNoAI(problem, answerFromKey) {
  * @param {string} answerKeyText
  * @param {boolean} useAI
  * @param {number|null} createdBy - user id for teacher-owned; null for admin/public
+ * @param {object} opts - { useImageMode: boolean, runVerification: boolean }
  */
-export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI = true, createdBy = null) {
+export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI = true, createdBy = null, opts = {}) {
+  const useImageMode = opts.useImageMode === true;
+  const runVerification = opts.runVerification !== false;
   const errors = [];
   const answerMap = parseAnswerKey(answerKeyText);
 
@@ -302,9 +365,20 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
       if (Object.keys(answerMap).length === 0) {
         throw new Error('Answer key is required for AI import. Paste answers (one per line): 1. 42, 2. 3/4, etc.');
       }
-      const { folderName, results: processedList, errors: batchErrors } = await processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames);
+      let { folderName, results: processedList, errors: batchErrors } = await processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames, { useImageMode });
       sourceName = folderName;
       for (const err of batchErrors) errors.push(err.message);
+
+      if (runVerification && !useImageMode && processedList.length > 0) {
+        const corrections = await runVerificationPass(pdfBuffer, processedList, answerMap, allowedTagNames);
+        if (Object.keys(corrections).length > 0) {
+          for (const p of processedList) {
+            if (corrections[p.number]) {
+              p.question = corrections[p.number];
+            }
+          }
+        }
+      }
       let folderRow = await client.query('SELECT id FROM folders WHERE name = $1 AND (created_by IS NOT DISTINCT FROM $2)', [sourceName, createdBy]);
       if (folderRow.rows.length === 0) folderRow = await client.query('INSERT INTO folders (name, created_by) VALUES ($1, $2) RETURNING id', [sourceName, createdBy]);
       folderId = folderRow.rows[0].id;
@@ -312,9 +386,21 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
         const tagName = (processed.topics[0] || defaultTag).trim();
         const validTag = allowedTagNames.includes(tagName) ? tagName : defaultTag;
         let imageUrl = null;
-        if (processed.hasDiagram && processed.diagramPage) {
-          const renderFn = await getRenderPdfPageToPng();
-          if (renderFn) {
+        const renderFn = await getRenderPdfPageToPng();
+        if (renderFn) {
+          if (useImageMode && processed.problemPage) {
+            try {
+              const pngBuffer = await renderFn(pdfBuffer, processed.problemPage, processed.problemRegion, 2, 0.08);
+              const base64 = pngBuffer.toString('base64');
+              const uploadRes = await client.query(
+                'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
+                [base64, `problem-${processed.number}.png`, 'image/png', createdBy]
+              );
+              imageUrl = '/uploads/db/' + uploadRes.rows[0].id;
+            } catch (renderErr) {
+              console.warn('Problem image extraction failed for problem', processed.number, renderErr.message);
+            }
+          } else if (!useImageMode && processed.hasDiagram && processed.diagramPage) {
             try {
               const pngBuffer = await renderFn(pdfBuffer, processed.diagramPage, processed.diagramRegion);
               const base64 = pngBuffer.toString('base64');
