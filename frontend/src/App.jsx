@@ -796,7 +796,7 @@ if (view === 'login') {
 
       {/* Sign up */}
       <div className="signup">
-        New teacher? <button type="button" onClick={() => setView('signup')} className="text-[#0085CA] hover:underline font-medium">Sign up</button>
+        New teacher? <button type="button" onClick={() => setView('signup')} className="text-white font-semibold underline hover:no-underline">Sign up</button>
       </div>
 
       {/* Footer */}
@@ -1101,6 +1101,9 @@ if (view === 'student-dashboard' && user) {
             <h3 className="text-lg font-semibold mb-4 text-gray-800">
               Test History
             </h3>
+            <p className="text-sm text-gray-500 mb-3">
+              Click View Details to see your answers and the solutions link (when your teacher releases them).
+            </p>
 
             {attempts.length === 0 ? (
               <div className="bg-white rounded-xl shadow p-6 text-gray-500 text-center">
@@ -1177,9 +1180,12 @@ if (view === 'student-dashboard' && user) {
               {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                 <div className="space-y-4">
                   {attemptDetails.solutionsLink && (
-                    <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="inline-block text-[#0085CA] hover:underline font-medium mb-2">
-                      View solutions →
-                    </a>
+                    <div className="mb-4 p-3 bg-[#e8f4f9] rounded-lg border border-[#0085CA]/30">
+                      <span className="text-sm font-medium text-gray-700">Solutions: </span>
+                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#0085CA] hover:underline font-medium">
+                        View solutions →
+                      </a>
+                    </div>
                   )}
                   {attemptDetails.problems.map((item, idx) => (
                     <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>
@@ -1202,7 +1208,7 @@ if (view === 'student-dashboard' && user) {
                 </div>
               ) : (
                 <p className="text-sm text-gray-500">
-                  {attemptDetails.showAnswers ? 'No problem details available.' : 'Answers will be visible when your teacher releases them.'}
+                  {attemptDetails.showAnswers ? 'No problem details available.' : 'Answers and the solutions link will appear here when your teacher releases them.'}
                 </p>
               )}
             </div>
@@ -1519,9 +1525,12 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                 {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                   <div className="space-y-4">
                     {attemptDetails.solutionsLink && (
-                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="inline-block text-[#0085CA] hover:underline font-medium mb-2">
-                        View solutions →
-                      </a>
+                      <div className="mb-4 p-3 bg-[#e8f4f9] rounded-lg border border-[#0085CA]/30">
+                        <span className="text-sm font-medium text-gray-700">Solutions: </span>
+                        <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#0085CA] hover:underline font-medium">
+                          View solutions →
+                        </a>
+                      </div>
                     )}
                     {attemptDetails.problems.map((item, idx) => (
                       <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>

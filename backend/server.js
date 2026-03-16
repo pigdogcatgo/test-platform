@@ -626,7 +626,7 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   const answerStored = typeof answer === 'string' && answer.trim() ? answer.trim() : (typeof answerVal === 'number' ? String(answerVal) : answerVal);
   try {
     const { sql, params } = problemReadWhere(req.user);
-    const problemCond = sql.replace(/p\./g, '');
+    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$8' : '$1');
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
     const result = await pool.query(
