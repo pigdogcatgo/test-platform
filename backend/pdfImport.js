@@ -76,7 +76,7 @@ Return JSON: { "regions": [{ "number": N, "y": 0.0-1, "h": 0.0-1 }] }
 Add small margin (0.01-0.02) above/below to avoid cutting off text. If a problem has a diagram, include the full diagram in its region.`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: 'gemini-2.5-pro',
         contents: createUserContent([
           { text: prompt },
           { inlineData: { mimeType: 'image/png', data: pageBase64 } },
@@ -134,7 +134,7 @@ Use same LaTeX escaping: \\\\sqrt, \\\\frac, etc.`;
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-pro',
       contents: createUserContent([
         { text: verifyPrompt },
         { inlineData: { mimeType: 'application/pdf', data: pdfBase64 } },
@@ -205,7 +205,7 @@ Return JSON: { "folderName": "...", "problems": [...] }`;
 
   const pdfBase64 = Buffer.from(pdfBuffer).toString('base64');
 
-  const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash'];
+  const models = ['gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash'];
   let lastErr;
   for (const model of models) {
     try {
