@@ -107,7 +107,10 @@ async function processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames, opt
   const answerKeyText = Object.entries(answerMap).map(([n, a]) => `${n}. ${a}`).join('\n');
 
   const imageModeInstructions = useImageMode ? `
-IMAGE MODE: For each problem, return "problemPage" (1-based page number) and "problemRegion" { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } — the bounding box of the ENTIRE problem (question text + any diagram) on the page. Set "questionLatex" to "Problem N" only. The system will screenshot each region.` : '';
+IMAGE MODE: For each problem, return "problemPage" (1-based page number) and "problemRegion" { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } — the bounding box on the page.
+CRITICAL: problemRegion must contain ONLY the intended problem — no adjacent problems. Make the box as tight as possible around this single problem. Large margins often cause other problems to appear in the screenshot; avoid that.
+EXCEPTION: If the problem has a diagram (hasDiagram: true), the diagram MUST be fully included. If the diagram cannot fit within a region that excludes other problems, include the full diagram anyway — the diagram takes priority. When a problem has a diagram, problemRegion must encompass both the question text AND the complete diagram.
+Set "questionLatex" to "Problem N" only. The system will screenshot each region.` : '';
 
   const systemPrompt = `You are a math competition problem processor. You will receive a PDF of a Sprint Round (or similar). Your job is to:
 1. Extract EVERY problem from the Sprint Round section only. Do not include Target, Countdown, or other sections.
@@ -129,7 +132,7 @@ ${answerKeyText}
 For each problem's "topics" field, use ONLY these exact tag names (copy them character-for-character): ${tagList}. No variations or synonyms allowed.
 
 For each problem that has a diagram/figure/picture, set "hasDiagram": true, "diagramPage": <1-based page number>, and optionally "diagramRegion": { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } for the diagram's bounding box. If no diagram, set "hasDiagram": false.
-${useImageMode ? 'IMAGE MODE: Every problem MUST have "problemPage" (1-based) and "problemRegion" { "x", "y", "w", "h" } — the bounding box of the entire problem (text + diagram) on the page.' : ''}
+${useImageMode ? 'IMAGE MODE: Every problem MUST have "problemPage" (1-based) and "problemRegion" { "x", "y", "w", "h" }. The region must contain ONLY this problem — no other problems. Keep the box tight. If the problem has a diagram, the diagram MUST be fully included (even if that means including more of the page).' : ''}
 
 Return JSON: { "folderName": "...", "problems": [...] }`;
 
@@ -323,9 +326,10 @@ async function ensureTags(client, createdBy) {
 
 function processProblemNoAI(problem, answerFromKey) {
   if (answerFromKey === undefined) throw new Error(`Answer key required for problem ${problem.number} (no-AI mode)`);
-  const answerVal = parseAndValidateAnswer(String(answerFromKey));
+  const raw = String(answerFromKey).trim();
+  const answerVal = parseAndValidateAnswer(raw);
   if (answerVal === null) throw new Error(`Invalid answer for problem ${problem.number}: "${answerFromKey}"`);
-  const answerStored = typeof answerVal === 'number' ? String(answerVal) : answerVal;
+  const answerStored = raw;
   return { question: problem.raw, answer: answerStored, topic: 'Arithmetic', source: `Problem ${problem.number}` };
 }
 
@@ -390,7 +394,8 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
         if (renderFn) {
           if (useImageMode && processed.problemPage) {
             try {
-              const pngBuffer = await renderFn(pdfBuffer, processed.problemPage, processed.problemRegion, 2, 0.08);
+              const cropPad = processed.hasDiagram ? 0.08 : 0.04;
+              const pngBuffer = await renderFn(pdfBuffer, processed.problemPage, processed.problemRegion, 2, cropPad);
               const base64 = pngBuffer.toString('base64');
               const uploadRes = await client.query(
                 'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
