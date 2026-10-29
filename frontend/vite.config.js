@@ -1,3 +1,4 @@
+import process from 'node:process'
 import { loadEnv } from 'vite'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -16,6 +17,16 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/api': { target: apiTarget, changeOrigin: true },
         '/uploads': { target: apiTarget, changeOrigin: true },
+      },
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('/node_modules/katex/')) return 'math-rendering'
+            if (id.includes('/node_modules/react/') || id.includes('/node_modules/react-dom/')) return 'react-vendor'
+          },
+        },
       },
     },
   }

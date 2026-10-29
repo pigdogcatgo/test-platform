@@ -245,6 +245,18 @@ export async function initDatabase() {
         UNIQUE(test_id, student_id)
       )
     `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS test_sessions (
+        test_id INTEGER NOT NULL REFERENCES tests(id) ON DELETE CASCADE,
+        student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        started_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        submitted_at TIMESTAMPTZ,
+        PRIMARY KEY (test_id, student_id),
+        CHECK (expires_at > started_at)
+      )
+    `);
     
     // ELO history table
     await client.query(`

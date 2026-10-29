@@ -1188,8 +1188,13 @@ app.get('/api/tests', authenticateToken, async (req, res) => {
         return res.json([]);
       }
       const result = await pool.query(
-        'SELECT * FROM tests WHERE created_by = $1 ORDER BY created_at DESC',
-        [teacherId]
+        `SELECT t.*,
+                (ts.expires_at IS NOT NULL AND ts.expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP) AS session_expired
+         FROM tests t
+         LEFT JOIN test_sessions ts ON ts.test_id = t.id AND ts.student_id = $2
+         WHERE t.created_by = $1
+         ORDER BY t.created_at DESC`,
+        [teacherId, req.user.id]
       );
       return res.json(result.rows);
     }
@@ -1238,6 +1243,11 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
     if (!Array.isArray(problemIds) || problemIds.length === 0 || problemIds.length > 200) {
       return res.status(400).json({ error: 'problemIds must contain between 1 and 200 problem ids' });
     }
+    const type = testType === 'target' ? 'target' : 'sprint';
+    const expectedProblemCount = type === 'target' ? 8 : 30;
+    if (problemIds.length !== expectedProblemCount) {
+      return res.status(400).json({ error: `${type === 'target' ? 'Target' : 'Sprint'} tests require exactly ${expectedProblemCount} problems` });
+    }
     if (!problemIds.every((id) => Number.isSafeInteger(id) && id > 0 && id <= 2147483647) || new Set(problemIds).size !== problemIds.length) {
       return res.status(400).json({ error: 'problemIds must be unique positive integer ids' });
     }
@@ -1248,7 +1258,6 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
     if (accessible.rowCount !== problemIds.length) {
       return res.status(400).json({ error: 'Every problem must be public or owned by you' });
     }
-    const type = testType === 'target' ? 'target' : 'sprint';
     const result = await pool.query(
       'INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
       [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type]
@@ -1385,6 +1394,18 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
       if (teacherId == null || teacherId !== test.created_by) {
         return res.status(403).json({ error: 'Access denied' });
       }
+      const sessionResult = await pool.query(
+        `SELECT submitted_at,
+                expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP AS expired
+         FROM test_sessions WHERE test_id = $1 AND student_id = $2`,
+        [testId, req.user.id]
+      );
+      const session = sessionResult.rows[0];
+      if (!session) return res.status(409).json({ error: 'Start this test before loading its questions' });
+      if (session.submitted_at) return res.status(400).json({ error: 'Test already submitted' });
+      if (session.expired) {
+        return res.status(410).json({ error: 'The test time limit has passed' });
+      }
     } else if (req.user.role === 'teacher' && test.created_by !== req.user.id) {
       return res.status(403).json({ error: 'Access denied' });
     } else if (req.user.role !== 'teacher' && req.user.role !== 'admin') {
@@ -1448,6 +1469,72 @@ app.get('/api/tests/:id/attempts', authenticateToken, async (req, res) => {
   }
 });
 
+// Start or resume a server-timed test session for this student.
+app.post('/api/tests/:id/start', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'student') {
+    return res.status(403).json({ error: 'Student access required' });
+  }
+  const testId = Number(req.params.id);
+  if (!Number.isSafeInteger(testId) || testId < 1) {
+    return res.status(400).json({ error: 'Invalid test id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const testResult = await client.query(
+      'SELECT id, created_by, time_limit FROM tests WHERE id = $1 FOR SHARE',
+      [testId]
+    );
+    const test = testResult.rows[0];
+    if (!test) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Test not found' });
+    }
+    const studentResult = await client.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
+    if (studentResult.rows[0]?.teacher_id !== test.created_by) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You can only take tests assigned by your teacher' });
+    }
+    const attemptResult = await client.query(
+      'SELECT id FROM test_attempts WHERE test_id = $1 AND student_id = $2',
+      [testId, req.user.id]
+    );
+    if (attemptResult.rowCount > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Test already submitted' });
+    }
+
+    await client.query(
+      `INSERT INTO test_sessions (test_id, student_id, started_at, expires_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + ($3 * INTERVAL '1 minute'))
+       ON CONFLICT (test_id, student_id) DO NOTHING`,
+      [testId, req.user.id, test.time_limit]
+    );
+    const sessionResult = await client.query(
+      `SELECT
+              FLOOR(EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) * 1000)::bigint AS remaining_ms
+       FROM test_sessions WHERE test_id = $1 AND student_id = $2`,
+      [testId, req.user.id]
+    );
+    const session = sessionResult.rows[0];
+    const remainingMs = Number(session.remaining_ms);
+    await client.query('COMMIT');
+    if (remainingMs < -30_000) {
+      return res.status(410).json({ error: 'The time limit for this test has passed. Your teacher can assign it again if needed.' });
+    }
+    res.json({
+      remainingMs: Math.max(0, remainingMs)
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Start test error:', error);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
 // Submit test
 app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
   if (req.user.role !== 'student') {
@@ -1484,6 +1571,26 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     if (studentRow.rows[0]?.teacher_id !== test.created_by) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'You can only submit tests assigned by your teacher' });
+    }
+
+    const sessionResult = await client.query(
+      `SELECT submitted_at,
+              expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP AS expired
+       FROM test_sessions WHERE test_id = $1 AND student_id = $2 FOR UPDATE`,
+      [testId, req.user.id]
+    );
+    const testSession = sessionResult.rows[0];
+    if (!testSession) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Start this test before submitting answers' });
+    }
+    if (testSession.submitted_at) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Test already submitted' });
+    }
+    if (testSession.expired) {
+      await client.query('ROLLBACK');
+      return res.status(410).json({ error: 'The test time limit has passed. Your answers could not be submitted.' });
     }
     
     const problemsResult = await client.query(
@@ -1597,6 +1704,11 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
        RETURNING *`,
       [testId, req.user.id, JSON.stringify(answers), JSON.stringify(results), score, problems.length, currentUserElo, newUserElo]
+    );
+
+    await client.query(
+      'UPDATE test_sessions SET submitted_at = CURRENT_TIMESTAMP WHERE test_id = $1 AND student_id = $2',
+      [testId, req.user.id]
     );
     
     await client.query('COMMIT');

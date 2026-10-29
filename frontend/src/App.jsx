@@ -1,116 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import axios from 'axios';
 import { API_URL } from './config';
+import ProblemImage from './components/ProblemImage';
+import StudentTestPage from './components/StudentTestPage';
+import { AuthLayout, PasswordField } from './components/AuthLayout';
+import AccessibleDialog from './components/AccessibleDialog';
+import ConfirmationDialog from './components/ConfirmationDialog';
+import LatexRenderer from './components/LatexRenderer';
 import './index.css';
-import 'katex/dist/katex.min.css';
-import katex from 'katex';
-
-// Remember URLs that failed so we never re-request (avoids remount/Strict Mode retries and ERR_BLOCKED loops)
-const failedImageUrls = new Set();
-
-function ProblemImage({ url, token }) {
-  const [error, setError] = useState(false);
-  const [errorStatus, setErrorStatus] = useState(null); // 401, 404, etc.
-  const [blobUrl, setBlobUrl] = useState(null);
-  const requestKey = url + (token ? '|auth' : '');
-
-  // For /uploads/xxx we load via authenticated API and show as blob URL
-  useEffect(() => {
-    if (!url || error || failedImageUrls.has(requestKey)) return;
-    const isUpload = url.startsWith('/uploads/');
-    const pathPart = isUpload ? url.replace(/^\/uploads\/?/, '') : null;
-    if (!isUpload || !pathPart || !token) {
-      setBlobUrl(undefined);
-      return;
-    }
-    // Keep path for /api/uploads/db/123 (DB) or /api/uploads/filename.png (disk)
-    const apiUrl = API_URL + url.replace(/^\/uploads/, '/api/uploads');
-    let revoked = false;
-    fetch(apiUrl, { headers: { Authorization: 'Bearer ' + token } })
-      .then((res) => {
-        if (revoked) return null;
-        if (!res.ok) {
-          setErrorStatus(res.status);
-          throw new Error(res.status);
-        }
-        return res.blob();
-      })
-      .then((blob) => {
-        if (revoked || !blob) return;
-        setBlobUrl(URL.createObjectURL(blob));
-      })
-      .catch((err) => {
-        if (!revoked) {
-          failedImageUrls.add(requestKey);
-          setError(true);
-          if (err instanceof Error && err.message && /^\d+$/.test(err.message)) setErrorStatus(Number(err.message));
-        }
-      });
-    return () => {
-      revoked = true;
-    };
-  }, [url, token, requestKey, error]);
-
-  // Revoke blob URL when it changes or on unmount
-  const blobUrlRef = useRef(null);
-  useEffect(() => {
-    const prev = blobUrlRef.current;
-    blobUrlRef.current = blobUrl;
-    if (prev) URL.revokeObjectURL(prev);
-    return () => {
-      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
-      blobUrlRef.current = null;
-    };
-  }, [blobUrl]);
-
-  const directSrc = url.startsWith('http') ? url : API_URL + (url.startsWith('/') ? url : '/' + url);
-  const src = blobUrl != null ? blobUrl : (token && url.startsWith('/uploads/') ? undefined : directSrc);
-  const alreadyFailed = failedImageUrls.has(requestKey) || failedImageUrls.has(directSrc);
-
-  // /uploads/ but no token: don't hit direct URL (would 401)
-  if (url.startsWith('/uploads/') && !token) {
-    return (
-      <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-500">
-        Image unavailable
-      </div>
-    );
-  }
-
-  if (error || alreadyFailed) {
-    if (!alreadyFailed) failedImageUrls.add(requestKey);
-    const statusHint = errorStatus ? ` (${errorStatus})` : '';
-    const extraHint = errorStatus === 404 ? ' — file may be missing on server (try re-uploading).' : '';
-    return (
-      <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-500">
-        Image unavailable{statusHint}{extraHint}
-      </div>
-    );
-  }
-
-  // Still loading via fetch (authenticated)
-  if (token && url.startsWith('/uploads/') && blobUrl == null && !error) {
-    return (
-      <div className="mt-3 py-4 rounded-lg border border-gray-200 bg-gray-50 text-center text-sm text-gray-400">
-        Loading image…
-      </div>
-    );
-  }
-
-  if (!src) return null;
-
-  return (
-    <img
-      src={src}
-      alt="Problem"
-      className="mt-3 max-w-full max-h-64 rounded-lg border object-contain bg-gray-50"
-      onError={() => {
-        failedImageUrls.add(requestKey);
-        failedImageUrls.add(directSrc);
-        setError(true);
-      }}
-    />
-  );
-}
 
 const App = () => {
   const [token, setToken] = useState(() => localStorage.getItem('token'));
@@ -122,6 +19,8 @@ const App = () => {
   const [signupForm, setSignupForm] = useState({ username: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [showSignupPassword, setShowSignupPassword] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   
   const [problems, setProblems] = useState([]);
   const [folders, setFolders] = useState([]);
@@ -134,6 +33,8 @@ const App = () => {
   const [testProblems, setTestProblems] = useState([]);
   const [testAnswers, setTestAnswers] = useState({});
   const [timeRemaining, setTimeRemaining] = useState(null);
+  const [testDeadlineAt, setTestDeadlineAt] = useState(null);
+  const [startingTestId, setStartingTestId] = useState(null);
   const testSubmitRef = useRef({ activeTest: null, testAnswers: {}, testProblems: [] });
   const handleSubmitTestRef = useRef(() => {});
   
@@ -142,7 +43,6 @@ const App = () => {
   const [newFolderName, setNewFolderName] = useState('');
   const [editingFolderId, setEditingFolderId] = useState(null);
   const [editingFolderName, setEditingFolderName] = useState('');
-  const [newTagName, setNewTagName] = useState('');
   const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names (create-test)
   const [adminExpandedFolders, setAdminExpandedFolders] = useState(() => new Set()); // folder IDs expanded in admin (empty = all collapsed)
   const [pdfImportFile, setPdfImportFile] = useState(null);
@@ -154,16 +54,23 @@ const App = () => {
   const [pdfImportRunVerification, setPdfImportRunVerification] = useState(true);
   const [pdfImportReview, setPdfImportReview] = useState(null);
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
+  const [createTestError, setCreateTestError] = useState('');
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
   const [analyticsSolutionsLink, setAnalyticsSolutionsLink] = useState('');
   const [analyticsAnswersReleased, setAnalyticsAnswersReleased] = useState(false);
   const [selectedProblemIds, setSelectedProblemIds] = useState([]);
+  const [problemSearch, setProblemSearch] = useState('');
   const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [leaderboardSortBy, setLeaderboardSortBy] = useState('cumulative'); // 'cumulative' | 'elo'
   const [attemptDetails, setAttemptDetails] = useState(null);
+  const [submittingTest, setSubmittingTest] = useState(false);
+  const [submissionError, setSubmissionError] = useState('');
+  const [submissionNotice, setSubmissionNotice] = useState('');
+  const [testExpirationNotice, setTestExpirationNotice] = useState('');
+  const submissionInProgressRef = useRef(false);
 
   const clearDashboardData = useCallback(() => {
     setProblems([]);
@@ -174,6 +81,7 @@ const App = () => {
     setStudents([]);
     setSelectedStudentId(null);
     setSelectedStudent(null);
+    setProblemSearch('');
     setSelectedTestAnalytics(null);
     setAttemptDetails(null);
   }, []);
@@ -186,15 +94,25 @@ const App = () => {
     });
   }, [token]);
 
-  const handleLogout = useCallback(() => {
+  const handleLogout = useCallback((message) => {
     localStorage.removeItem('token');
     setToken(null);
     setUser(null);
+    setLoginForm({ username: '', password: '' });
+    setSignupForm({ username: '', password: '' });
+    setShowPassword(false);
+    setShowSignupPassword(false);
+    setAuthBusy(false);
+    setAuthError(typeof message === 'string' ? message : '');
+    setSubmissionError('');
     clearDashboardData();
     setSessionError(null);
     setDashboardLoadError(null);
     setView('login');
     setActiveTest(null);
+    setTestDeadlineAt(null);
+    setTestExpirationNotice('');
+    setStartingTestId(null);
     for (const key of Object.keys(sessionStorage)) {
       if (key === 'testInProgress' || key.startsWith('testAnswers_')) {
         sessionStorage.removeItem(key);
@@ -286,8 +204,26 @@ const App = () => {
     }
   }, [api, handleLogout, token]);
 
+  const handleExpiredTest = useCallback((testId) => {
+    sessionStorage.removeItem('testInProgress');
+    sessionStorage.removeItem('testAnswers_' + testId);
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+    setActiveTest(null);
+    setTestProblems([]);
+    setTestAnswers({});
+    setTimeRemaining(null);
+    setTestDeadlineAt(null);
+    setSubmissionError('');
+    setTestExpirationNotice('The time limit for this test has passed, so it was closed without recording an attempt. Ask your teacher to assign a new test if you need another try.');
+    setView('student-dashboard');
+    loadUserData({ preserveView: true }).catch(() => {});
+  }, [loadUserData]);
+
   const handleSubmitTest = useCallback(async () => {
-    if (!activeTest) return;
+    if (!activeTest || submissionInProgressRef.current) return;
+    submissionInProgressRef.current = true;
+    setSubmittingTest(true);
+    setSubmissionError('');
     const payload = {};
     for (const p of testProblems) {
       payload[p.id] = (testAnswers[p.id] ?? '').trim();
@@ -302,35 +238,36 @@ const App = () => {
       setTestProblems([]);
       setTestAnswers({});
       setTimeRemaining(null);
+      setTestDeadlineAt(null);
       setView('student-dashboard');
       loadUserData().catch(() => {});
-      alert(`Test submitted! Score: ${data.attempt.score}/${data.attempt.total}\nELO Change: ${data.eloChange >= 0 ? '+' : ''}${data.eloChange}`);
+      setSubmissionNotice(`Test submitted. Score: ${data.attempt.score}/${data.attempt.total}. ELO change: ${data.eloChange >= 0 ? '+' : ''}${data.eloChange}.`);
     } catch (error) {
-      alert(error.response?.data?.error || 'Error submitting test');
+      if (error.response?.status === 401) {
+        handleLogout('Your session expired before the test was submitted. Sign in again; this attempt was not recorded.');
+        return;
+      }
+      if (error.response?.status === 410) {
+        handleExpiredTest(activeTest.id);
+        return;
+      }
+      setSubmissionError(error.response?.data?.error || 'Could not submit your answers. Check your connection and try again.');
+    } finally {
+      submissionInProgressRef.current = false;
+      setSubmittingTest(false);
     }
-  }, [activeTest, testAnswers, testProblems, api, loadUserData]);
+  }, [activeTest, testAnswers, testProblems, api, loadUserData, handleLogout, handleExpiredTest]);
 
   handleSubmitTestRef.current = handleSubmitTest;
 
-  // Timer: use persisted start time so reopening tab doesn't reset it
+  // The server provides remaining time; performance.now keeps the countdown immune to wall-clock changes.
   useEffect(() => {
-    if (!activeTest || timeRemaining === null) return;
+    if (!activeTest || timeRemaining === null || testDeadlineAt === null) return;
     if (timeRemaining <= 0) {
       handleSubmitTest();
       return;
     }
-    const raw = sessionStorage.getItem('testInProgress');
-    const computeRemaining = () => {
-      if (raw) {
-        try {
-          const { startTime, durationMin, testId } = JSON.parse(raw);
-          if (testId === activeTest.id) {
-            return Math.max(0, Math.ceil((startTime + durationMin * 60 * 1000 - Date.now()) / 1000));
-          }
-        } catch (_) {}
-      }
-      return Math.max(0, timeRemaining - 1);
-    };
+    const computeRemaining = () => Math.max(0, Math.ceil((testDeadlineAt - performance.now()) / 1000));
     const next = computeRemaining();
     if (next <= 0) {
       handleSubmitTest();
@@ -338,7 +275,7 @@ const App = () => {
     }
     const timer = setTimeout(() => setTimeRemaining(computeRemaining()), 1000);
     return () => clearTimeout(timer);
-  }, [timeRemaining, activeTest, handleSubmitTest]);
+  }, [timeRemaining, activeTest, testDeadlineAt, handleSubmitTest]);
 
   // Persist test answers so they survive refresh/reopen
   useEffect(() => {
@@ -359,28 +296,38 @@ const App = () => {
     } catch {
       return;
     }
-    const { testId, startTime, durationMin, testName, problemIds } = data;
-    if (Date.now() > startTime + durationMin * 60 * 1000) {
-      sessionStorage.removeItem('testInProgress');
-      sessionStorage.removeItem('testAnswers_' + testId);
-      return;
-    }
+    const { testId, problemIds = [] } = data;
     const test = tests.find(t => t.id === testId);
     if (!test) return;
+    const requestToken = token;
+    let cancelled = false;
     (async () => {
       try {
+        const { data: session } = await api.post(`/api/tests/${testId}/start`);
+        if (cancelled || !requestToken || localStorage.getItem('token') !== requestToken) return;
         const { data: probs } = await api.get(`/api/tests/${testId}/problems`);
+        if (cancelled || !requestToken || localStorage.getItem('token') !== requestToken) return;
         const ordered = problemIds.map(id => probs.find(p => p.id === id)).filter(Boolean);
         const savedAnswers = sessionStorage.getItem('testAnswers_' + testId);
         const answers = savedAnswers ? JSON.parse(savedAnswers) : {};
         setActiveTest(test);
         setTestProblems(ordered.length ? ordered : probs);
         setTestAnswers(answers);
-        setTimeRemaining(Math.max(0, Math.ceil((startTime + durationMin * 60 * 1000 - Date.now()) / 1000)));
+        const remainingMs = Math.max(0, Number(session.remainingMs) || 0);
+        setTestDeadlineAt(performance.now() + remainingMs);
+        setTimeRemaining(Math.ceil(remainingMs / 1000));
         setView('taking-test');
-      } catch (_) {}
+      } catch (error) {
+        if (cancelled) return;
+        if (error.response?.status === 401) handleLogout('Your session expired. Sign in again to continue.');
+        else if (error.response?.status === 410) {
+          handleExpiredTest(testId);
+        }
+        else console.error('Could not restore the active test:', error);
+      }
     })();
-  }, [user?.role, tests, api, view, activeTest]);
+    return () => { cancelled = true; };
+  }, [user?.role, tests, api, view, activeTest, token, handleLogout, loadUserData, handleExpiredTest]);
 
   // Keep ref updated so beforeunload can submit with latest answers
   useEffect(() => {
@@ -461,9 +408,13 @@ const App = () => {
 
   const handleLogin = async (e) => {
     e.preventDefault();
+    setAuthError('');
+    setAuthBusy(true);
     try {
       const { data } = await axios.post(`${API_URL}/api/login`, loginForm);
       clearDashboardData();
+      setLoginForm({ username: '', password: '' });
+      setShowPassword(false);
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setUser(data.user);
@@ -472,18 +423,29 @@ const App = () => {
       setView('loading');
     } catch (error) {
       const msg = error.response?.data?.error || (error.response?.status === 401 ? 'Invalid credentials' : (error.message || 'Login failed'));
-      alert(msg);
+      setAuthError(msg);
+    } finally {
+      setAuthBusy(false);
     }
   };
 
   const handleSignup = async (e) => {
     e.preventDefault();
+    setAuthError('');
+    setAuthBusy(true);
     if (!signupForm.username.trim() || !signupForm.password) {
-      alert('Please enter username and password');
+      setAuthError('Enter a username and password to continue.');
+      setAuthBusy(false);
       return;
     }
-    if (signupForm.password.length < 6) {
-      alert('Password must be at least 6 characters');
+    if (Array.from(signupForm.password).length < 12) {
+      setAuthError('Choose a password with at least 12 characters.');
+      setAuthBusy(false);
+      return;
+    }
+    if (new TextEncoder().encode(signupForm.password).length > 72) {
+      setAuthError('That password is too long. Use no more than 72 UTF-8 bytes.');
+      setAuthBusy(false);
       return;
     }
     try {
@@ -496,78 +458,44 @@ const App = () => {
       setDashboardLoadError(null);
       setView('loading');
       setSignupForm({ username: '', password: '' });
+      setLoginForm({ username: '', password: '' });
+      setShowPassword(false);
     } catch (error) {
-      alert(error.response?.data?.error || 'Signup failed');
+      setAuthError(error.response?.data?.error || 'Signup failed. Please try again.');
+    } finally {
+      setAuthBusy(false);
     }
-  };
-
-  const katexOptions = {
-    displayMode: false,
-    throwOnError: false,
-    macros: {
-      '\\usepackage': '',
-    },
-    strict: false,
-  };
-
-  const RenderLatex = ({ text }) => {
-    if (!text) return null;
-    const fixLatex = (math) => (math || '').replace(/\\neq\b/g, '\\ne');
-    const renderMath = (math, display, key) => {
-      try {
-        const fixed = fixLatex(math);
-        const html = katex.renderToString(fixed, { ...katexOptions, displayMode: display });
-        return <span key={key} dangerouslySetInnerHTML={{ __html: html }} />;
-      } catch {
-        return <span className="text-red-600">[{math}]</span>;
-      }
-    };
-    const parts = [];
-    let lastIndex = 0;
-    const regex = /\$\$(.+?)\$\$|\$(.+?)\$/g;
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      if (match.index > lastIndex) {
-        parts.push(text.substring(lastIndex, match.index));
-      }
-      if (match[1]) {
-        parts.push(renderMath(match[1], true, match.index));
-      } else if (match[2]) {
-        parts.push(renderMath(match[2], false, match.index));
-      }
-      lastIndex = regex.lastIndex;
-    }
-    if (lastIndex < text.length) {
-      parts.push(text.substring(lastIndex));
-    }
-    return <>{parts}</>;
   };
 
   const startTest = async (test) => {
+    if (startingTestId !== null) return;
     const hasAttempt = attempts.find(a => a.test_id === test.id);
     if (hasAttempt) {
       alert('You have already completed this test');
       return;
     }
 
+    setStartingTestId(test.id);
+    const requestToken = token;
     try {
+      const { data: session } = await api.post(`/api/tests/${test.id}/start`);
+      if (!requestToken || localStorage.getItem('token') !== requestToken) return;
       const { data: testProbs } = await api.get(`/api/tests/${test.id}/problems`);
+      if (!requestToken || localStorage.getItem('token') !== requestToken) return;
       const folderIds = [...new Set(testProbs.map(p => p.folder_id ?? 'uncategorized'))];
       const allSameFolder = folderIds.length <= 1;
       const ordered = allSameFolder ? testProbs : [...testProbs].sort(() => Math.random() - 0.5);
-      const startTime = Date.now();
       sessionStorage.setItem('testInProgress', JSON.stringify({
         testId: test.id,
-        startTime,
-        durationMin: test.time_limit,
-        testName: test.name,
         problemIds: ordered.map(p => p.id)
       }));
       sessionStorage.removeItem('testAnswers_' + test.id);
       
       setActiveTest(test);
       setTestProblems(ordered);
-      setTimeRemaining(test.time_limit * 60);
+      const remainingMs = Math.max(0, Number(session.remainingMs) || 0);
+      setTestDeadlineAt(performance.now() + remainingMs);
+      setTimeRemaining(Math.ceil(remainingMs / 1000));
       setTestAnswers({});
       setView('taking-test');
       try {
@@ -576,16 +504,33 @@ const App = () => {
         // Fullscreen optional; user may deny
       }
     } catch (error) {
-      alert('Error loading test');
+      if (localStorage.getItem('token') !== requestToken) return;
+      if (error.response?.status === 401) {
+        handleLogout('Your session expired. Sign in again to continue.');
+        return;
+      }
+      if (error.response?.status === 410) {
+        handleExpiredTest(test.id);
+        return;
+      }
+      alert(error.response?.data?.error || 'Could not load this test. Please try again.');
+    } finally {
+      setStartingTestId(null);
     }
   };
 
   const createTest = async () => {
-    if (!newTest.name || newTest.problemIds.length === 0 || !newTest.dueDate) {
-      alert('Please fill in all fields');
+    const expectedProblemCount = newTest.testType === 'target' ? 8 : 30;
+    if (!newTest.name.trim() || !newTest.dueDate) {
+      setCreateTestError('Add a test name and due date to continue.');
+      return;
+    }
+    if (newTest.problemIds.length !== expectedProblemCount) {
+      setCreateTestError(`${newTest.testType === 'target' ? 'Target' : 'Sprint'} tests need exactly ${expectedProblemCount} problems. Select ${expectedProblemCount - newTest.problemIds.length} more.`);
       return;
     }
 
+    setCreateTestError('');
     try {
       await api.post('/api/tests', {
         name: newTest.name,
@@ -596,9 +541,9 @@ const App = () => {
       });
       setNewTest({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
       loadUserData();
-      alert('Test created successfully!');
+      setView('teacher-dashboard');
     } catch (error) {
-      alert('Error creating test');
+      setCreateTestError(error.response?.data?.error || 'Could not create the test. Please try again.');
     }
   };
 
@@ -673,7 +618,14 @@ const App = () => {
 
   const bulkDeleteProblems = async () => {
     if (selectedProblemIds.length === 0) return;
-    if (!confirm(`Delete ${selectedProblemIds.length} selected problem(s)?`)) return;
+    const search = problemSearch.trim().toLocaleLowerCase();
+    const visibleIds = new Set(problems.filter(problem => {
+      const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.topic || ''} ${problem.folder_name || ''}`.toLocaleLowerCase();
+      return !search || searchable.includes(search);
+    }).map(problem => problem.id));
+    const hiddenCount = selectedProblemIds.filter(id => !visibleIds.has(id)).length;
+    const hiddenMessage = hiddenCount ? ` ${hiddenCount} selected problem${hiddenCount === 1 ? ' is' : 's are'} hidden by the current search and will also be deleted.` : '';
+    if (!confirm(`Delete all ${selectedProblemIds.length} selected problem(s)?${hiddenMessage}`)) return;
     try {
       await api.delete('/api/problems/bulk', { data: { ids: selectedProblemIds } });
       setSelectedProblemIds([]);
@@ -715,28 +667,6 @@ const App = () => {
       loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error updating folder');
-    }
-  };
-
-  const deleteTag = async (id) => {
-    if (!confirm('Delete this tag? It will be removed from all problems.')) return;
-    try {
-      await api.delete(`/api/tags/${id}`);
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error deleting tag');
-    }
-  };
-
-  const createTag = async (name) => {
-    const n = (name ?? newTagName).trim();
-    if (!n) return;
-    try {
-      await api.post('/api/tags', { name: n });
-      setNewTagName('');
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error creating tag');
     }
   };
 
@@ -822,7 +752,7 @@ const App = () => {
         setAnalyticsAnswersReleased(t.answers_released ?? false);
       }
     } catch (error) {
-      alert('Error loading analytics');
+      alert(error.response?.data?.error || 'Could not load analytics. Please try again.');
     }
   };
 
@@ -843,12 +773,6 @@ const App = () => {
     }
   };
 
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
 if (view === 'session-error') {
   return (
     <div className="min-h-screen bg-[#f5f7f8] flex items-center justify-center p-6">
@@ -856,7 +780,7 @@ if (view === 'session-error') {
         <h1 className="mb-2 text-xl font-semibold text-gray-800">Session check unavailable</h1>
         <p className="mb-5 text-sm text-gray-600">{sessionError}</p>
         <div className="flex justify-center gap-3">
-          <button type="button" onClick={() => loadUserData()} className="rounded-lg bg-[#0085CA] px-4 py-2 text-sm font-medium text-white">Retry</button>
+          <button type="button" onClick={() => loadUserData()} className="rounded-lg bg-[#006da6] px-4 py-2 text-sm font-medium text-white">Retry</button>
           <button type="button" onClick={handleLogout} className="rounded-lg border px-4 py-2 text-sm text-gray-700">Log out</button>
         </div>
       </div>
@@ -866,252 +790,64 @@ if (view === 'session-error') {
 
 if (view === 'login') {
   return (
-    <div className="login-page">
-      {/* Logo */}
-      <div className="logo">
-        <span className="logo-text">DDMTP</span>
-        <div className="logo-icon">
-          <span />
-          <span />
-          <span />
-          <span />
-        </div>
-      </div>
-
-      {/* Login Card */}
-      <div className="login-card">
-        <h1>Login</h1>
-        <p className="subtitle">Log in to take your test!</p>
-
-        <form onSubmit={handleLogin}>
-          <input
-            type="text"
-            placeholder="Username*"
-            value={loginForm.username}
-            onChange={(e) =>
-              setLoginForm({ ...loginForm, username: e.target.value })
-            }
-            required
-          />
-
-          <div className="password-wrapper">
-            <input
-              type={showPassword ? 'text' : 'password'}
-              placeholder="Password*"
-              value={loginForm.password}
-              onChange={(e) =>
-                setLoginForm({ ...loginForm, password: e.target.value })
-              }
-              required
-            />
-            <button
-              type="button"
-              className="toggle-password"
-              onClick={() => setShowPassword(!showPassword)}
-              aria-label="Toggle password visibility"
-            >
-              👁
-            </button>
+    <AuthLayout>
+      <div className="auth-card">
+        <p className="auth-kicker">Welcome back</p>
+        <h1>Sign in to your team</h1>
+        <p className="auth-subtitle">Continue to your MATHCOUNTS practice space.</p>
+        {authError && <div className="auth-alert" role="alert">{authError}</div>}
+        <form onSubmit={handleLogin} className="auth-form">
+          <div className="auth-field">
+            <label htmlFor="login-username">Username</label>
+            <input id="login-username" name="username" type="text" autoComplete="username" value={loginForm.username} onChange={e => setLoginForm({ ...loginForm, username: e.target.value })} required />
           </div>
-
-
-          <button type="submit" className="login-btn">
-            Log in
-          </button>
+          <PasswordField id="login-password" value={loginForm.password} onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} autoComplete="current-password" visible={showPassword} onToggle={() => setShowPassword(value => !value)} />
+          <button type="submit" className="auth-primary-button" disabled={authBusy}>{authBusy ? 'Signing in…' : 'Sign in'}</button>
         </form>
+        <p className="auth-switch">New teacher? <button type="button" onClick={() => { setAuthError(''); setView('signup'); }}>Create an account</button></p>
       </div>
-
-      {/* Sign up */}
-      <div className="signup">
-        New teacher? <button type="button" onClick={() => setView('signup')} className="text-white font-semibold underline hover:no-underline">Sign up</button>
-      </div>
-
-      {/* Footer */}
-      <footer className="footer">
-        <a href="#">Help</a>
-      </footer>
-    </div>
+    </AuthLayout>
   );
 }
 
 if (view === 'signup') {
   return (
-    <div className="login-page">
-      {/* Logo */}
-      <div className="logo">
-        <span className="logo-text">DDMTP</span>
-        <div className="logo-icon">
-          <span />
-          <span />
-          <span />
-          <span />
-        </div>
-      </div>
-
-      {/* Signup Card */}
-      <div className="login-card">
-        <h1>Teacher Sign Up</h1>
-        <p className="subtitle">Create your teacher account</p>
-
-        <form onSubmit={handleSignup}>
-          <input
-            type="text"
-            placeholder="Username*"
-            value={signupForm.username}
-            onChange={(e) =>
-              setSignupForm({ ...signupForm, username: e.target.value })
-            }
-            required
-          />
-
-          <div className="password-wrapper">
-            <input
-              type={showSignupPassword ? 'text' : 'password'}
-              placeholder="Password (min 6 characters)*"
-              value={signupForm.password}
-              onChange={(e) =>
-                setSignupForm({ ...signupForm, password: e.target.value })
-              }
-              required
-            />
-            <button
-              type="button"
-              className="toggle-password"
-              onClick={() => setShowSignupPassword(!showSignupPassword)}
-              aria-label="Toggle password visibility"
-            >
-              👁
-            </button>
+    <AuthLayout>
+      <div className="auth-card">
+        <p className="auth-kicker">Teacher access</p>
+        <h1>Create your account</h1>
+        <p className="auth-subtitle">Set up a space for your team and practice sessions.</p>
+        {authError && <div className="auth-alert" role="alert">{authError}</div>}
+        <form onSubmit={handleSignup} className="auth-form">
+          <div className="auth-field">
+            <label htmlFor="signup-username">Username</label>
+            <input id="signup-username" name="username" type="text" autoComplete="username" value={signupForm.username} onChange={e => setSignupForm({ ...signupForm, username: e.target.value })} required />
           </div>
-
-          <button type="submit" className="login-btn">
-            Sign up
-          </button>
+          <PasswordField id="signup-password" value={signupForm.password} onChange={e => setSignupForm({ ...signupForm, password: e.target.value })} autoComplete="new-password" visible={showSignupPassword} onToggle={() => setShowSignupPassword(value => !value)} minLength={12} hint="Use at least 12 characters. A longer passphrase is easier to remember and harder to guess." />
+          <button type="submit" className="auth-primary-button" disabled={authBusy}>{authBusy ? 'Creating account…' : 'Create teacher account'}</button>
         </form>
+        <p className="auth-switch">Already have an account? <button type="button" onClick={() => { setAuthError(''); setView('login'); }}>Sign in</button></p>
       </div>
-
-      {/* Back to login */}
-      <div className="signup">
-        Already have an account? <button type="button" onClick={() => setView('login')} className="text-[#0085CA] hover:underline font-medium">Log in</button>
-      </div>
-
-      {/* Footer */}
-      <footer className="footer">
-        <a href="#">Help</a>
-      </footer>
-    </div>
+    </AuthLayout>
   );
 }
 
 if (view === 'taking-test' && activeTest) {
   return (
-    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
-      <div className="w-full max-w-4xl p-6">
-
-        {/* Header */}
-        <div className="sticky top-0 z-50 mb-6">
-          <div className="bg-white rounded-xl shadow px-6 py-4 flex items-center justify-between">
-            <div className="w-1/4" />
-            <h2 className="text-xl font-semibold text-gray-800 text-center flex-1">
-              {activeTest.name}
-            </h2>
-            <div className="w-1/4 flex justify-end">
-              <div
-                className={`px-4 py-2 rounded-lg font-semibold text-sm ${
-                  timeRemaining < 60
-                    ? 'bg-red-100 text-red-700'
-                    : 'bg-[#e8f4f9] text-[#0085CA]'
-                }`}
-              >
-                {formatTime(timeRemaining)}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Answer formatting instructions */}
-        <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700 space-y-2">
-          <p><strong>How to format answers:</strong></p>
-          <ul className="list-disc list-inside space-y-1 ml-1">
-            <li>Numbers: <code className="bg-gray-200 px-1 rounded">42</code></li>
-            <li>Fractions: <code className="bg-gray-200 px-1 rounded">3/4</code> (not LaTeX)</li>
-            <li>Radicals: <code className="bg-gray-200 px-1 rounded">√2</code>, <code className="bg-gray-200 px-1 rounded">√2/2</code>, <code className="bg-gray-200 px-1 rounded">2√3</code></li>
-            <li>Ordered pairs: <code className="bg-gray-200 px-1 rounded">(-1,-3)</code> or <code className="bg-gray-200 px-1 rounded">(1/2,-3/4)</code></li>
-          </ul>
-          <p><strong>Do not use LaTeX</strong> (e.g. <code className="bg-gray-200 px-1 rounded">\frac{3}{4}</code>) — it will not be graded correctly. Use plain format above. Questions use LaTeX for display; your answers use simple text.</p>
-        </div>
-
-        {/* Lockdown warning — prominent */}
-        <div className="mb-4 rounded-xl border-2 border-amber-500 bg-amber-100 px-4 py-4 text-center text-base font-semibold text-amber-900 shadow-sm">
-          ⚠ Do not reload, switch tabs, exit, or go back. If you do, your answers will be auto-submitted immediately.
-        </div>
-
-        {/* Time warning */}
-        {timeRemaining < 60 && (
-          <div className="mb-4">
-            <div className="bg-red-50 border border-red-200 text-red-700 px-6 py-4 rounded-xl text-center text-sm">
-              Less than 1 minute remaining. Please submit soon.
-            </div>
-          </div>
-        )}
-
-        {/* Questions */}
-        <div className="space-y-4">
-          {testProblems.map((problem, index) => (
-            <div key={problem.id} className="bg-white rounded-xl shadow p-6">
-              <div className="mb-4">
-                <span className="text-xs font-medium text-gray-500">
-                  Question {index + 1} of {testProblems.length}
-                </span>
-                {problem.source && (
-                  <p className="text-xs text-gray-500 mt-0.5">Source: {problem.source}</p>
-                )}
-                <h3 className="text-base font-semibold text-gray-800 mt-1">
-                  <RenderLatex text={problem.question} />
-                </h3>
-                {problem.image_url && (
-                  <ProblemImage url={problem.image_url} token={token} />
-                )}
-              </div>
-
-              <input
-                type="text"
-                value={testAnswers[problem.id] || ''}
-                onChange={(e) =>
-                  setTestAnswers({
-                    ...testAnswers,
-                    [problem.id]: e.target.value
-                  })
-                }
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:border-[#0085CA] focus:outline-none text-center text-sm"
-                placeholder="e.g. 42, 3/4, √2, √2/2"
-              />
-              {(testAnswers[problem.id] || '').trim() && (
-                <div className="mt-2 text-sm text-gray-500 flex items-center gap-2">
-                  <span>Will be interpreted as:</span>
-                  <code className="px-2 py-1 bg-[#f5f7f8] rounded border border-gray-200 font-mono text-gray-800">
-                    {String(testAnswers[problem.id] || '').trim()}
-                  </code>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Submit */}
-        <div className="mt-6">
-          <button
-            onClick={handleSubmitTest}
-            className="w-full bg-[#0085CA] hover:bg-[#006699] text-white py-3 rounded-lg font-semibold"
-          >
-            Submit Test
-          </button>
-        </div>
-      </div>
-    </div>
+    <StudentTestPage
+      activeTest={activeTest}
+      timeRemaining={timeRemaining}
+      testProblems={testProblems}
+      testAnswers={testAnswers}
+      setTestAnswers={setTestAnswers}
+      token={token}
+      onSubmit={handleSubmitTest}
+      submitting={submittingTest}
+      submissionError={submissionError}
+      onOpenReview={() => setSubmissionError('')}
+    />
   );
 }
-
 
 if (view === 'student-dashboard' && user) {
   const availableTests = tests.filter(
@@ -1131,7 +867,7 @@ if (view === 'student-dashboard' && user) {
           <div className="w-1/4 flex justify-end">
             <button
               onClick={handleLogout}
-              className="text-sm text-[#0085CA] font-medium hover:underline"
+              className="text-sm text-[#006da6] font-medium hover:underline"
             >
               Logout
             </button>
@@ -1143,6 +879,13 @@ if (view === 'student-dashboard' && user) {
             <span>{dashboardLoadError}</span>
             <button type="button" onClick={() => loadUserData({ preserveView: true })} className="font-semibold underline">Retry loading</button>
           </div>
+        )}
+
+        {submissionNotice && (
+          <div role="status" className="mb-6 rounded-xl border border-green-200 bg-green-50 p-4 text-sm font-medium text-green-900">{submissionNotice}</div>
+        )}
+        {testExpirationNotice && (
+          <div role="status" className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-950">{testExpirationNotice}</div>
         )}
 
         {/* Welcome Card */}
@@ -1157,14 +900,14 @@ if (view === 'student-dashboard' && user) {
           <div className="flex flex-wrap gap-4 justify-center">
             <div className="inline-flex flex-col items-center bg-[#e8f4f9] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when you solve harder problems correctly, decreases when you miss easier ones">
               <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
-              <span className="text-4xl font-bold text-[#0085CA]">
+              <span className="text-4xl font-bold text-[#006da6]">
                 {user.elo}
               </span>
             </div>
             {typeof user.cumulative_score === 'number' && (
               <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
                 <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
-                <span className="text-4xl font-bold text-[#0085CA]">
+                <span className="text-4xl font-bold text-[#006da6]">
                   {user.cumulative_score}
                 </span>
               </div>
@@ -1175,7 +918,7 @@ if (view === 'student-dashboard' && user) {
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                   {user.tag_elos.map(t => (
                     <span key={t.name} className="text-gray-800">
-                      {t.name}: <span className="font-semibold text-[#0085CA]">{t.elo}</span>
+                      {t.name}: <span className="font-semibold text-[#006da6]">{t.elo}</span>
                     </span>
                   ))}
                 </div>
@@ -1208,11 +951,17 @@ if (view === 'student-dashboard' && user) {
                       {(test.problem_ids || []).length} questions •{' '}
                       {test.time_limit} min
                     </p>
+                    <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                      This test submits automatically if you switch to another tab or app. Keep it open in the foreground until you finish.
+                    </p>
                     <button
+                      type="button"
                       onClick={() => startTest(test)}
-                      className="w-full bg-[#0085CA] hover:bg-[#006699] text-white py-2 rounded-lg text-sm font-medium"
+                      disabled={startingTestId !== null || test.session_expired}
+                      aria-busy={startingTestId === test.id}
+                      className="w-full bg-[#006da6] hover:bg-[#006699] disabled:cursor-not-allowed disabled:opacity-70 text-white py-2 rounded-lg text-sm font-medium"
                     >
-                      Start Test
+                      {startingTestId === test.id ? 'Preparing test…' : test.session_expired ? 'Time expired' : 'Start Test'}
                     </button>
                   </div>
                 ))}
@@ -1275,7 +1024,7 @@ if (view === 'student-dashboard' && user) {
                             alert('Error loading attempt details');
                           }
                         }}
-                        className="mt-2 text-sm text-[#0085CA] font-medium hover:underline"
+                        className="mt-2 text-sm text-[#006da6] font-medium hover:underline"
                       >
                         View Details
                       </button>
@@ -1289,11 +1038,10 @@ if (view === 'student-dashboard' && user) {
 
         {/* Attempt Details Modal */}
         {attemptDetails && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setAttemptDetails(null)}>
-            <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+          <AccessibleDialog ariaLabel="Test results" onClose={() => setAttemptDetails(null)} panelClassName="max-w-2xl p-6">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-semibold text-gray-800">Test Results</h3>
-                <button onClick={() => setAttemptDetails(null)} className="text-gray-500 hover:text-gray-700 text-2xl leading-none">&times;</button>
+                <button type="button" aria-label="Close test results" onClick={() => setAttemptDetails(null)} className="text-gray-500 hover:text-gray-700 text-2xl leading-none">&times;</button>
               </div>
               <p className="text-sm text-gray-600 mb-4">
                 Score: {attemptDetails.attempt.score}/{attemptDetails.attempt.total}
@@ -1304,9 +1052,9 @@ if (view === 'student-dashboard' && user) {
               {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                 <div className="space-y-4">
                   {attemptDetails.solutionsLink && (
-                    <div className="mb-4 p-3 bg-[#e8f4f9] rounded-lg border border-[#0085CA]/30">
+                    <div className="mb-4 p-3 bg-[#e8f4f9] rounded-lg border border-[#006da6]/30">
                       <span className="text-sm font-medium text-gray-700">Solutions: </span>
-                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#0085CA] hover:underline font-medium">
+                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#006da6] hover:underline font-medium">
                         View solutions →
                       </a>
                     </div>
@@ -1314,7 +1062,7 @@ if (view === 'student-dashboard' && user) {
                   {attemptDetails.problems.map((item, idx) => (
                     <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>
                       <p className="text-xs text-gray-500 mb-1">Question {idx + 1}</p>
-                      <div className="text-sm text-gray-800 mb-2"><RenderLatex text={item.question} /></div>
+                      <div className="text-sm text-gray-800 mb-2"><LatexRenderer text={item.question} /></div>
                       {item.image_url && <ProblemImage url={item.image_url} token={token} />}
                       <p className="text-sm mt-2">
                         <span className="font-medium">Your answer:</span> {String(item.student_answer || '(blank)')}
@@ -1323,7 +1071,7 @@ if (view === 'student-dashboard' && user) {
                         ) : (
                           <>
                             <span className="text-red-600 ml-2">✗ Incorrect</span>
-                            <span className="block mt-1 text-[#0085CA]"><span className="font-medium">Correct answer:</span> {String(item.correct_answer ?? '')}</span>
+                            <span className="block mt-1 text-[#006da6]"><span className="font-medium">Correct answer:</span> {String(item.correct_answer ?? '')}</span>
                           </>
                         )}
                       </p>
@@ -1335,8 +1083,7 @@ if (view === 'student-dashboard' && user) {
                   {attemptDetails.showAnswers ? 'No problem details available.' : 'Answers and the solutions link will appear here when your teacher releases them.'}
                 </p>
               )}
-            </div>
-          </div>
+          </AccessibleDialog>
         )}
       </div>
     </div>
@@ -1355,7 +1102,7 @@ if (view === 'teacher-dashboard' && user) {
           </h1>
           <button
             onClick={handleLogout}
-            className="text-sm text-[#0085CA] font-medium hover:underline"
+            className="text-sm text-[#006da6] font-medium hover:underline"
           >
             Logout
           </button>
@@ -1372,13 +1119,13 @@ if (view === 'teacher-dashboard' && user) {
         <div className="mb-6 flex gap-3">
           <button
             onClick={() => setView('register-students')}
-            className="bg-[#0085CA] hover:bg-[#006699] text-white px-6 py-3 rounded-lg font-medium"
+            className="bg-[#006da6] hover:bg-[#006699] text-white px-6 py-3 rounded-lg font-medium"
           >
             Register Students
           </button>
           <button
             onClick={() => setView('create-test')}
-            className="bg-[#0085CA] hover:bg-[#006699] text-white px-6 py-3 rounded-lg font-medium"
+            className="bg-[#006da6] hover:bg-[#006699] text-white px-6 py-3 rounded-lg font-medium"
           >
             Create New Test
           </button>
@@ -1417,7 +1164,7 @@ if (view === 'teacher-dashboard' && user) {
                         await loadTestAnalytics(test.id);
                         setView('test-analytics');
                       }}
-                      className="text-sm text-[#0085CA] font-medium hover:underline"
+                      className="text-sm text-[#006da6] font-medium hover:underline"
                     >
                       View Analytics →
                     </button>
@@ -1451,7 +1198,7 @@ if (view === 'teacher-dashboard' && user) {
             <div className="bg-white rounded-xl shadow divide-y">
               {students.length === 0 ? (
                 <div className="p-6 text-center text-gray-500 text-sm">
-                  No students yet. <button type="button" onClick={() => setView('register-students')} className="text-[#0085CA] font-medium hover:underline">Register students</button> to get started.
+                  No students yet. <button type="button" onClick={() => setView('register-students')} className="text-[#006da6] font-medium hover:underline">Register students</button> to get started.
                 </div>
               ) : (
                 [...students]
@@ -1467,17 +1214,17 @@ if (view === 'teacher-dashboard' && user) {
                         <button
                           type="button"
                           onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                          className="font-medium text-left hover:text-[#0085CA] hover:underline"
+                          className="font-medium text-left hover:text-[#006da6] hover:underline"
                         >
                           {i + 1}. {s.username}
                         </button>
                         <div className="flex gap-4">
                           {typeof s.cumulative_score === 'number' && (
                             <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
-                              Cumulative: <span className="font-semibold text-[#0085CA]">{s.cumulative_score}</span>
+                              Cumulative: <span className="font-semibold text-[#006da6]">{s.cumulative_score}</span>
                             </span>
                           )}
-                          <span className="text-[#0085CA] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                          <span className="text-[#006da6] font-semibold" title="Skill rating based on problem difficulty and correctness">
                             ELO: {s.elo}
                           </span>
                         </div>
@@ -1536,8 +1283,9 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
       <div className="w-full max-w-4xl p-6">
         <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
           <button
+            type="button"
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#0085CA] hover:underline"
+            className="text-sm text-[#006da6] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1586,7 +1334,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                     alert(err.response?.data?.error || 'Failed to save');
                   }
                 }}
-                className="px-4 py-2 bg-[#0085CA] text-white rounded-lg text-sm font-medium hover:bg-[#006699]"
+                className="px-4 py-2 bg-[#006da6] text-white rounded-lg text-sm font-medium hover:bg-[#006699]"
               >
                 Save settings
               </button>
@@ -1624,7 +1372,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                                 alert('Error loading submission');
                               }
                             }}
-                            className="text-sm text-[#0085CA] font-medium hover:underline"
+                            className="text-sm text-[#006da6] font-medium hover:underline"
                           >
                             View submission
                           </button>
@@ -1638,13 +1386,12 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
           </div>
 
           {attemptDetails && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setAttemptDetails(null)}>
-              <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+            <AccessibleDialog ariaLabel="Student test submission" onClose={() => setAttemptDetails(null)} panelClassName="max-w-2xl p-6">
                 <div className="flex justify-between items-center mb-4">
                   <h3 className="text-lg font-semibold text-gray-800">
                     Submission — {studentAccuracies.find(s => s.id === attemptDetails.attempt?.id)?.username || 'Student'}
                   </h3>
-                  <button onClick={() => setAttemptDetails(null)} className="text-gray-500 hover:text-gray-700 text-2xl leading-none">&times;</button>
+                  <button type="button" aria-label="Close student test submission" onClick={() => setAttemptDetails(null)} className="text-gray-500 hover:text-gray-700 text-2xl leading-none">&times;</button>
                 </div>
                 <p className="text-sm text-gray-600 mb-4">
                   Score: {attemptDetails.attempt?.score}/{attemptDetails.attempt?.total}
@@ -1655,9 +1402,9 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                 {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                   <div className="space-y-4">
                     {attemptDetails.solutionsLink && (
-                      <div className="mb-4 p-3 bg-[#e8f4f9] rounded-lg border border-[#0085CA]/30">
+                      <div className="mb-4 p-3 bg-[#e8f4f9] rounded-lg border border-[#006da6]/30">
                         <span className="text-sm font-medium text-gray-700">Solutions: </span>
-                        <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#0085CA] hover:underline font-medium">
+                        <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#006da6] hover:underline font-medium">
                           View solutions →
                         </a>
                       </div>
@@ -1665,7 +1412,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                     {attemptDetails.problems.map((item, idx) => (
                       <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>
                         <p className="text-xs text-gray-500 mb-1">Question {idx + 1}</p>
-                        <div className="text-sm text-gray-800 mb-2"><RenderLatex text={item.question} /></div>
+                        <div className="text-sm text-gray-800 mb-2"><LatexRenderer text={item.question} /></div>
                         {item.image_url && <ProblemImage url={item.image_url} token={token} />}
                         <p className="text-sm mt-2">
                           <span className="font-medium">Answer:</span> {String(item.student_answer || '(blank)')}
@@ -1674,7 +1421,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                           ) : (
                             <>
                               <span className="text-red-600 ml-2">✗ Incorrect</span>
-                              <span className="block mt-1 text-[#0085CA]"><span className="font-medium">Correct:</span> {String(item.correct_answer ?? '')}</span>
+                              <span className="block mt-1 text-[#006da6]"><span className="font-medium">Correct:</span> {String(item.correct_answer ?? '')}</span>
                             </>
                           )}
                         </p>
@@ -1686,8 +1433,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                     {attemptDetails.showAnswers ? 'No problem details available.' : 'Full submission details visible to teacher.'}
                   </p>
                 )}
-              </div>
-            </div>
+            </AccessibleDialog>
           )}
 
           <div className="bg-white rounded-xl shadow p-6">
@@ -1725,7 +1471,7 @@ if (view === 'register-students' && user) {
         <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
           <button
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#0085CA] hover:underline"
+            className="text-sm text-[#006da6] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1755,7 +1501,7 @@ if (view === 'register-students' && user) {
             <button
               type="button"
               onClick={() => registerStudent()}
-              className="bg-[#0085CA] hover:bg-[#006699] text-white px-5 py-2 rounded-lg font-medium"
+              className="bg-[#006da6] hover:bg-[#006699] text-white px-5 py-2 rounded-lg font-medium"
             >
               Add student
             </button>
@@ -1799,17 +1545,17 @@ if (view === 'register-students' && user) {
                       <button
                         type="button"
                         onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                        className="font-medium text-left hover:text-[#0085CA] hover:underline"
+                        className="font-medium text-left hover:text-[#006da6] hover:underline"
                       >
                         {i + 1}. {s.username}
                       </button>
                       <div className="flex gap-4">
                         {typeof s.cumulative_score === 'number' && (
                           <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
-                            Cumulative: <span className="font-semibold text-[#0085CA]">{s.cumulative_score}</span>
+                            Cumulative: <span className="font-semibold text-[#006da6]">{s.cumulative_score}</span>
                           </span>
                         )}
-                        <span className="text-[#0085CA] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                        <span className="text-[#006da6] font-semibold" title="Skill rating based on problem difficulty and correctness">
                           ELO: {s.elo}
                         </span>
                       </div>
@@ -1838,7 +1584,7 @@ if (view === 'student-profile' && user) {
         <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
           <button
             onClick={() => { setView('teacher-dashboard'); setSelectedStudentId(null); setSelectedStudent(null); }}
-            className="text-sm text-[#0085CA] hover:underline"
+            className="text-sm text-[#006da6] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1853,18 +1599,18 @@ if (view === 'student-profile' && user) {
           <div className="flex flex-wrap gap-4">
             <div className="inline-flex flex-col items-center bg-[#e8f4f9] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when solving harder problems correctly, decreases when missing easier ones">
               <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
-              <span className="text-2xl font-bold text-[#0085CA]">{selectedStudent.elo}</span>
+              <span className="text-2xl font-bold text-[#006da6]">{selectedStudent.elo}</span>
             </div>
             <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
               <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
-              <span className="text-2xl font-bold text-[#0085CA]">{selectedStudent.cumulative_score ?? 0}</span>
+              <span className="text-2xl font-bold text-[#006da6]">{selectedStudent.cumulative_score ?? 0}</span>
             </div>
             {selectedStudent.tag_elos?.length > 0 && (
               <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
                 <span className="text-xs text-gray-600 mb-2">By Subject</span>
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                   {selectedStudent.tag_elos.map(t => (
-                    <span key={t.name}>{t.name}: <span className="font-semibold text-[#0085CA]">{t.elo}</span></span>
+                    <span key={t.name}>{t.name}: <span className="font-semibold text-[#006da6]">{t.elo}</span></span>
                   ))}
                 </div>
               </div>
@@ -1884,7 +1630,7 @@ if (view === 'student-profile' && user) {
                     <div className="flex-1 min-w-0">
                       <p className="text-xs text-gray-500 mb-1">{item.test_name} • {new Date(item.completed_at).toLocaleDateString()}</p>
                       <div className="text-sm text-gray-800">
-                        <RenderLatex text={item.question} />
+                        <LatexRenderer text={item.question} />
                       </div>
                       {item.image_url && (
                         <div className="mt-2">
@@ -1918,7 +1664,7 @@ if (view === 'create-test' && user) {
         <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
           <button
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#0085CA] hover:underline"
+            className="text-sm text-[#006da6] hover:underline"
           >
             ← Back
           </button>
@@ -1928,35 +1674,52 @@ if (view === 'create-test' && user) {
           <span />
         </div>
 
-        <div className="bg-white rounded-xl shadow p-8 space-y-6">
-          <input
-            className="w-full border rounded-lg px-4 py-3"
-            placeholder="Test name"
-            value={newTest.name}
-            onChange={(e) => setNewTest({ ...newTest, name: e.target.value })}
-          />
-
-          <div className="grid grid-cols-2 gap-4">
+        <form onSubmit={event => { event.preventDefault(); createTest(); }} className="bg-white rounded-xl shadow p-5 sm:p-8 space-y-6">
+          <div>
+            <label htmlFor="new-test-name" className="mb-2 block text-sm font-medium text-gray-700">Test name</label>
             <input
-              type="date"
-              className="border rounded-lg px-4 py-3"
-              value={newTest.dueDate}
-              onChange={(e) => setNewTest({ ...newTest, dueDate: e.target.value })}
-            />
-            <input
-              type="number"
-              className="border rounded-lg px-4 py-3"
-              value={newTest.timeLimit}
-              onChange={(e) =>
-                setNewTest({ ...newTest, timeLimit: +e.target.value || 30 })
-              }
+              id="new-test-name"
+              maxLength={200}
+              required
+              className="w-full border rounded-lg px-4 py-3"
+              placeholder="For example, October practice"
+              value={newTest.name}
+              onChange={(e) => { setNewTest({ ...newTest, name: e.target.value }); setCreateTestError(''); }}
             />
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Test type</label>
-            <div className="flex gap-6">
-              <label className="flex items-start gap-3 cursor-pointer">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="new-test-due-date" className="mb-2 block text-sm font-medium text-gray-700">Due date</label>
+            <input
+              id="new-test-due-date"
+              type="date"
+              required
+              className="w-full border rounded-lg px-4 py-3"
+              value={newTest.dueDate}
+              onChange={(e) => { setNewTest({ ...newTest, dueDate: e.target.value }); setCreateTestError(''); }}
+            />
+            </div>
+            <div>
+              <label htmlFor="new-test-time-limit" className="mb-2 block text-sm font-medium text-gray-700">Time limit (minutes)</label>
+            <input
+              id="new-test-time-limit"
+              type="number"
+              min={1}
+              max={240}
+              step={1}
+              required
+              className="w-full border rounded-lg px-4 py-3"
+              value={newTest.timeLimit}
+              onChange={(e) => setNewTest({ ...newTest, timeLimit: e.target.value === '' ? '' : Number(e.target.value) })}
+            />
+            </div>
+          </div>
+
+          <fieldset>
+            <legend className="mb-2 text-sm font-medium text-gray-700">Test type</legend>
+            <div className="flex flex-col gap-3 sm:flex-row sm:gap-6">
+              <label className="flex flex-1 items-start gap-3 rounded-lg border border-gray-200 p-4 cursor-pointer">
                 <input
                   type="radio"
                   name="testType"
@@ -1969,7 +1732,7 @@ if (view === 'create-test' && user) {
                   <p className="text-sm text-gray-500 mt-0.5">30 problems, 1 point each. Counts toward MATHCOUNTS score as 1× correct answers.</p>
                 </div>
               </label>
-              <label className="flex items-start gap-3 cursor-pointer">
+              <label className="flex flex-1 items-start gap-3 rounded-lg border border-gray-200 p-4 cursor-pointer">
                 <input
                   type="radio"
                   name="testType"
@@ -1983,9 +1746,13 @@ if (view === 'create-test' && user) {
                 </div>
               </label>
             </div>
-          </div>
+          </fieldset>
 
-          <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-1">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-base font-semibold text-gray-800">Choose problems</h2>
+            <p className="text-sm text-gray-600" role="status" aria-live="polite">{newTest.problemIds.length} selected · {newTest.testType === 'target' ? '8' : '30'} required</p>
+          </div>
+          <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-1" role="region" aria-label="Problem selection">
             {(() => {
               const byFolder = {};
               for (const p of problems) {
@@ -1994,8 +1761,9 @@ if (view === 'create-test' && user) {
                 byFolder[fname].push(p);
               }
               const folderNames = Object.keys(byFolder).sort();
-              return folderNames.map(fname => {
+              return folderNames.map((fname, folderIndex) => {
                 const isExpanded = expandedFolders.has(fname);
+                const folderPanelId = `folder-problems-${folderIndex}`;
                 const toggle = () => setExpandedFolders(prev => {
                   const next = new Set(prev);
                   if (next.has(fname)) next.delete(fname);
@@ -2023,19 +1791,21 @@ if (view === 'create-test' && user) {
                         ref={el => { if (el) el.indeterminate = someSelected && !allSelected; }}
                         onChange={toggleFolderSelection}
                         onClick={(e) => e.stopPropagation()}
+                        aria-label={`Select all problems in ${fname}`}
                         className="flex-shrink-0 mr-2"
                       />
                       <button
                         type="button"
                         onClick={toggle}
+                        aria-expanded={isExpanded}
+                        aria-controls={folderPanelId}
                         className="flex-1 flex items-center justify-between text-left font-semibold text-gray-700 text-sm"
                       >
                         <span>{fname}</span>
-                        <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
+                        <span className="text-gray-400" aria-hidden="true">{isExpanded ? '▼' : '▶'}</span>
                       </button>
                     </div>
-                    {isExpanded && (
-                      <div className="border-t border-gray-200 p-3 space-y-2">
+                    <div id={folderPanelId} hidden={!isExpanded} className="border-t border-gray-200 p-3 space-y-2">
                         {folderProbs.map(p => (
                           <label key={p.id} className="flex gap-3 text-sm items-center cursor-pointer hover:bg-gray-50 -mx-1 px-2 py-1.5 rounded">
                             <input
@@ -2056,25 +1826,26 @@ if (view === 'create-test' && user) {
                               {p.tag_names?.length > 0 && (
                                 <span className="text-gray-500 ml-1">[{p.tag_names.join(', ')}]</span>
                               )}
-                              <span className="text-[#0085CA] font-medium ml-2">ELO {p.elo}</span>
+                              <span className="text-[#006da6] font-medium ml-2">ELO {p.elo}</span>
                             </span>
                           </label>
                         ))}
-                      </div>
-                    )}
+                    </div>
                   </div>
                 );
               });
             })()}
           </div>
 
+          {createTestError && <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">{createTestError}</p>}
           <button
-            onClick={createTest}
-            className="w-full bg-[#0085CA] hover:bg-[#006699] text-white py-3 rounded-lg font-medium"
+            type="submit"
+            disabled={newTest.problemIds.length !== (newTest.testType === 'target' ? 8 : 30) || !newTest.name.trim() || !newTest.dueDate || !Number.isInteger(Number(newTest.timeLimit)) || Number(newTest.timeLimit) < 1 || Number(newTest.timeLimit) > 240}
+            className="w-full bg-[#006da6] hover:bg-[#006699] disabled:cursor-not-allowed disabled:opacity-50 text-white py-3 rounded-lg font-medium"
           >
             Create Test
           </button>
-        </div>
+        </form>
       </div>
     </div>
   );
@@ -2082,6 +1853,14 @@ if (view === 'create-test' && user) {
 
 if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
   const isTeacherAdmin = user.role === 'teacher';
+  const normalizedProblemSearch = problemSearch.trim().toLocaleLowerCase();
+  const visibleProblemIds = new Set(problems
+    .filter(problem => {
+      const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.topic || ''} ${problem.folder_name || ''}`.toLocaleLowerCase();
+      return !normalizedProblemSearch || searchable.includes(normalizedProblemSearch);
+    })
+    .map(problem => problem.id));
+  const hiddenSelectedCount = selectedProblemIds.filter(id => !visibleProblemIds.has(id)).length;
   return (
     <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
       <div className="w-full max-w-6xl p-6">
@@ -2093,14 +1872,14 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             {isTeacherAdmin && (
               <button
                 onClick={() => setView('teacher-dashboard')}
-                className="text-sm text-[#0085CA] hover:underline"
+                className="text-sm text-[#006da6] hover:underline"
               >
                 ← Back to Dashboard
               </button>
             )}
             <button
               onClick={handleLogout}
-              className="text-sm text-[#0085CA] hover:underline"
+              className="text-sm text-[#006da6] hover:underline"
             >
               Logout
             </button>
@@ -2129,13 +1908,13 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                       className="w-32 px-1 py-0.5 border rounded text-sm"
                       autoFocus
                     />
-                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#0085CA] hover:underline text-xs">✓</button>
+                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#006da6] hover:underline text-xs">✓</button>
                     <button type="button" onClick={() => { setEditingFolderId(null); setEditingFolderName(''); }} className="text-gray-500 hover:underline text-xs">✗</button>
                   </>
                 ) : (
                   <>
                     {f.name}
-                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#0085CA] hover:underline text-xs">edit</button>
+                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#006da6] hover:underline text-xs">edit</button>
                     <button type="button" onClick={() => deleteFolder(f.id)} className="text-red-600 hover:underline text-xs">×</button>
                   </>
                 )}
@@ -2150,7 +1929,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               placeholder="New folder name"
               className="flex-1 px-3 py-2 border rounded-lg text-sm"
             />
-            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#0085CA] text-white rounded-lg text-sm">Add</button>
+            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#006da6] text-white rounded-lg text-sm">Add</button>
           </div>
         </div>
 
@@ -2176,9 +1955,9 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
           <p className="text-sm text-gray-600 mb-3">
             Upload a PDF of problems and enter an answer key. AI is used to auto-extract problems, sort them, and place them in a separate folder.
             {user?.role === 'teacher' ? (
-              <span> Teachers must use AI mode (LaTeX, auto-tags) — requires <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code>.</span>
+              <span> AI processing must be enabled by your site administrator before you can import a PDF.</span>
             ) : (
-              <span> <strong>Use AI</strong>: converts to LaTeX, auto-tags — requires <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code>.</span>
+              <span> <strong>Use AI</strong> converts questions to LaTeX and adds topic tags. It requires AI processing to be enabled on the server.</span>
             )}
           </p>
           {user?.role !== 'teacher' && (
@@ -2188,7 +1967,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                 checked={pdfImportUseAI}
                 onChange={(e) => setPdfImportUseAI(e.target.checked)}
               />
-              Use AI (LaTeX, auto-tags) — requires API key
+              Use AI to format questions and add topic tags
             </label>
           )}
           <label className="flex items-center gap-2 mb-3 text-sm cursor-pointer">
@@ -2224,7 +2003,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               type="button"
               onClick={handlePdfImport}
               disabled={pdfImportLoading || !pdfImportFile}
-              className="px-4 py-2 bg-[#0085CA] text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 bg-[#006da6] text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pdfImportLoading ? 'Importing…' : 'Import'}
             </button>
@@ -2258,8 +2037,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
           )}
 
           {pdfImportReview && (
-            <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-              <div className="bg-white rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <AccessibleDialog ariaLabel={`Review problem ${pdfImportReview.problemNumber} image`} panelClassName="max-w-2xl p-6" closeOnBackdrop={false} closeOnEscape={false}>
                 <h4 className="text-lg font-bold mb-2">
                   Problem {pdfImportReview.problemNumber} of {pdfImportReview.total}
                 </h4>
@@ -2306,21 +2084,19 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     {pdfImportLoading ? '…' : 'No — move down'}
                   </button>
                 </div>
-              </div>
-            </div>
+            </AccessibleDialog>
           )}
         </div>
 
         <button
           onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '', source: '', folder_id: null, tag_ids: [] })}
-          className="mb-6 bg-[#0085CA] text-white px-6 py-3 rounded-lg"
+          className="mb-6 bg-[#006da6] text-white px-6 py-3 rounded-lg"
         >
           Add Problem
         </button>
 
         {editingProblem && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+          <AccessibleDialog ariaLabel={editingProblem.id ? 'Edit problem' : 'Add problem'} onClose={() => setEditingProblem(null)} panelClassName="max-w-lg p-6">
               <h4 className="text-xl font-bold mb-4 text-center">
                 {editingProblem.id ? 'Edit' : 'Add'} Problem
               </h4>
@@ -2443,7 +2219,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   <button
                     type="button"
                     onClick={saveProblem}
-                    className="flex-1 bg-[#0085CA] text-white py-2 rounded-lg"
+                    className="flex-1 bg-[#006da6] text-white py-2 rounded-lg"
                   >
                     Save
                   </button>
@@ -2455,13 +2231,11 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   </button>
                 </div>
               </div>
-            </div>
-          </div>
+          </AccessibleDialog>
         )}
 
         {problemToDelete != null && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" role="dialog" aria-modal="true">
-            <div className="bg-white rounded-xl p-6 max-w-sm w-full shadow-xl">
+          <AccessibleDialog ariaLabel="Delete problem confirmation" onClose={() => setProblemToDelete(null)} panelClassName="max-w-sm p-6">
               <p className="text-gray-800 font-medium mb-4">Delete this problem?</p>
               <div className="flex gap-3 justify-end">
                 <button
@@ -2479,13 +2253,26 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   Yes, delete
                 </button>
               </div>
-            </div>
-          </div>
+          </AccessibleDialog>
         )}
 
+        <div className="mb-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <label htmlFor="problem-bank-search" className="mb-2 block text-sm font-semibold text-gray-800">Search problems</label>
+          <input
+            id="problem-bank-search"
+            type="search"
+            value={problemSearch}
+            onChange={event => setProblemSearch(event.target.value)}
+            placeholder="Search question text, source, topic, or folder"
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-[#006da6] focus:outline-none"
+          />
+          {normalizedProblemSearch && <p className="mt-2 text-xs text-gray-600">Showing matches for “{problemSearch.trim()}”.</p>}
+        </div>
+
         {selectedProblemIds.length > 0 && (
-          <div className="bg-[#0085CA]/10 border border-[#0085CA]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
+          <div className="bg-[#006da6]/10 border border-[#006da6]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
             <span className="font-medium text-gray-800">{selectedProblemIds.length} selected</span>
+            {hiddenSelectedCount > 0 && <span role="status" className="text-sm text-gray-700">{hiddenSelectedCount} selected problem{hiddenSelectedCount === 1 ? ' is' : 's are'} hidden by this search; bulk actions still include {hiddenSelectedCount} hidden item{hiddenSelectedCount === 1 ? '' : 's'}.</span>}
             <select
               value={bulkMoveFolderId}
               onChange={(e) => setBulkMoveFolderId(e.target.value)}
@@ -2501,7 +2288,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               type="button"
               onClick={bulkMoveProblems}
               disabled={!bulkMoveFolderId}
-              className="px-3 py-1.5 bg-[#0085CA] text-white rounded-lg text-sm hover:bg-[#006699] disabled:opacity-50"
+              className="px-3 py-1.5 bg-[#006da6] text-white rounded-lg text-sm hover:bg-[#006699] disabled:opacity-50"
             >
               Move
             </button>
@@ -2510,7 +2297,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               onClick={bulkDeleteProblems}
               className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700"
             >
-              Delete selected
+              Delete all selected
             </button>
             <button
               type="button"
@@ -2531,6 +2318,8 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             }
             byFolder[UNCategorized] = { name: 'Uncategorized', problems: [] };
             for (const p of problems) {
+              const searchable = `${p.question || ''} ${p.source || ''} ${p.topic || ''} ${p.folder_name || ''}`.toLocaleLowerCase();
+              if (normalizedProblemSearch && !searchable.includes(normalizedProblemSearch)) continue;
               const fid = p.folder_id ?? UNCategorized;
               if (!byFolder[fid]) byFolder[fid] = { name: p.folder_name || 'Uncategorized', problems: [] };
               byFolder[fid].problems.push(p);
@@ -2539,7 +2328,10 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             const orderedFolders = [
               ...folderIds,
               ...(byFolder[UNCategorized]?.problems?.length ? [UNCategorized] : [])
-            ];
+            ].filter(id => !normalizedProblemSearch || byFolder[id]?.problems?.length > 0);
+            if (orderedFolders.length === 0 && normalizedProblemSearch) {
+              return <div role="status" className="rounded-xl border border-gray-200 bg-white p-8 text-center text-gray-600">No problems match “{problemSearch.trim()}”.</div>;
+            }
             if (orderedFolders.length === 0 && problems.length === 0) {
               return (
                 <div className="bg-white rounded-xl shadow p-8 text-center text-gray-500">
@@ -2550,7 +2342,8 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             return orderedFolders.map(fid => {
               const { name, problems: folderProbs } = byFolder[fid] || { name: 'Uncategorized', problems: [] };
               const expandKey = fid === UNCategorized ? -1 : fid;
-              const isExpanded = adminExpandedFolders.has(expandKey);
+              const folderPanelId = `problem-folder-panel-${expandKey}`;
+              const isExpanded = normalizedProblemSearch ? folderProbs.length > 0 : adminExpandedFolders.has(expandKey);
               const toggle = () => setAdminExpandedFolders(prev => {
                 const next = new Set(prev);
                 if (next.has(expandKey)) next.delete(expandKey);
@@ -2563,7 +2356,10 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     <button
                       type="button"
                       onClick={toggle}
-                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#0085CA]"
+                      disabled={Boolean(normalizedProblemSearch)}
+                      aria-expanded={isExpanded}
+                      aria-controls={folderPanelId}
+                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#006da6] disabled:cursor-default disabled:hover:text-gray-800"
                     >
                       <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
                       <span>{name}</span>
@@ -2579,8 +2375,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                       </button>
                     )}
                   </div>
-                  {isExpanded && (
-                    <div className="overflow-x-auto">
+                  <div id={folderPanelId} hidden={!isExpanded} className="overflow-x-auto">
                       <table className="w-full text-sm">
                         <thead className="bg-gray-50 text-left">
                           <tr>
@@ -2630,7 +2425,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                               </td>
                               <td className="px-4 py-3 max-w-md">
                                 <div>
-                                  <RenderLatex text={p.question} />
+                                  <LatexRenderer text={p.question} />
                                   {p.image_url && (
                                     <ProblemImage url={p.image_url} token={token} />
                                   )}
@@ -2644,7 +2439,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                                 <button
                                   type="button"
                                   onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '', folder_id: p.folder_id ?? null, tag_ids: p.tag_ids ?? [] })}
-                                  className="text-[#0085CA] hover:underline font-medium"
+                                  className="text-[#006da6] hover:underline font-medium"
                                 >
                                   Edit
                                 </button>
@@ -2660,8 +2455,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                           ))}
                         </tbody>
                       </table>
-                    </div>
-                  )}
+                  </div>
                 </div>
               );
             });
