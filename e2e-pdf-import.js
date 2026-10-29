@@ -44,11 +44,11 @@ const DEFAULT_ANSWER_KEY = `1. 17
 29. (15sqrt15)/26
 30. 12`;
 const ANSWER_KEY = process.env.ANSWER_KEY || DEFAULT_ANSWER_KEY;
-const USERNAME = process.env.USERNAME || 'admin';
-const PASSWORD = process.env.PASSWORD || 'admin123';
+const USERNAME = process.env.ADMIN_USERNAME;
+const PASSWORD = process.env.ADMIN_PASSWORD;
 
-if (!PDF_PATH) {
-  console.error('Usage: PDF_PATH=/path/to/file.pdf [SITE_URL=http://localhost:5173] node e2e-pdf-import.js');
+if (!PDF_PATH || !USERNAME || !PASSWORD) {
+  console.error('Usage: PDF_PATH=/path/to/file.pdf ADMIN_USERNAME=... ADMIN_PASSWORD=... [SITE_URL=http://localhost:5173] node e2e-pdf-import.js');
   process.exit(1);
 }
 
@@ -74,7 +74,7 @@ async function run() {
     const stillOnLogin = await page.locator('input[placeholder*="Username"]').isVisible();
     if (stillOnLogin) {
       await page.screenshot({ path: 'e2e-login-failed.png' });
-      throw new Error('Still on login page - check credentials (default: admin/admin123)');
+      throw new Error('Still on login page - check ADMIN_USERNAME and ADMIN_PASSWORD.');
     }
     // Wait for Admin Portal (admin view) - scroll down to Import section
     await page.waitForSelector('text=Admin Portal', { timeout: 5000 });

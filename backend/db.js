@@ -1,5 +1,6 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { randomBytes } from 'crypto';
 
 dotenv.config();
 
@@ -7,7 +8,7 @@ const { Pool } = pg;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : false
 });
 
 // Database initialization
@@ -168,6 +169,14 @@ export async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS api_rate_limit_buckets (
+        bucket_key VARCHAR(100) PRIMARY KEY,
+        window_started_at TIMESTAMPTZ NOT NULL,
+        request_count INTEGER NOT NULL CHECK (request_count >= 0)
+      )
+    `);
     
     // Test attempts table
     await client.query(`
@@ -215,18 +224,14 @@ export async function initDatabase() {
     console.log('Database tables created successfully');
 
     // Migrations that need users to exist (run after main schema)
-    try {
-      await client.query('ALTER TABLE folders ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
-      await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
-      await client.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
-      await client.query('ALTER TABLE uploads ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
-      await client.query('ALTER TABLE tags DROP CONSTRAINT IF EXISTS tags_name_key');
-      await client.query('CREATE UNIQUE INDEX IF NOT EXISTS tags_name_public ON tags (name) WHERE created_by IS NULL');
-      await client.query('CREATE UNIQUE INDEX IF NOT EXISTS tags_name_teacher ON tags (name, created_by) WHERE created_by IS NOT NULL');
-      console.log('created_by columns and tag indexes ensured');
-    } catch (migErr) {
-      console.warn('Migration created_by (non-fatal):', migErr.message);
-    }
+    await client.query('ALTER TABLE folders ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
+    await client.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
+    await client.query('ALTER TABLE uploads ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)');
+    await client.query('ALTER TABLE tags DROP CONSTRAINT IF EXISTS tags_name_key');
+    await client.query('CREATE UNIQUE INDEX IF NOT EXISTS tags_name_public ON tags (name) WHERE created_by IS NULL');
+    await client.query('CREATE UNIQUE INDEX IF NOT EXISTS tags_name_teacher ON tags (name, created_by) WHERE created_by IS NOT NULL');
+    console.log('created_by columns and tag indexes ensured');
     try {
       await client.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_system BOOLEAN DEFAULT false');
       const systemTagNames = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
@@ -260,19 +265,58 @@ export async function seedDatabase() {
   const client = await pool.connect();
   
   try {
-    // Check if data already exists
+    // Never create the historical demo accounts in production. A fresh
+    // production database can receive one explicitly configured administrator.
     const userCheck = await client.query('SELECT COUNT(*) FROM users');
     if (parseInt(userCheck.rows[0].count) > 0) {
       console.log('Database already seeded, skipping...');
       return;
     }
+
+    if (process.env.NODE_ENV === 'production') {
+      const username = process.env.BOOTSTRAP_ADMIN_USERNAME?.trim();
+      const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+      if (!username && !password) {
+        console.log('No users exist; production bootstrap admin is not configured, skipping seed.');
+        return;
+      }
+      if (!username || !password) {
+        throw new Error('Set both BOOTSTRAP_ADMIN_USERNAME and BOOTSTRAP_ADMIN_PASSWORD to create the initial production admin.');
+      }
+      if (username.length > 50 || username.length < 3) {
+        throw new Error('BOOTSTRAP_ADMIN_USERNAME must be between 3 and 50 characters.');
+      }
+      if (password.length < 12) {
+        throw new Error('BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters.');
+      }
+
+      await client.query('BEGIN');
+      const passwordHash = await bcrypt.hash(password, 12);
+      await client.query(
+        "INSERT INTO users (username, password_hash, role, elo) VALUES ($1, $2, 'admin', 1500)",
+        [username, passwordHash]
+      );
+      await client.query('COMMIT');
+      console.log('Initial production administrator created from explicit bootstrap credentials.');
+      return;
+    }
+
+    // Demo identities and sample content are strictly for local development.
+    // Unknown or unset NODE_ENV values must never fall through to demo seeding.
+    if (process.env.NODE_ENV !== 'development') {
+      console.log(`NODE_ENV is ${process.env.NODE_ENV || 'unset'}; skipping demo seed.`);
+      return;
+    }
     
     await client.query('BEGIN');
     
-    // Create default users
-    const adminHash = await bcrypt.hash('admin123', 10);
-    const teacherHash = await bcrypt.hash('teacher123', 10);
-    const studentHash = await bcrypt.hash('student123', 10);
+    // Generate one-time local credentials instead of shipping shared defaults.
+    const adminPassword = randomBytes(24).toString('base64url');
+    const teacherPassword = randomBytes(24).toString('base64url');
+    const studentPassword = randomBytes(24).toString('base64url');
+    const adminHash = await bcrypt.hash(adminPassword, 10);
+    const teacherHash = await bcrypt.hash(teacherPassword, 10);
+    const studentHash = await bcrypt.hash(studentPassword, 10);
     
     await client.query(`
       INSERT INTO users (username, password_hash, role, elo) VALUES
@@ -282,6 +326,7 @@ export async function seedDatabase() {
       ('student2', $3, 'student', 1450),
       ('student3', $3, 'student', 1520)
     `, [adminHash, teacherHash, studentHash]);
+    console.log(`Local development credentials (store privately): admin / ${adminPassword}; teacher1 / ${teacherPassword}; students / ${studentPassword}`);
     await client.query(`
       UPDATE users SET teacher_id = (SELECT id FROM users WHERE username = 'teacher1' LIMIT 1)
       WHERE role = 'student'

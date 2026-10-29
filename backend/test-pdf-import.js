@@ -11,7 +11,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const API_URL = process.env.API_URL || 'https://test-platform-api-tji7.onrender.com';
+const API_URL = process.env.API_URL || 'http://localhost:3001';
 
 async function createTestPdf() {
   const doc = await PDFDocument.create();
@@ -41,6 +41,11 @@ Answer key:
 }
 
 async function testImport() {
+  const username = process.env.ADMIN_USERNAME;
+  const password = process.env.ADMIN_PASSWORD;
+  if (!username || !password) {
+    throw new Error('Set ADMIN_USERNAME and ADMIN_PASSWORD for the local test account.');
+  }
   console.log('Creating test PDF...');
   const pdfBytes = await createTestPdf();
   const pdfPath = path.join(__dirname, 'test-import.pdf');
@@ -51,7 +56,7 @@ async function testImport() {
   const loginRes = await fetch(`${API_URL}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'admin123' }),
+    body: JSON.stringify({ username, password }),
   });
   if (!loginRes.ok) {
     throw new Error(`Login failed: ${loginRes.status} ${await loginRes.text()}`);

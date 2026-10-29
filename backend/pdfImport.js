@@ -5,9 +5,11 @@
  * Extracts diagrams from PDF pages when AI identifies them.
  */
 import { PDFParse } from 'pdf-parse';
+import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { GoogleGenAI, createUserContent } from '@google/genai';
 import { jsonrepair } from 'jsonrepair';
 import pool from './db.js';
+import { cleanupStaleUnreferencedUploads, insertImageUpload } from './storageLimits.js';
 import { parseAnswerToNumber, parseAndValidateAnswer } from './answerUtils.js';
 
 // Lazy-load pdfRender (requires canvas native module); diagram extraction is optional
@@ -25,6 +27,24 @@ async function getRenderPdfPageToPng() {
 
 const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
+export const MAX_PDF_PAGES = 60;
+const MAX_IMAGE_REFINEMENT_PAGES = 10;
+
+export async function assertPdfPageLimit(pdfBuffer) {
+  const loadingTask = getDocument({ data: new Uint8Array(pdfBuffer) });
+  let pdf;
+  try {
+    pdf = await loadingTask.promise;
+    if (pdf.numPages > MAX_PDF_PAGES) {
+      const error = new Error(`PDF contains ${pdf.numPages} pages; the limit is ${MAX_PDF_PAGES} pages`);
+      error.status = 413;
+      throw error;
+    }
+  } finally {
+    if (pdf) await pdf.destroy().catch(() => {});
+    else await loadingTask.destroy().catch(() => {});
+  }
+}
 
 /**
  * Parse optional answer key text. Format: "1. 42" or "1) 3/4" or "1: 90000" (one per line).
@@ -158,7 +178,14 @@ async function refineRegionsForImageMode(pdfBuffer, processedList, renderFn) {
     if (!byPage.has(page)) byPage.set(page, []);
     byPage.get(page).push(p);
   }
+  let refinedPages = 0;
   for (const [pageNum, problems] of byPage) {
+    if (refinedPages >= MAX_IMAGE_REFINEMENT_PAGES) {
+      // Keep the initial AI regions for remaining pages. If one is missing,
+      // renderProblemScreenshot naturally falls back to the full page.
+      continue;
+    }
+    refinedPages++;
     const nums = problems.map((p) => p.number).sort((a, b) => a - b);
     try {
       const pngBuffer = await renderFn(pdfBuffer, pageNum, null, 2, 0);
@@ -500,6 +527,7 @@ function processProblemNoAI(problem, answerFromKey) {
  * Extract problems for image mode (no DB save). Returns processed list for review flow.
  */
 export async function processPdfForImageMode(pdfBuffer, answerMap, allowedTagNames) {
+  await assertPdfPageLimit(pdfBuffer);
   const { folderName, results: processedList, errors: batchErrors } = await processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames, { useImageMode: true });
   const renderFn = await getRenderPdfPageToPng();
   if (renderFn && processedList.length > 0) await refineRegionsForImageMode(pdfBuffer, processedList, renderFn);
@@ -515,11 +543,13 @@ export async function processPdfForImageMode(pdfBuffer, answerMap, allowedTagNam
  * @param {object} opts - { useImageMode: boolean, runVerification: boolean }
  */
 export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI = true, createdBy = null, opts = {}) {
+  await assertPdfPageLimit(pdfBuffer);
   const useImageMode = opts.useImageMode === true;
   const runVerification = opts.runVerification !== false;
   const errors = [];
   const answerMap = parseAnswerKey(answerKeyText);
 
+  await cleanupStaleUnreferencedUploads(pool);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -581,24 +611,30 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
               const cropPad = processed.hasDiagram ? 0.08 : 0.04;
               const pngBuffer = await renderFn(pdfBuffer, processed.problemPage, region, 2, cropPad);
               const base64 = pngBuffer.toString('base64');
-              const uploadRes = await client.query(
-                'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
-                [base64, `problem-${processed.number}.png`, 'image/png', createdBy]
-              );
+              const uploadRes = await insertImageUpload(client, {
+                data: base64,
+                filename: `problem-${processed.number}.png`,
+                contentType: 'image/png',
+                createdBy,
+              });
               imageUrl = '/uploads/db/' + uploadRes.rows[0].id;
             } catch (renderErr) {
+              if (renderErr.status === 413) throw renderErr;
               console.warn('Problem image extraction failed for problem', processed.number, renderErr.message);
             }
           } else if (!useImageMode && processed.hasDiagram && processed.diagramPage) {
             try {
               const pngBuffer = await renderFn(pdfBuffer, processed.diagramPage, processed.diagramRegion);
               const base64 = pngBuffer.toString('base64');
-              const uploadRes = await client.query(
-                'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
-                [base64, `problem-${processed.number}-diagram.png`, 'image/png', createdBy]
-              );
+              const uploadRes = await insertImageUpload(client, {
+                data: base64,
+                filename: `problem-${processed.number}-diagram.png`,
+                contentType: 'image/png',
+                createdBy,
+              });
               imageUrl = '/uploads/db/' + uploadRes.rows[0].id;
             } catch (renderErr) {
+              if (renderErr.status === 413) throw renderErr;
               console.warn('Diagram extraction failed for problem', processed.number, renderErr.message);
             }
           }

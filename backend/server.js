@@ -3,16 +3,132 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
+import { isIP } from 'net';
+import { randomBytes } from 'crypto';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import pool, { initDatabase, seedDatabase } from './db.js';
+import { cleanupStaleUnreferencedUploads, deleteUnreferencedImageUploads, insertImageUpload } from './storageLimits.js';
 import { parseAndValidateAnswer, parseAnswerToNumber, compareAnswers } from './answerUtils.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const frontendDistDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../frontend/dist');
+if (process.env.TRUST_PROXY != null && process.env.TRUST_PROXY.trim() !== '') {
+  const proxyHops = Number(process.env.TRUST_PROXY);
+  if (!Number.isSafeInteger(proxyHops) || proxyHops < 0 || proxyHops > 10) {
+    throw new Error('TRUST_PROXY must be an integer hop count from 0 to 10');
+  }
+  app.set('trust proxy', proxyHops);
+}
+
+function fixedWindowRateLimit({ limit, windowMs, keyForRequest }) {
+  const buckets = new Map();
+  const maxBuckets = 10000;
+  return (req, res, next) => {
+    const now = Date.now();
+    for (const [key, bucket] of buckets) {
+      if (now - bucket.startedAt >= windowMs) buckets.delete(key);
+    }
+    const key = keyForRequest(req);
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      if (buckets.size >= maxBuckets) {
+        res.setHeader('Retry-After', String(Math.ceil(windowMs / 1000)));
+        return res.status(429).json({ error: 'Rate limit temporarily unavailable; retry later' });
+      }
+      bucket = { startedAt: now, count: 0 };
+      buckets.set(key, bucket);
+    }
+    bucket.count++;
+    if (bucket.count > limit) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.startedAt + windowMs - now) / 1000))));
+      return res.status(429).json({ error: 'Too many requests; try again later' });
+    }
+    next();
+  };
+}
+
+const clientIpHeader = process.env.CLIENT_IP_HEADER?.trim().toLowerCase();
+const ipForRequest = (req) => {
+  if (clientIpHeader === 'cf-connecting-ip') {
+    const forwardedIp = req.get('cf-connecting-ip')?.trim();
+    if (forwardedIp && isIP(forwardedIp)) return forwardedIp;
+    return 'invalid-cloudflare-connecting-ip';
+  }
+  return req.ip || req.socket.remoteAddress || 'unknown';
+};
+const signupLimiter = fixedWindowRateLimit({ limit: 5, windowMs: 15 * 60 * 1000, keyForRequest: (req) => ipForRequest(req) });
+const loginLimiter = fixedWindowRateLimit({ limit: 20, windowMs: 15 * 60 * 1000, keyForRequest: (req) => ipForRequest(req) });
+const PDF_IMPORT_GLOBAL_LIMIT = 12;
+const PDF_IMPORT_GLOBAL_WINDOW_MS = 60 * 60 * 1000;
+async function pdfImportGlobalLimiter(req, res, next) {
+  try {
+    const result = await pool.query(
+      `WITH observed AS (SELECT clock_timestamp() AS at)
+       INSERT INTO api_rate_limit_buckets AS bucket (bucket_key, window_started_at, request_count)
+       SELECT 'pdf-import-global', observed.at, 1 FROM observed
+       ON CONFLICT (bucket_key) DO UPDATE SET
+         window_started_at = CASE
+           WHEN bucket.window_started_at <= EXCLUDED.window_started_at - INTERVAL '1 hour'
+           THEN EXCLUDED.window_started_at ELSE bucket.window_started_at END,
+         request_count = CASE
+           WHEN bucket.window_started_at <= EXCLUDED.window_started_at - INTERVAL '1 hour'
+           THEN 1 ELSE LEAST(bucket.request_count + 1, $1 + 1) END
+       RETURNING request_count, window_started_at`,
+      [PDF_IMPORT_GLOBAL_LIMIT]
+    );
+    if (result.rowCount !== 1) throw new Error('Global PDF request counter did not return its shared bucket');
+    const bucket = result.rows[0];
+    if (Number(bucket.request_count) > PDF_IMPORT_GLOBAL_LIMIT) {
+      const retryMs = new Date(bucket.window_started_at).getTime() + PDF_IMPORT_GLOBAL_WINDOW_MS - Date.now();
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil(retryMs / 1000))));
+      return res.status(429).json({ error: 'Global PDF import limit reached; try again later' });
+    }
+    next();
+  } catch (error) {
+    console.error('Global PDF request counter failed:', error);
+    return res.status(503).json({ error: 'PDF import is temporarily unavailable' });
+  }
+}
+const pdfImportLimiter = fixedWindowRateLimit({
+  limit: 3,
+  windowMs: 60 * 60 * 1000,
+  keyForRequest: (req) => `user:${req.user.id}`,
+});
+
+let activePdfRequests = 0;
+const MAX_CONCURRENT_PDF_REQUESTS = 2;
+function pdfImportConcurrencyLimit(req, res, next) {
+  if (activePdfRequests >= MAX_CONCURRENT_PDF_REQUESTS) {
+    res.setHeader('Retry-After', '30');
+    return res.status(429).json({ error: 'PDF import is busy; try again shortly' });
+  }
+  activePdfRequests++;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    activePdfRequests = Math.max(0, activePdfRequests - 1);
+  };
+  res.once('finish', release);
+  res.once('close', release);
+  next();
+}
+
+function validateJwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  const normalizedSecret = secret?.trim().toLowerCase() || '';
+  const isPlaceholder = ['secret', 'changeme', 'change-me', 'your-secret', 'your_jwt_secret', 'dev-secret', 'replace-with', 'placeholder', 'example']
+    .some((marker) => normalizedSecret === marker || normalizedSecret.includes(marker));
+  if (!secret || secret.length < 32 || isPlaceholder) {
+    throw new Error('JWT_SECRET must be a non-placeholder secret of at least 32 characters. Generate one with: openssl rand -base64 48');
+  }
+}
 
 // Uploads directory: use UPLOADS_DIR for persistent storage (e.g. Render disk at /var/data/uploads)
 const uploadsDir = process.env.UPLOADS_DIR
@@ -28,8 +144,8 @@ const upload = multer({
   storage: memoryStorage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (req, file, cb) => {
-    const allowed = /image\/(jpeg|jpg|png|gif|webp)/;
-    if (allowed.test(file.mimetype)) cb(null, true);
+    const allowed = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+    if (allowed.has(file.mimetype)) cb(null, true);
     else cb(new Error('Only images (JPEG, PNG, GIF, WebP) are allowed'));
   }
 });
@@ -44,9 +160,50 @@ const uploadPdf = multer({
 });
 
 // Middleware
-app.use(cors());
+const defaultDevOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+const configuredOrigins = (process.env.CORS_ORIGINS || (process.env.NODE_ENV === 'production' ? '' : defaultDevOrigins.join(',')))
+  .split(',').map((origin) => origin.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || configuredOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false);
+  }
+}));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
 app.use(express.json());
-app.use('/uploads', express.static(uploadsDir));
+
+function hasValidImageSignature(buffer, mimeType) {
+  if (!Buffer.isBuffer(buffer)) return false;
+  switch (mimeType) {
+    case 'image/jpeg':
+      return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    case 'image/png':
+      return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    case 'image/gif':
+      return buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.toString('ascii', 0, 6));
+    case 'image/webp':
+      return buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
+    default:
+      return false;
+  }
+}
+
+function hasValidPdfSignature(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.length >= 5 && buffer.toString('ascii', 0, 5) === '%PDF-';
+}
+
+function requireValidPdfUpload(req, res, next) {
+  if (!req.file || !req.file.buffer) {
+    return res.status(400).json({ error: 'No PDF file provided' });
+  }
+  if (!hasValidPdfSignature(req.file.buffer)) {
+    return res.status(400).json({ error: 'PDF content does not match its declared file type' });
+  }
+  next();
+}
 
 // Auth middleware
 const authenticateToken = (req, res, next) => {
@@ -55,20 +212,38 @@ const authenticateToken = (req, res, next) => {
   
   if (!token) return res.status(401).json({ error: 'Access denied' });
   
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET, async (err, claims) => {
     if (err) return res.status(403).json({ error: 'Invalid token' });
-    req.user = user;
-    next();
+    try {
+      const result = await pool.query(
+        'SELECT id, username, role, teacher_id FROM users WHERE id = $1',
+        [claims.id]
+      );
+      const currentUser = result.rows[0];
+      if (!currentUser) return res.status(401).json({ error: 'Account no longer exists' });
+      req.user = currentUser;
+      next();
+    } catch (queryError) {
+      console.error('Authentication account lookup failed:', queryError.message);
+      res.status(503).json({ error: 'Authentication service unavailable' });
+    }
   });
 };
 
-async function attachFolderAndTags(problem) {
+function requireContentManager(req, res, next) {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'teacher') {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  next();
+}
+
+async function attachFolderAndTags(problem, db = pool) {
   const [folderRow, tagRows] = await Promise.all([
-    problem.folder_id ? pool.query('SELECT name FROM folders WHERE id = $1', [problem.folder_id]) : Promise.resolve({ rows: [] }),
-    pool.query('SELECT tag_id FROM problem_tags WHERE problem_id = $1', [problem.id])
+    problem.folder_id ? db.query('SELECT name FROM folders WHERE id = $1', [problem.folder_id]) : Promise.resolve({ rows: [] }),
+    db.query('SELECT tag_id FROM problem_tags WHERE problem_id = $1', [problem.id])
   ]);
   const tagIds = tagRows.rows.map(r => r.tag_id);
-  const tagNames = tagIds.length ? (await pool.query('SELECT id, name FROM tags WHERE id = ANY($1)', [tagIds])).rows : [];
+  const tagNames = tagIds.length ? (await db.query('SELECT id, name FROM tags WHERE id = ANY($1)', [tagIds])).rows : [];
   const tagMap = Object.fromEntries(tagNames.map(t => [t.id, t.name]));
   return {
     ...problem,
@@ -91,20 +266,39 @@ function getKFactor(baseK, attempts) {
 
 // Routes
 
-// Teacher signup
-app.post('/api/signup', async (req, res) => {
+app.get('/api/health', async (_req, res) => {
   try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'ok' });
+  } catch (_error) {
+    res.status(503).json({ status: 'unavailable' });
+  }
+});
+
+// Teacher signup
+app.post('/api/signup', signupLimiter, async (req, res) => {
+  try {
+    if (process.env.ENABLE_TEACHER_SIGNUP === 'false') {
+      return res.status(403).json({ error: 'Teacher self-signup is disabled' });
+    }
     const { username, password } = req.body;
-    if (!username || !password) {
+    if (typeof username !== 'string' || typeof password !== 'string') {
       return res.status(400).json({ error: 'Username and password required' });
     }
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    const normalizedUsername = username.trim();
+    if (normalizedUsername.length < 3 || normalizedUsername.length > 50) {
+      return res.status(400).json({ error: 'Username must be between 3 and 50 characters' });
+    }
+    if (Array.from(password).length < 12) {
+      return res.status(400).json({ error: 'Password must be at least 12 characters' });
+    }
+    if (Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(400).json({ error: 'Password must be at most 72 UTF-8 bytes' });
     }
     const passwordHash = await bcrypt.hash(password, 10);
     const result = await pool.query(
       'INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, elo',
-      [username.trim(), passwordHash, 'teacher']
+      [normalizedUsername, passwordHash, 'teacher']
     );
     const user = result.rows[0];
     const token = jwt.sign(
@@ -131,9 +325,12 @@ app.post('/api/signup', async (req, res) => {
 });
 
 // Login
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
+    if (typeof username !== 'string' || typeof password !== 'string' || Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
     
     const result = await pool.query(
       'SELECT * FROM users WHERE username = $1',
@@ -215,22 +412,15 @@ function folderReadWhere(user) {
 }
 function folderWriteWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
+  if (user.role === 'teacher') return { sql: 'created_by = $1', params: [user.id] };
   return { sql: '1=0', params: [] };
 }
 
-// Folders (admin: all CRUD; teacher: CRUD for own + public)
+// Folders (admin: all CRUD; teacher: read public + own, write own only)
 app.get('/api/folders', authenticateToken, async (req, res) => {
   try {
-    let result;
-    try {
-      const { sql, params } = folderReadWhere(req.user);
-      result = await pool.query(`SELECT * FROM folders WHERE ${sql} ORDER BY name`, params);
-    } catch (colErr) {
-      if (colErr.message && /created_by|does not exist/i.test(colErr.message)) {
-        result = await pool.query('SELECT * FROM folders ORDER BY name');
-      } else throw colErr;
-    }
+    const { sql, params } = folderReadWhere(req.user);
+    const result = await pool.query(`SELECT * FROM folders WHERE ${sql} ORDER BY name`, params);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -264,7 +454,7 @@ app.put('/api/folders/:id', authenticateToken, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
   try {
-    const { sql, params } = folderReadWhere(req.user);
+    const { sql, params } = folderWriteWhere(req.user);
     const sqlBump = params.length ? sql.replace(/\$1/g, '$3') : sql;
     const result = await pool.query(
       `UPDATE folders SET name = $1 WHERE id = $2 AND ${sqlBump} RETURNING *`,
@@ -284,9 +474,32 @@ app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
   try {
     const { sql, params } = folderWriteWhere(req.user);
     const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
-    await pool.query('UPDATE problems SET folder_id = NULL WHERE folder_id = $1', [id]);
-    const del = await pool.query(`DELETE FROM folders WHERE id = $1 AND ${sqlBump} RETURNING id`, [id, ...params]);
-    if (del.rowCount === 0) return res.status(404).json({ error: 'Folder not found' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const authorized = await client.query(`SELECT id FROM folders WHERE id = $1 AND ${sqlBump} FOR UPDATE`, [id, ...params]);
+      if (authorized.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Folder not found' });
+      }
+      if (req.user.role === 'admin') {
+        await client.query('UPDATE problems SET folder_id = NULL WHERE folder_id = $1', [id]);
+      } else {
+        await client.query('UPDATE problems SET folder_id = NULL WHERE folder_id = $1 AND created_by = $2', [id, req.user.id]);
+        const remaining = await client.query('SELECT 1 FROM problems WHERE folder_id = $1 LIMIT 1', [id]);
+        if (remaining.rowCount > 0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: 'Folder is still used by problems you cannot modify' });
+        }
+      }
+      await client.query(`DELETE FROM folders WHERE id = $1 AND ${sqlBump}`, [id, ...params]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Server error' });
@@ -296,10 +509,32 @@ app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
 // Import session storage for image-mode review flow (TTL 20 min)
 const importSessions = new Map();
 const IMPORT_SESSION_TTL = 20 * 60 * 1000;
+const MAX_IMPORT_SESSIONS = 5;
+const MAX_GEMINI_RETRIES_PER_SESSION = 3;
+let importStartReservations = 0;
+async function cleanupImportSessionImages(session) {
+  const imageUrls = session?.processedList?.map((problem) => problem.confirmedImageUrl).filter(Boolean) || [];
+  if (!imageUrls.length) return;
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await deleteUnreferencedImageUploads(client, imageUrls, session.createdBy);
+    await client.query('COMMIT');
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    console.warn('Could not clean up abandoned PDF review images:', error.message);
+  } finally {
+    client?.release();
+  }
+}
 function pruneImportSessions() {
   const now = Date.now();
   for (const [id, s] of importSessions) {
-    if (now - s.createdAt > IMPORT_SESSION_TTL) importSessions.delete(id);
+    if (!s.busy && now - s.createdAt > IMPORT_SESSION_TTL) {
+      importSessions.delete(id);
+      void cleanupImportSessionImages(s);
+    }
   }
 }
 setInterval(pruneImportSessions, 60000);
@@ -308,12 +543,9 @@ setInterval(pruneImportSessions, 60000);
 app.get('/api/import-pdf', (_req, res) => {
   res.status(405).json({ error: 'Use POST to import a PDF', ok: true });
 });
-app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (req, res) => {
+app.post('/api/import-pdf', authenticateToken, requireContentManager, pdfImportConcurrencyLimit, pdfImportLimiter, uploadPdf.single('pdf'), requireValidPdfUpload, pdfImportGlobalLimiter, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Access denied' });
-  }
-  if (!req.file || !req.file.buffer) {
-    return res.status(400).json({ error: 'No PDF file provided' });
   }
   const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
   const useAI = req.user.role === 'teacher' ? true : (req.body.useAI !== 'false' && req.body.useAI !== false);
@@ -337,22 +569,25 @@ app.post('/api/import-pdf', authenticateToken, uploadPdf.single('pdf'), async (r
     });
   } catch (error) {
     console.error('PDF import error:', error);
-    res.status(400).json({ error: error.message || 'Import failed' });
+    res.status(error.status || 400).json({ error: error.message || 'Import failed' });
   }
 });
 
-app.post('/api/import-pdf/start', authenticateToken, uploadPdf.single('pdf'), async (req, res) => {
+app.post('/api/import-pdf/start', authenticateToken, requireContentManager, pdfImportConcurrencyLimit, pdfImportLimiter, uploadPdf.single('pdf'), requireValidPdfUpload, pdfImportGlobalLimiter, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Access denied' });
-  }
-  if (!req.file || !req.file.buffer) {
-    return res.status(400).json({ error: 'No PDF file provided' });
   }
   const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
   if (!answerKey.trim()) {
     return res.status(400).json({ error: 'Answer key is required for image mode import' });
   }
   const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  pruneImportSessions();
+  if (importSessions.size + importStartReservations >= MAX_IMPORT_SESSIONS) {
+    return res.status(429).json({ error: 'Too many active PDF review sessions; try again later' });
+  }
+  importStartReservations++;
+  let importId;
   try {
     const { processPdfForImageMode, renderProblemScreenshot, parseAnswerKey, ensureTags } = await import('./pdfImport.js');
     const answerMap = parseAnswerKey(answerKey);
@@ -364,9 +599,10 @@ app.post('/api/import-pdf/start', authenticateToken, uploadPdf.single('pdf'), as
     if (processedList.length === 0) {
       return res.status(400).json({ error: 'No problems extracted from PDF' });
     }
-    const importId = `img-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    importId = randomBytes(24).toString('hex');
     importSessions.set(importId, {
       pdfBuffer: req.file.buffer,
+      ownerUserId: req.user.id,
       processedList,
       folderName,
       errors: batchErrors,
@@ -376,6 +612,7 @@ app.post('/api/import-pdf/start', authenticateToken, uploadPdf.single('pdf'), as
       createdBy,
       currentIndex: 0,
       retryCount: 0,
+      retryAttemptsTotal: 0,
       createdAt: Date.now(),
     });
     const screenshot = await renderProblemScreenshot(req.file.buffer, processedList[0]);
@@ -390,8 +627,11 @@ app.post('/api/import-pdf/start', authenticateToken, uploadPdf.single('pdf'), as
       reviewVersion: 0,
     });
   } catch (error) {
+    if (importId) importSessions.delete(importId);
     console.error('PDF import start error:', error);
-    res.status(400).json({ error: error.message || 'Import failed' });
+    res.status(error.status || 400).json({ error: error.message || 'Import failed' });
+  } finally {
+    importStartReservations--;
   }
 });
 
@@ -408,10 +648,16 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
   if (!session) {
     return res.status(404).json({ error: 'Import session expired or not found' });
   }
+  if (session.ownerUserId !== req.user.id) {
+    return res.status(403).json({ error: 'This import session belongs to another user' });
+  }
+  if (session.busy) return res.status(409).json({ error: 'This import session is already processing a confirmation' });
+  session.busy = true;
   const { pdfBuffer, processedList, folderName, tagMap, allowedTagNames, defaultTag, createdBy } = session;
   const idx = session.currentIndex;
   const processed = processedList[idx];
   if (!processed) {
+    session.busy = false;
     return res.status(400).json({ error: 'Invalid problem index' });
   }
 
@@ -422,15 +668,28 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
       session.retryCount = 0;
       const base64 = await renderProblemScreenshot(pdfBuffer, processed);
       if (base64) {
-        const uploadRes = await pool.query(
-          'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
-          [base64, `problem-${processed.number}.png`, 'image/png', createdBy]
-        );
+        await cleanupStaleUnreferencedUploads(pool);
+        const uploadClient = await pool.connect();
+        let uploadRes;
+        try {
+          await uploadClient.query('BEGIN');
+          uploadRes = await insertImageUpload(uploadClient, {
+            data: base64,
+            filename: `problem-${processed.number}.png`,
+            contentType: 'image/png',
+            createdBy,
+          });
+          await uploadClient.query('COMMIT');
+        } catch (error) {
+          await uploadClient.query('ROLLBACK').catch(() => {});
+          throw error;
+        } finally {
+          uploadClient.release();
+        }
         processed.confirmedImageUrl = '/uploads/db/' + uploadRes.rows[0].id;
       }
       session.currentIndex = idx + 1;
       if (session.currentIndex >= processedList.length) {
-        importSessions.delete(importId);
         const client = await pool.connect();
         try {
           await client.query('BEGIN');
@@ -455,6 +714,7 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
             imported++;
           }
           await client.query('COMMIT');
+          importSessions.delete(importId);
           return res.json({ success: true, done: true, imported, folderId, folderName, errors: session.errors });
         } catch (err) {
           await client.query('ROLLBACK');
@@ -474,7 +734,11 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
         reviewVersion: 0,
       });
     } else {
+      if ((session.retryAttemptsTotal || 0) >= MAX_GEMINI_RETRIES_PER_SESSION) {
+        return res.status(429).json({ error: `Retry limit reached for this PDF review session (${MAX_GEMINI_RETRIES_PER_SESSION})` });
+      }
       session.retryCount = (session.retryCount || 0) + 1;
+      session.retryAttemptsTotal = (session.retryAttemptsTotal || 0) + 1;
       const ok = await retryRegionForProblem(pdfBuffer, processed, session.retryCount, dir);
       const screenshot = await renderProblemScreenshot(pdfBuffer, processed);
       session.reviewVersion = (session.reviewVersion || 0) + 1;
@@ -489,8 +753,14 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
       });
     }
   } catch (error) {
+    if (session.currentIndex >= processedList.length) {
+      importSessions.delete(importId);
+      void cleanupImportSessionImages(session);
+    }
     console.error('PDF import confirm error:', error);
-    res.status(400).json({ error: error.message || 'Confirm failed' });
+    res.status(error.status || 400).json({ error: error.message || 'Confirm failed' });
+  } finally {
+    session.busy = false;
   }
 });
 
@@ -502,29 +772,14 @@ function tagReadWhere(user) {
 }
 function tagWriteWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
+  if (user.role === 'teacher') return { sql: 'created_by = $1', params: [user.id] };
   return { sql: '1=0', params: [] };
 }
 
 app.get('/api/tags', authenticateToken, async (req, res) => {
   try {
-    let result;
-    try {
-      if (req.user.role === 'teacher') {
-        const systemNames = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
-        result = await pool.query(
-          'SELECT * FROM tags WHERE name = ANY($1::text[]) ORDER BY name',
-          [systemNames]
-        );
-      } else {
-        const { sql, params } = tagReadWhere(req.user);
-        result = await pool.query(`SELECT * FROM tags WHERE ${sql} ORDER BY name`, params);
-      }
-    } catch (colErr) {
-      if (colErr.message && /created_by|is_system|does not exist/i.test(colErr.message)) {
-        result = await pool.query('SELECT * FROM tags ORDER BY name');
-      } else throw colErr;
-    }
+    const { sql, params } = tagReadWhere(req.user);
+    const result = await pool.query(`SELECT * FROM tags WHERE ${sql} ORDER BY name`, params);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -565,33 +820,57 @@ function problemReadWhere(user) {
 }
 function problemWriteWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
+  if (user.role === 'teacher') return { sql: 'created_by = $1', params: [user.id] };
   return { sql: '1=0', params: [] };
+}
+
+function validationError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+async function validateProblemFolder(client, user, rawFolderId) {
+  if (rawFolderId == null) return null;
+  const folderId = typeof rawFolderId === 'number' ? rawFolderId : /^\d+$/.test(rawFolderId) ? Number(rawFolderId) : NaN;
+  if (!Number.isSafeInteger(folderId) || folderId < 1 || folderId > 2147483647) {
+    throw validationError(400, 'folder_id must be a positive integer or null');
+  }
+  const { sql, params } = folderReadWhere(user);
+  const scopedSql = params.length ? sql.replace(/\$1/g, '$2') : sql;
+  const result = await client.query(`SELECT id FROM folders WHERE id = $1 AND ${scopedSql}`, [folderId, ...params]);
+  if (result.rowCount === 0) throw validationError(404, 'Folder not found or unavailable');
+  return folderId;
+}
+
+async function validateProblemTags(client, user, rawTagIds) {
+  if (rawTagIds == null) return [];
+  if (!Array.isArray(rawTagIds) || rawTagIds.length > 100) {
+    throw validationError(400, 'tag_ids must be an array containing at most 100 tag ids');
+  }
+  const tagIds = rawTagIds.map((id) => typeof id === 'number' ? id : (typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : NaN));
+  if (!tagIds.every((id) => Number.isSafeInteger(id) && id > 0 && id <= 2147483647) || new Set(tagIds).size !== tagIds.length) {
+    throw validationError(400, 'tag_ids must contain unique positive integer ids');
+  }
+  if (tagIds.length === 0) return [];
+  const { sql, params } = tagReadWhere(user);
+  const scopedSql = params.length ? sql.replace(/\$1/g, '$2') : sql;
+  const result = await client.query(`SELECT id FROM tags WHERE id = ANY($1::int[]) AND ${scopedSql}`, [tagIds, ...params]);
+  if (result.rowCount !== tagIds.length) throw validationError(400, 'One or more tags are unavailable');
+  return tagIds;
 }
 
 // Get all problems (with folder and tags)
 app.get('/api/problems', authenticateToken, async (req, res) => {
   try {
-    let result;
-    try {
-      const { sql, params } = problemReadWhere(req.user);
-      result = await pool.query(`
+    const { sql, params } = problemReadWhere(req.user);
+    const result = await pool.query(`
         SELECT p.*, f.name as folder_name
         FROM problems p
         LEFT JOIN folders f ON p.folder_id = f.id
         WHERE ${sql}
         ORDER BY COALESCE(f.name, 'zzz'), p.id
       `, params);
-    } catch (colErr) {
-      if (colErr.message && /created_by|does not exist/i.test(colErr.message)) {
-        result = await pool.query(`
-          SELECT p.*, f.name as folder_name
-          FROM problems p
-          LEFT JOIN folders f ON p.folder_id = f.id
-          ORDER BY COALESCE(f.name, 'zzz'), p.id
-        `);
-      } else throw colErr;
-    }
     const tagResult = await pool.query('SELECT problem_id, tag_id FROM problem_tags');
     const tagsByProblem = {};
     for (const row of tagResult.rows) {
@@ -612,27 +891,35 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
 });
 
 // Upload image (admin + teacher)
-app.post('/api/upload', authenticateToken, upload.single('image'), async (req, res) => {
+app.post('/api/upload', authenticateToken, requireContentManager, upload.single('image'), async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Access denied' });
   }
   if (!req.file || !req.file.buffer) {
     return res.status(400).json({ error: 'No image file provided' });
   }
+  if (!hasValidImageSignature(req.file.buffer, req.file.mimetype)) {
+    return res.status(400).json({ error: 'Image content does not match its declared file type' });
+  }
   const dataBase64 = req.file.buffer.toString('base64');
   const contentType = req.file.mimetype || 'image/png';
   const filename = req.file.originalname || `problem-${Date.now()}.png`;
   const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  let client;
   try {
-    const result = await pool.query(
-      'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
-      [dataBase64, filename, contentType, createdBy]
-    );
+    await cleanupStaleUnreferencedUploads(pool);
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const result = await insertImageUpload(client, { data: dataBase64, filename, contentType, createdBy });
+    await client.query('COMMIT');
     const id = result.rows[0].id;
     res.json({ url: '/uploads/db/' + id });
   } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Upload save error:', err);
-    res.status(500).json({ error: 'Failed to save image' });
+    res.status(err.status || 500).json({ error: err.status ? err.message : 'Failed to save image' });
+  } finally {
+    client?.release();
   }
 });
 
@@ -656,7 +943,8 @@ app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
       return res.status(403).send('Forbidden');
     }
     const buf = Buffer.from(row.data, 'base64');
-    res.setHeader('Content-Type', row.content_type || 'image/png');
+    if (!hasValidImageSignature(buf, row.content_type)) return res.status(415).send('Unsupported media type');
+    res.setHeader('Content-Type', row.content_type);
     res.send(buf);
   } catch (err) {
     console.error('Upload serve error:', err);
@@ -691,26 +979,32 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, or "Saturday", "(-1,-3)" for strings/ordered pairs)' });
   }
   const answerStored = typeof answer === 'string' && answer.trim() ? answer.trim() : (typeof answerVal === 'number' ? String(answerVal) : answerVal);
+  const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  const sourceStr = typeof source === 'string' ? source.trim() || null : null;
+  let problem;
+  let client;
   try {
-    const createdBy = req.user.role === 'admin' ? null : req.user.id;
-    const sourceStr = typeof source === 'string' ? source.trim() || null : null;
-    const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
-    const result = await pool.query(
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const fid = await validateProblemFolder(client, req.user, folderId);
+    const validTagIds = await validateProblemTags(client, req.user, tagIds);
+    const result = await client.query(
       'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
       [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy]
     );
-    const problem = result.rows[0];
-    if (Array.isArray(tagIds) && tagIds.length > 0) {
-      const validIds = tagIds.filter(id => Number.isInteger(Number(id))).map(id => Number(id));
-      for (const tid of validIds) {
-        await pool.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT (problem_id, tag_id) DO NOTHING', [problem.id, tid]);
-      }
+    problem = result.rows[0];
+    for (const tid of validTagIds) {
+      await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2)', [problem.id, tid]);
     }
-    const withMeta = await attachFolderAndTags(problem);
+    const withMeta = await attachFolderAndTags(problem, client);
+    await client.query('COMMIT');
     res.json(withMeta);
   } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Create problem error:', error);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Server error' });
+  } finally {
+    client?.release();
   }
 });
 
@@ -727,18 +1021,25 @@ app.put('/api/problems/bulk-move', authenticateToken, async (req, res) => {
   if (validIds.length === 0) {
     return res.status(400).json({ error: 'No valid problem ids' });
   }
-  const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
+  let client;
   try {
-    const { sql, params } = problemReadWhere(req.user);
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const fid = await validateProblemFolder(client, req.user, folderId);
+    const { sql, params } = problemWriteWhere(req.user);
     const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$3' : '$1');
-    const result = await pool.query(
+    const result = await client.query(
       `UPDATE problems SET folder_id = $1 WHERE id = ANY($2) AND ${problemCond} RETURNING id`,
       [fid, validIds, ...params]
     );
+    await client.query('COMMIT');
     res.json({ updated: result.rowCount });
   } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Bulk move error:', error);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Server error' });
+  } finally {
+    client?.release();
   }
 });
 
@@ -755,21 +1056,26 @@ app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
   if (validIds.length === 0) {
     return res.status(400).json({ error: 'No valid problem ids' });
   }
-  const { sql, params } = problemWriteWhere(req.user);
-  const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    for (const id of validIds) {
-      await client.query(
-        'UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids)',
-        [id]
-      );
-    }
+    const { sql, params } = problemWriteWhere(req.user);
+    const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
     const del = await client.query(
-      `DELETE FROM problems WHERE id = ANY($1) AND ${sqlBump} RETURNING id`,
+      `DELETE FROM problems WHERE id = ANY($1) AND ${sqlBump} RETURNING id, image_url`,
       [validIds, ...params]
     );
+    for (const { id } of del.rows) {
+      if (req.user.role === 'teacher') {
+        await client.query(
+          'UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids) AND created_by = $2',
+          [id, req.user.id]
+        );
+      } else {
+        await client.query('UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids)', [id]);
+      }
+    }
+    await deleteUnreferencedImageUploads(client, del.rows.map((row) => row.image_url), req.user.role === 'teacher' ? req.user.id : null);
     await client.query('COMMIT');
     res.json({ deleted: del.rowCount });
   } catch (error) {
@@ -781,7 +1087,7 @@ app.delete('/api/problems/bulk', authenticateToken, async (req, res) => {
   }
 });
 
-// Update problem (admin + teacher, own/public only)
+// Update problem (admin all; teacher own only)
 app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Access denied' });
@@ -795,29 +1101,37 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, or "Saturday", "(-1,-3)" for strings/ordered pairs)' });
   }
   const answerStored = typeof answer === 'string' && answer.trim() ? answer.trim() : (typeof answerVal === 'number' ? String(answerVal) : answerVal);
+  let client;
   try {
-    const { sql, params } = problemReadWhere(req.user);
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const fid = await validateProblemFolder(client, req.user, folderId);
+    const validTagIds = await validateProblemTags(client, req.user, tagIds);
+    const { sql, params } = problemWriteWhere(req.user);
     const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$8' : '$1');
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
-    const fid = folderId != null ? (Number.isInteger(Number(folderId)) ? Number(folderId) : null) : null;
-    const result = await pool.query(
+    const result = await client.query(
       `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = $6 WHERE id = $7 AND ${problemCond} RETURNING *`,
       [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, req.params.id, ...params]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Problem not found' });
-    const problem = result.rows[0];
-    await pool.query('DELETE FROM problem_tags WHERE problem_id = $1', [problem.id]);
-    if (Array.isArray(tagIds) && tagIds.length > 0) {
-      const validIds = tagIds.filter(id => Number.isInteger(Number(id))).map(id => Number(id));
-      for (const tid of validIds) {
-        await pool.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2)', [problem.id, tid]);
-      }
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Problem not found' });
     }
-    const withMeta = await attachFolderAndTags(problem);
+    const problem = result.rows[0];
+    await client.query('DELETE FROM problem_tags WHERE problem_id = $1', [problem.id]);
+    for (const tid of validTagIds) {
+      await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2)', [problem.id, tid]);
+    }
+    const withMeta = await attachFolderAndTags(problem, client);
+    await client.query('COMMIT');
     res.json(withMeta);
   } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Update problem error:', error);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Server error' });
+  } finally {
+    client?.release();
   }
 });
 
@@ -835,14 +1149,21 @@ app.delete('/api/problems/:id', authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      'UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids)',
-      [id]
-    );
     const del = await client.query(
-      `DELETE FROM problems WHERE id = $1 AND ${sqlBump} RETURNING id`,
+      `DELETE FROM problems WHERE id = $1 AND ${sqlBump} RETURNING id, image_url`,
       [id, ...params]
     );
+    if (del.rowCount > 0) {
+      if (req.user.role === 'teacher') {
+        await client.query(
+          'UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids) AND created_by = $2',
+          [id, req.user.id]
+        );
+      } else {
+        await client.query('UPDATE tests SET problem_ids = array_remove(problem_ids, $1) WHERE $1 = ANY(problem_ids)', [id]);
+      }
+      await deleteUnreferencedImageUploads(client, del.rows.map((row) => row.image_url), req.user.role === 'teacher' ? req.user.id : null);
+    }
     await client.query('COMMIT');
     if (del.rowCount === 0) {
       return res.status(404).json({ error: 'Problem not found' });
@@ -894,10 +1215,43 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
   
   try {
     const { name, problemIds, dueDate, timeLimit, testType } = req.body;
+    if (typeof name !== 'string' || !name.trim() || name.trim().length > 200) {
+      return res.status(400).json({ error: 'Test name is required and must be at most 200 characters' });
+    }
+    const dateMatch = typeof dueDate === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(dueDate) : null;
+    if (dateMatch) {
+      const year = Number(dateMatch[1]);
+      const month = Number(dateMatch[2]);
+      const day = Number(dateMatch[3]);
+      const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+      const daysPerMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      if (year < 1 || month < 1 || month > 12 || day < 1 || day > daysPerMonth[month - 1]) {
+        return res.status(400).json({ error: 'dueDate must be a real date in YYYY-MM-DD format' });
+      }
+    } else {
+      return res.status(400).json({ error: 'dueDate must be a real date in YYYY-MM-DD format' });
+    }
+    const timeLimitMinutes = typeof timeLimit === 'number' ? timeLimit : Number(timeLimit);
+    if (!Number.isInteger(timeLimitMinutes) || timeLimitMinutes < 1 || timeLimitMinutes > 240) {
+      return res.status(400).json({ error: 'timeLimit must be an integer between 1 and 240 minutes' });
+    }
+    if (!Array.isArray(problemIds) || problemIds.length === 0 || problemIds.length > 200) {
+      return res.status(400).json({ error: 'problemIds must contain between 1 and 200 problem ids' });
+    }
+    if (!problemIds.every((id) => Number.isSafeInteger(id) && id > 0 && id <= 2147483647) || new Set(problemIds).size !== problemIds.length) {
+      return res.status(400).json({ error: 'problemIds must be unique positive integer ids' });
+    }
+    const accessible = await pool.query(
+      'SELECT id FROM problems WHERE id = ANY($1::int[]) AND (created_by IS NULL OR created_by = $2)',
+      [problemIds, req.user.id]
+    );
+    if (accessible.rowCount !== problemIds.length) {
+      return res.status(400).json({ error: 'Every problem must be public or owned by you' });
+    }
     const type = testType === 'target' ? 'target' : 'sprint';
     const result = await pool.query(
       'INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [name, problemIds, dueDate, timeLimit, req.user.id, type]
+      [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -1025,20 +1379,30 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
     const test = testResult.rows[0];
     if (!test) return res.status(404).json({ error: 'Test not found' });
     const problemIds = test.problem_ids || [];
-    if (problemIds.length === 0) return res.json([]);
     if (req.user.role === 'student') {
       const studentRow = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
-      if (studentRow.rows[0]?.teacher_id !== test.created_by) {
+      const teacherId = studentRow.rows[0]?.teacher_id;
+      if (teacherId == null || teacherId !== test.created_by) {
         return res.status(403).json({ error: 'Access denied' });
       }
     } else if (req.user.role === 'teacher' && test.created_by !== req.user.id) {
       return res.status(403).json({ error: 'Access denied' });
+    } else if (req.user.role !== 'teacher' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
     }
+    if (problemIds.length === 0) return res.json([]);
+    const visibility = req.user.role === 'admin' ? '' : ' AND (p.created_by IS NULL OR p.created_by = $2)';
+    const queryParams = req.user.role === 'admin' ? [problemIds] : [problemIds, test.created_by];
     const result = await pool.query(
-      'SELECT p.*, f.name as folder_name FROM problems p LEFT JOIN folders f ON p.folder_id = f.id WHERE p.id = ANY($1)',
-      [problemIds]
+      `SELECT p.id, p.question, p.topic, p.image_url, p.source, p.folder_id, f.name AS folder_name
+       FROM problems p LEFT JOIN folders f ON p.folder_id = f.id
+       WHERE p.id = ANY($1)${visibility}`,
+      queryParams
     );
-    const tagResult = await pool.query('SELECT problem_id, tag_id FROM problem_tags WHERE problem_id = ANY($1)', [problemIds]);
+    const visibleProblemIds = result.rows.map((problem) => problem.id);
+    const tagResult = visibleProblemIds.length
+      ? await pool.query('SELECT problem_id, tag_id FROM problem_tags WHERE problem_id = ANY($1)', [visibleProblemIds])
+      : { rows: [] };
     const tagsByProblem = {};
     for (const row of tagResult.rows) {
       if (!tagsByProblem[row.problem_id]) tagsByProblem[row.problem_id] = [];
@@ -1410,9 +1774,21 @@ app.post('/api/students', authenticateToken, async (req, res) => {
   }
 });
 
+// Serve the built React app from the API origin in the one-service production setup.
+if (fs.existsSync(frontendDistDir)) {
+  app.use(express.static(frontendDistDir, { index: false }));
+  app.get('*', (req, res, next) => {
+    if (req.path === '/api' || req.path.startsWith('/api/') || req.path === '/uploads' || req.path.startsWith('/uploads/')) {
+      return next();
+    }
+    res.sendFile(path.join(frontendDistDir, 'index.html'));
+  });
+}
+
 // Initialize database and start server
 async function startServer() {
   try {
+    validateJwtSecret();
     await initDatabase();
     await seedDatabase();
     
