@@ -1,14 +1,65 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { createSecureContext } from 'node:tls';
 import { randomBytes } from 'crypto';
 
 dotenv.config();
 
 const { Pool } = pg;
 
+function configuredDatabaseCa() {
+  const encoded = process.env.DATABASE_SSL_CA_BASE64?.trim();
+  if (!encoded) return undefined;
+  const compact = encoded.replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(compact) || compact.length % 4 === 1) {
+    throw new Error('DATABASE_SSL_CA_BASE64 must contain a base64-encoded PEM CA certificate');
+  }
+  const pem = Buffer.from(compact, 'base64').toString('utf8');
+  const canonicalBase64 = Buffer.from(pem, 'utf8').toString('base64').replace(/=+$/, '');
+  const suppliedBase64 = compact.replace(/=+$/, '');
+  const certBlocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) || [];
+  const outsideCerts = pem.replace(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g, '').trim();
+  if (canonicalBase64 !== suppliedBase64 || certBlocks.length === 0 || outsideCerts) {
+    throw new Error('DATABASE_SSL_CA_BASE64 must contain a valid base64-encoded PEM CA certificate');
+  }
+  try {
+    createSecureContext({ ca: pem });
+  } catch {
+    throw new Error('DATABASE_SSL_CA_BASE64 must contain a valid base64-encoded PEM CA certificate');
+  }
+  return pem;
+}
+
+const databaseCa = configuredDatabaseCa();
+const isProduction = process.env.NODE_ENV === 'production';
+
+function productionDatabaseUrl() {
+  const configuredUrl = process.env.DATABASE_URL;
+  if (!configuredUrl) return configuredUrl;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(configuredUrl);
+  } catch {
+    throw new Error('DATABASE_URL must be a valid PostgreSQL URL in production');
+  }
+  if (parsedUrl.protocol !== 'postgres:' && parsedUrl.protocol !== 'postgresql:') {
+    throw new Error('DATABASE_URL must be a valid PostgreSQL URL in production');
+  }
+  const sslParameters = new Set(['ssl', 'sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'sslpassword']);
+  for (const key of [...parsedUrl.searchParams.keys()]) {
+    if (sslParameters.has(key.toLowerCase())) parsedUrl.searchParams.delete(key);
+  }
+  return parsedUrl.toString();
+}
+
+const databaseUrl = isProduction ? productionDatabaseUrl() : process.env.DATABASE_URL;
+const databaseSsl = isProduction
+  ? { rejectUnauthorized: true, ...(databaseCa ? { ca: databaseCa } : {}) }
+  : false;
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : false
+  connectionString: databaseUrl,
+  ssl: databaseSsl
 });
 
 // Database initialization

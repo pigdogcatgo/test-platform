@@ -13,6 +13,8 @@ services:
         value: cf-connecting-ip
       - key: DATABASE_URL
         sync: false
+      - key: DATABASE_SSL_CA_BASE64
+        sync: false
       - key: JWT_SECRET
         generateValue: true
       - key: BOOTSTRAP_ADMIN_USERNAME
