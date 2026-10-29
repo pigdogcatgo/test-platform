@@ -213,7 +213,7 @@ const authenticateToken = (req, res, next) => {
   if (!token) return res.status(401).json({ error: 'Access denied' });
   
   jwt.verify(token, process.env.JWT_SECRET, async (err, claims) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
+    if (err) return res.status(401).json({ error: 'Invalid or expired token' });
     try {
       const result = await pool.query(
         'SELECT id, username, role, teacher_id FROM users WHERE id = $1',
@@ -377,7 +377,7 @@ app.get('/api/me', authenticateToken, async (req, res) => {
       [req.user.id]
     );
     const user = result.rows[0];
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(401).json({ error: 'Account no longer exists' });
     if (user.role === 'student') {
       const tagElos = await pool.query(
         `SELECT t.name, ste.elo FROM student_tag_elo ste

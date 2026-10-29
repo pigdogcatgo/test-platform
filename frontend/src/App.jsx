@@ -115,7 +115,9 @@ function ProblemImage({ url, token }) {
 const App = () => {
   const [token, setToken] = useState(() => localStorage.getItem('token'));
   const [user, setUser] = useState(null);
-  const [view, setView] = useState('login');
+  const [view, setView] = useState(() => localStorage.getItem('token') ? 'loading' : 'login');
+  const [sessionError, setSessionError] = useState(null);
+  const [dashboardLoadError, setDashboardLoadError] = useState(null);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [signupForm, setSignupForm] = useState({ username: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
@@ -163,6 +165,19 @@ const App = () => {
   const [leaderboardSortBy, setLeaderboardSortBy] = useState('cumulative'); // 'cumulative' | 'elo'
   const [attemptDetails, setAttemptDetails] = useState(null);
 
+  const clearDashboardData = useCallback(() => {
+    setProblems([]);
+    setFolders([]);
+    setTags([]);
+    setTests([]);
+    setAttempts([]);
+    setStudents([]);
+    setSelectedStudentId(null);
+    setSelectedStudent(null);
+    setSelectedTestAnalytics(null);
+    setAttemptDetails(null);
+  }, []);
+
   // Create axios instance with useMemo with useMemo to prevent recreation on every render
   const api = useMemo(() => {
     return axios.create({
@@ -175,26 +190,67 @@ const App = () => {
     localStorage.removeItem('token');
     setToken(null);
     setUser(null);
+    clearDashboardData();
+    setSessionError(null);
+    setDashboardLoadError(null);
     setView('login');
     setActiveTest(null);
-  }, []);
+    for (const key of Object.keys(sessionStorage)) {
+      if (key === 'testInProgress' || key.startsWith('testAnswers_')) {
+        sessionStorage.removeItem(key);
+      }
+    }
+  }, [clearDashboardData]);
 
   const loadUserData = useCallback(async (opts = {}) => {
     const preserveView = opts.preserveView ?? false;
+    const requestToken = token;
+    setDashboardLoadError(null);
+
+    let userData;
     try {
-      const { data: userData } = await api.get('/api/me');
-      setUser(userData);
-      
+      const response = await api.get('/api/me');
+      userData = response.data;
+    } catch (error) {
+      // Ignore a late response from a session that has since been replaced or logged out.
+      if (localStorage.getItem('token') !== requestToken) return;
+      const status = error.response?.status;
+      if (status === 401) {
+        handleLogout();
+        return;
+      }
+      console.error('Error validating session:', error);
+      setSessionError('We could not verify your session right now. Your sign-in is saved; try again.');
+      setView('session-error');
+      return;
+    }
+
+    if (localStorage.getItem('token') !== requestToken) return;
+    setSessionError(null);
+    setUser(userData);
+    if (!preserveView) {
       if (userData.role === 'student') {
-        if (!preserveView) setView('student-dashboard');
+        setView('student-dashboard');
+      } else if (userData.role === 'teacher') {
+        setView('teacher-dashboard');
+      } else if (userData.role === 'admin') {
+        setView('admin-dashboard');
+      } else {
+        handleLogout();
+        return;
+      }
+    }
+
+    try {
+      if (userData.role === 'student') {
         const [testsRes, attemptsRes] = await Promise.all([
           api.get('/api/tests'),
           api.get('/api/attempts')
         ]);
+        if (localStorage.getItem('token') !== requestToken) return;
         setTests(testsRes.data);
         setAttempts(attemptsRes.data);
       } else if (userData.role === 'teacher') {
-        if (!preserveView) setView('teacher-dashboard');
         const [problemsRes, testsRes, studentsRes, foldersRes, tagsRes] = await Promise.all([
           api.get('/api/problems'),
           api.get('/api/tests'),
@@ -202,27 +258,33 @@ const App = () => {
           api.get('/api/folders'),
           api.get('/api/tags')
         ]);
+        if (localStorage.getItem('token') !== requestToken) return;
         setProblems(problemsRes.data);
         setTests(testsRes.data);
         setStudents(studentsRes.data);
         setFolders(foldersRes.data);
         setTags(tagsRes.data);
       } else if (userData.role === 'admin') {
-        if (!preserveView) setView('admin-dashboard');
         const [problemsRes, foldersRes, tagsRes] = await Promise.all([
           api.get('/api/problems'),
           api.get('/api/folders'),
           api.get('/api/tags')
         ]);
+        if (localStorage.getItem('token') !== requestToken) return;
         setProblems(problemsRes.data);
         setFolders(foldersRes.data);
         setTags(tagsRes.data);
       }
     } catch (error) {
-      console.error('Error loading user data:', error);
-      handleLogout();
+      if (localStorage.getItem('token') !== requestToken) return;
+      if (error.response?.status === 401) {
+        handleLogout();
+        return;
+      }
+      console.error('Error loading dashboard data:', error);
+      setDashboardLoadError('You are signed in, but some dashboard information could not be loaded. Retry, or contact the site administrator if this continues.');
     }
-  }, [api, handleLogout]);
+  }, [api, handleLogout, token]);
 
   const handleSubmitTest = useCallback(async () => {
     if (!activeTest) return;
@@ -401,11 +463,15 @@ const App = () => {
     e.preventDefault();
     try {
       const { data } = await axios.post(`${API_URL}/api/login`, loginForm);
+      clearDashboardData();
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setUser(data.user);
+      setSessionError(null);
+      setDashboardLoadError(null);
+      setView('loading');
     } catch (error) {
-      const msg = error.response?.data?.error || error.response?.status === 401 ? 'Invalid credentials' : (error.message || 'Login failed');
+      const msg = error.response?.data?.error || (error.response?.status === 401 ? 'Invalid credentials' : (error.message || 'Login failed'));
       alert(msg);
     }
   };
@@ -422,9 +488,13 @@ const App = () => {
     }
     try {
       const { data } = await axios.post(`${API_URL}/api/signup`, signupForm);
+      clearDashboardData();
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setUser(data.user);
+      setSessionError(null);
+      setDashboardLoadError(null);
+      setView('loading');
       setSignupForm({ username: '', password: '' });
     } catch (error) {
       alert(error.response?.data?.error || 'Signup failed');
@@ -779,6 +849,21 @@ const App = () => {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+if (view === 'session-error') {
+  return (
+    <div className="min-h-screen bg-[#f5f7f8] flex items-center justify-center p-6">
+      <div className="w-full max-w-md rounded-xl bg-white p-6 text-center shadow">
+        <h1 className="mb-2 text-xl font-semibold text-gray-800">Session check unavailable</h1>
+        <p className="mb-5 text-sm text-gray-600">{sessionError}</p>
+        <div className="flex justify-center gap-3">
+          <button type="button" onClick={() => loadUserData()} className="rounded-lg bg-[#0085CA] px-4 py-2 text-sm font-medium text-white">Retry</button>
+          <button type="button" onClick={handleLogout} className="rounded-lg border px-4 py-2 text-sm text-gray-700">Log out</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 if (view === 'login') {
   return (
     <div className="login-page">
@@ -1053,6 +1138,13 @@ if (view === 'student-dashboard' && user) {
           </div>
         </div>
 
+        {dashboardLoadError && (
+          <div role="alert" className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <span>{dashboardLoadError}</span>
+            <button type="button" onClick={() => loadUserData({ preserveView: true })} className="font-semibold underline">Retry loading</button>
+          </div>
+        )}
+
         {/* Welcome Card */}
         <div className="bg-white rounded-xl shadow p-6 mb-6 text-center">
           <h2 className="text-2xl font-semibold text-gray-800 mb-1">
@@ -1271,6 +1363,12 @@ if (view === 'teacher-dashboard' && user) {
       </div>
 
       <div className="max-w-7xl mx-auto px-6 py-8">
+        {dashboardLoadError && (
+          <div role="alert" className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <span>{dashboardLoadError}</span>
+            <button type="button" onClick={() => loadUserData({ preserveView: true })} className="font-semibold underline">Retry loading</button>
+          </div>
+        )}
         <div className="mb-6 flex gap-3">
           <button
             onClick={() => setView('register-students')}
@@ -2008,6 +2106,13 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             </button>
           </div>
         </div>
+
+        {dashboardLoadError && (
+          <div role="alert" className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <span>{dashboardLoadError}</span>
+            <button type="button" onClick={() => loadUserData({ preserveView: true })} className="font-semibold underline">Retry loading</button>
+          </div>
+        )}
 
         <div className="mb-6 p-4 bg-white rounded-xl shadow">
           <h3 className="font-semibold text-gray-800 mb-3">Folders</h3>
