@@ -5,9 +5,11 @@
  * Extracts diagrams from PDF pages when AI identifies them.
  */
 import { PDFParse } from 'pdf-parse';
+import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { GoogleGenAI, createUserContent } from '@google/genai';
 import { jsonrepair } from 'jsonrepair';
 import pool from './db.js';
+import { cleanupStaleUnreferencedUploads, insertImageUpload } from './storageLimits.js';
 import { parseAnswerToNumber, parseAndValidateAnswer } from './answerUtils.js';
 
 // Lazy-load pdfRender (requires canvas native module); diagram extraction is optional
@@ -25,6 +27,24 @@ async function getRenderPdfPageToPng() {
 
 const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
+export const MAX_PDF_PAGES = 60;
+const MAX_IMAGE_REFINEMENT_PAGES = 10;
+
+export async function assertPdfPageLimit(pdfBuffer) {
+  const loadingTask = getDocument({ data: new Uint8Array(pdfBuffer) });
+  let pdf;
+  try {
+    pdf = await loadingTask.promise;
+    if (pdf.numPages > MAX_PDF_PAGES) {
+      const error = new Error(`PDF contains ${pdf.numPages} pages; the limit is ${MAX_PDF_PAGES} pages`);
+      error.status = 413;
+      throw error;
+    }
+  } finally {
+    if (pdf) await pdf.destroy().catch(() => {});
+    else await loadingTask.destroy().catch(() => {});
+  }
+}
 
 /**
  * Parse optional answer key text. Format: "1. 42" or "1) 3/4" or "1: 90000" (one per line).
@@ -158,7 +178,14 @@ async function refineRegionsForImageMode(pdfBuffer, processedList, renderFn) {
     if (!byPage.has(page)) byPage.set(page, []);
     byPage.get(page).push(p);
   }
+  let refinedPages = 0;
   for (const [pageNum, problems] of byPage) {
+    if (refinedPages >= MAX_IMAGE_REFINEMENT_PAGES) {
+      // Keep the initial AI regions for remaining pages. If one is missing,
+      // renderProblemScreenshot naturally falls back to the full page.
+      continue;
+    }
+    refinedPages++;
     const nums = problems.map((p) => p.number).sort((a, b) => a - b);
     try {
       const pngBuffer = await renderFn(pdfBuffer, pageNum, null, 2, 0);
@@ -284,6 +311,8 @@ Set "questionLatex" to "Problem N" only. The system will screenshot each region.
 6. Do NOT solve. Use the answer key values exactly for the "answer" field.
 7. Extract folderName from the PDF header (e.g. "2021 - National Competition - Sprint Round").
 8. DIAGRAMS: If a problem has a diagram, figure, or picture (geometry, graph, illustration), set "hasDiagram": true. Set "diagramPage" to the 1-based page number where the diagram appears. Optionally set "diagramRegion" with normalized coordinates (0-1) for the diagram area: x=left, y=top, w=width, h=height. If unsure of region, omit diagramRegion and the full page will be used. If no diagram, set "hasDiagram": false and omit diagramPage/diagramRegion.
+9. For every problem, set "problemPage" to the 1-based page number where that problem begins.
+10. Set "continuationPages" to any additional 1-based pages needed to read the full problem, including a diagram on another page. Omit it when no other page is needed.
 
 CRITICAL: Copy each problem EXACTLY word for word. No paraphrasing. Use amsmath and amssymb commands (\\\\frac, \\\\sqrt, \\\\neq, \\\\leq, \\\\geq, \\\\sum, \\\\int, etc.). For "not equal" use \\\\ne. For literal $ use \\\\$.
 TRANSCRIPTION: Preserve geometry labels exactly. "triangle GFD" not "triangle AGFD". "segment AB" not "segment AAB". Do not add extra letters to point/vertex names.${imageModeInstructions}`;
@@ -296,6 +325,8 @@ For each problem's "topics" field, use ONLY these exact tag names (copy them cha
 
 For each problem that has a diagram/figure/picture, set "hasDiagram": true, "diagramPage": <1-based page number>, and optionally "diagramRegion": { "x": 0-1, "y": 0-1, "w": 0-1, "h": 0-1 } for the diagram's bounding box. If no diagram, set "hasDiagram": false.
 ${useImageMode ? 'IMAGE MODE: Every problem MUST have "problemPage" (1-based) and "problemRegion" { "x", "y", "w", "h" }. Use x=0 and w=1. Use the problem NUMBER (1., 2., 3.) to determine boundaries — problem N starts at "N." and ends at the next number. Do NOT use spacing or gaps. If the problem has a diagram, the diagram MUST be fully included.' : ''}
+For every problem, include "problemPage" (1-based page where the numbered problem begins), even when not using image mode.
+Include "continuationPages" (1-based page numbers) for any additional pages containing the rest of the question or its diagram.
 
 Return JSON: { "folderName": "...", "problems": [...] }`;
 
@@ -370,7 +401,11 @@ function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'N
   for (let i = 0; i < arr.length; i++) {
     const item = arr[i];
     const num = item?.number ?? i + 1;
-    const answer = answerMap[num] !== undefined ? String(answerMap[num]) : (item.answer || '');
+    const answer = answerMap[num] !== undefined ? String(answerMap[num]) : '';
+    if (!answer.trim()) {
+      errors.push({ number: num, message: `Answer key is missing problem ${num}` });
+      continue;
+    }
     const answerVal = parseAndValidateAnswer(answer);
     if (answerVal === null && answer !== '') {
       errors.push({ number: num, message: `Invalid answer for problem ${num}: "${answer}"` });
@@ -385,19 +420,22 @@ function parseAIResponse(rawContent, answerMap, allowedTagNames = ['Algebra', 'N
     question = question.replace(/(\b(?:cost|costs|spent)\s+)\\(\d+)/gi, '$1\\$$2');
     const aiTopic = topics.find((t) => t && String(t).trim()) || defaultTag;
     const tag = resolveToAllowedTag(aiTopic, allowedTagNames);
-    const answerStored = answerMap[num] !== undefined && answer.trim()
-      ? answer.trim()
-      : (answerVal !== null ? (typeof answerVal === 'number' ? String(answerVal) : answerVal) : '0');
+    const answerStored = answer.trim();
     const hasDiagram = Boolean(item.hasDiagram && item.diagramPage);
     const diagramPage = hasDiagram ? Math.max(1, parseInt(item.diagramPage, 10) || 1) : null;
     const diagramRegion = hasDiagram && item.diagramRegion && typeof item.diagramRegion === 'object'
       ? item.diagramRegion
       : null;
     const problemPage = item.problemPage != null ? Math.max(1, parseInt(item.problemPage, 10) || 1) : null;
+    const continuationPagesRaw = Array.isArray(item.continuationPages) ? item.continuationPages : [];
+    const continuationPages = continuationPagesRaw
+      .map(page => Number(page))
+      .filter(page => Number.isSafeInteger(page) && page > 0);
+    const sourcePages = [...new Set([problemPage, diagramPage, ...continuationPages].filter(Boolean))].sort((a, b) => a - b);
     const problemRegion = problemPage && item.problemRegion && typeof item.problemRegion === 'object'
       ? item.problemRegion
       : null;
-    results.push({ number: num, question, answer: answerStored, topics: [tag], source: `Problem ${num}`, hasDiagram, diagramPage, diagramRegion, problemPage, problemRegion });
+    results.push({ number: num, question, answer: answerStored, topics: [tag], source: `Problem ${num}`, hasDiagram, diagramPage, diagramRegion, problemPage, problemRegion, continuationPages, sourcePages });
   }
   return { folderName, results, errors };
 }
@@ -500,10 +538,307 @@ function processProblemNoAI(problem, answerFromKey) {
  * Extract problems for image mode (no DB save). Returns processed list for review flow.
  */
 export async function processPdfForImageMode(pdfBuffer, answerMap, allowedTagNames) {
+  await assertPdfPageLimit(pdfBuffer);
   const { folderName, results: processedList, errors: batchErrors } = await processPdfDirectWithAI(pdfBuffer, answerMap, allowedTagNames, { useImageMode: true });
   const renderFn = await getRenderPdfPageToPng();
   if (renderFn && processedList.length > 0) await refineRegionsForImageMode(pdfBuffer, processedList, renderFn);
   return { folderName, processedList, errors: batchErrors };
+}
+
+/**
+ * Extract text-layer PDFs locally for the teacher review flow. Scanned PDFs do
+ * not silently fall back to Gemini; the caller can ask for explicit consent.
+ */
+export async function processPdfForTextReview(pdfBuffer, answerMap, allowedTagNames = []) {
+  const loadingTask = getDocument({ data: new Uint8Array(pdfBuffer) });
+  let pdf;
+  try {
+    pdf = await loadingTask.promise;
+    if (pdf.numPages > MAX_PDF_PAGES) {
+      const error = new Error(`PDF contains ${pdf.numPages} pages; the limit is ${MAX_PDF_PAGES} pages`);
+      error.status = 413;
+      throw error;
+    }
+    const pages = [];
+    let combined = '';
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      const lineGroups = new Map();
+      for (const item of textContent.items) {
+        const value = (item.str || '').trim();
+        if (!value) continue;
+        const x = Number(item.transform?.[4]) || 0;
+        const y = Number(item.transform?.[5]) || 0;
+        const lineKey = Math.round(y / 2) * 2;
+        if (!lineGroups.has(lineKey)) lineGroups.set(lineKey, []);
+        lineGroups.get(lineKey).push({ x, value });
+      }
+      const pageText = [...lineGroups.entries()]
+        .sort((a, b) => b[0] - a[0])
+        .map(([, items]) => items.sort((a, b) => a.x - b.x).map(item => item.value).join(' '))
+        .join('\n')
+        .trim();
+      if (/^\s*(?:answer\s*key|answers?\b|solutions?\b)/i.test(pageText.slice(0, 240))) {
+        page.cleanup();
+        break;
+      }
+      pages.push({ pageNumber, start: combined.length, text: pageText });
+      combined += `${pageText}\n`;
+      page.cleanup();
+    }
+    if (combined.replace(/\s/g, '').length < 80) {
+      const error = new Error('This PDF has no readable text layer and appears to be scanned. Enable AI processing and consent to send it to Gemini, or use a text-based PDF.');
+      error.status = 422;
+      error.code = 'SCANNED_PDF_REQUIRES_CONSENT';
+      throw error;
+    }
+    const problems = splitIntoProblems(combined);
+    if (!problems.length) {
+      const error = new Error('No numbered problems were found in the PDF text. Review the file or enable AI processing with consent.');
+      error.status = 422;
+      throw error;
+    }
+    const markerStarts = [...combined.matchAll(/(?:^|\n)\s*(?:problem\s+)?(\d+)\s*[\.\)\:]\s*/gim)];
+    const defaultTag = allowedTagNames[0] || 'Arithmetic';
+    const results = problems.map((problem, index) => {
+      const answer = answerMap[problem.number];
+      if (answer === undefined || !String(answer).trim()) {
+        const error = new Error(`Answer key is missing problem ${problem.number}.`);
+        error.status = 400;
+        throw error;
+      }
+      const parsedAnswer = parseAndValidateAnswer(String(answer));
+      if (parsedAnswer === null) {
+        const error = new Error(`Answer key entry for problem ${problem.number} is invalid.`);
+        error.status = 400;
+        throw error;
+      }
+      const marker = markerStarts[index];
+      if (!marker) {
+        const error = new Error(`Could not find the source page marker for problem ${problem.number}.`);
+        error.status = 422;
+        throw error;
+      }
+      const markerIndex = marker.index;
+      const nextMarkerIndex = markerStarts[index + 1]?.index ?? combined.length;
+      const sourcePages = pages
+        .filter(page => page.start < nextMarkerIndex && page.start + page.text.length >= markerIndex)
+        .map(page => page.pageNumber);
+      const pageNumber = sourcePages[0] || [...pages].reverse().find(page => page.start <= markerIndex)?.pageNumber || 1;
+      return {
+        number: problem.number,
+        question: problem.raw,
+        answer: String(answer).trim(),
+        topics: [defaultTag],
+        source: `Problem ${problem.number}`,
+        problemPage: pageNumber,
+        sourcePages: sourcePages.length ? sourcePages : [pageNumber],
+        continuationPages: sourcePages.filter(page => page !== pageNumber),
+        problemRegion: null,
+      };
+    });
+    return { folderName: 'Imported from PDF', processedList: results, errors: [] };
+  } finally {
+    if (pdf) await pdf.destroy().catch(() => {});
+    else await loadingTask.destroy().catch(() => {});
+  }
+}
+
+/** Extract AI-assisted review candidates while retaining actual question text and page locations. */
+export async function processPdfForReview(pdfBuffer, answerMap, allowedTagNames, { useAI, useImageMode = false, runVerification = false }) {
+  let folderName;
+  let processedList;
+  let errors;
+  if (!useAI) {
+    ({ folderName, processedList, errors } = await processPdfForTextReview(pdfBuffer, answerMap, allowedTagNames));
+  } else {
+    await assertPdfPageLimit(pdfBuffer);
+    ({ folderName, results: processedList, errors } = await processPdfDirectWithAI(
+      pdfBuffer,
+      answerMap,
+      allowedTagNames,
+      { useImageMode: false }
+    ));
+  }
+  if (!processedList.length) {
+    const error = new Error('No problems were extracted from this PDF.');
+    error.status = 422;
+    throw error;
+  }
+  if (errors?.length) {
+    const firstError = errors[0]?.message || 'The extractor reported an incomplete result.';
+    const error = new Error(`${firstError}. Nothing was saved; correct the answer key or retry the import.`);
+    error.status = 422;
+    throw error;
+  }
+  const numbers = processedList.map(problem => Number(problem.number));
+  if (numbers.some(number => !Number.isSafeInteger(number) || number < 1) || new Set(numbers).size !== numbers.length) {
+    const error = new Error('The extractor returned missing or duplicate question numbers. Nothing was saved; retry with a clearer PDF.');
+    error.status = 422;
+    throw error;
+  }
+  const extractedNumbers = new Set(numbers);
+  const answerNumbers = Object.keys(answerMap).map(Number);
+  const missingNumbers = answerNumbers.filter(number => !extractedNumbers.has(number));
+  const unkeyedNumbers = numbers.filter(number => !Object.prototype.hasOwnProperty.call(answerMap, number));
+  if (missingNumbers.length || unkeyedNumbers.length || answerNumbers.length !== numbers.length) {
+    const problems = [
+      missingNumbers.length ? `answer-key items not found: ${missingNumbers.join(', ')}` : '',
+      unkeyedNumbers.length ? `questions without key entries: ${unkeyedNumbers.join(', ')}` : '',
+    ].filter(Boolean).join('; ');
+    const error = new Error(`Could not confirm a complete one-to-one question and answer-key match${problems ? ` (${problems})` : ''}. Nothing was saved; correct the answer key or retry the import.`);
+    error.status = 422;
+    throw error;
+  }
+  for (const problem of processedList) {
+    const sourcePages = Array.isArray(problem.sourcePages) ? problem.sourcePages : [];
+    const allPages = [...new Set([problem.problemPage, problem.diagramPage, ...sourcePages].filter(Boolean))]
+      .filter(page => Number.isSafeInteger(page) && page > 0)
+      .sort((a, b) => a - b);
+    problem.sourcePages = allPages.length ? allPages : [problem.problemPage];
+  }
+  if (useAI && runVerification && !useImageMode) {
+    const corrections = await runVerificationPass(pdfBuffer, processedList, answerMap, allowedTagNames);
+    for (const problem of processedList) {
+      const correctedQuestion = corrections[problem.number];
+      if (typeof correctedQuestion === 'string' && correctedQuestion.trim() && correctedQuestion.length <= 20000) {
+        problem.question = correctedQuestion.trim();
+      }
+    }
+  }
+  const pageCountTask = getDocument({ data: new Uint8Array(pdfBuffer) });
+  const pdf = await pageCountTask.promise;
+  try {
+    for (const problem of processedList) {
+      if (!Number.isSafeInteger(problem.problemPage) || problem.problemPage < 1 || problem.problemPage > pdf.numPages) {
+        const error = new Error(`Could not confirm the source page for problem ${problem.number}. Please use a text PDF or try another import mode.`);
+        error.status = 422;
+        throw error;
+      }
+      const invalidMappedPage = (problem.sourcePages || []).find(page => !Number.isSafeInteger(page) || page < 1 || page > pdf.numPages);
+      if (invalidMappedPage) {
+        const error = new Error(`Could not confirm page ${invalidMappedPage} for problem ${problem.number}. Nothing was saved.`);
+        error.status = 422;
+        throw error;
+      }
+      if (answerMap[problem.number] === undefined || !String(answerMap[problem.number]).trim()) {
+        const error = new Error(`Answer key is missing problem ${problem.number}.`);
+        error.status = 400;
+        throw error;
+      }
+    }
+  } finally {
+    await pdf.destroy().catch(() => {});
+  }
+  if (useAI && useImageMode) {
+    const renderFn = await getRenderPdfPageToPng();
+    if (renderFn) await refineRegionsForImageMode(pdfBuffer, processedList, renderFn);
+  }
+  return { folderName, processedList, errors };
+}
+
+/** Inspect searchable PDF text and document metadata before any external processing. */
+export async function inspectPdfForMathcountsMarkers(pdfBuffer) {
+  const loadingTask = getDocument({ data: new Uint8Array(pdfBuffer) });
+  let pdf;
+  try {
+    pdf = await loadingTask.promise;
+    const metadata = await pdf.getMetadata().catch(() => null);
+    const info = metadata?.info || {};
+    const xmp = metadata?.metadata?.getAll?.() || {};
+    const searchableParts = [
+      ...Object.entries(info).map(([key, value]) => `${key} ${String(value ?? '')}`),
+      ...Object.entries(xmp).map(([key, value]) => `${key} ${String(value ?? '')}`),
+      pdfBuffer.toString('latin1'),
+    ];
+    let meaningfulTextCharacters = 0;
+    let imageBackedPageCount = 0;
+    let largestImageAreaFraction = 0;
+    let scanLikePageCount = 0;
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const text = await page.getTextContent();
+      const pageText = text.items.map(item => item.str || '').join(' ');
+      const pageTextCharacters = pageText.replace(/\s/g, '').length;
+      meaningfulTextCharacters += pageTextCharacters;
+      searchableParts.push(pageText);
+      const operatorList = await page.getOperatorList();
+      const view = page.view || [0, 0, 0, 0];
+      const pageArea = Math.abs((view[2] - view[0]) * (view[3] - view[1]));
+      const imageAreaFraction = pageArea > 0 ? estimatePaintedImageAreaFraction(operatorList, pageArea) : 0;
+      largestImageAreaFraction = Math.max(largestImageAreaFraction, imageAreaFraction);
+      if (imageAreaFraction >= 0.6) imageBackedPageCount++;
+      // Any visible raster content may contain text that isn't in the text
+      // layer. Require exact-file approval independently of hidden/selectable
+      // text so cropped scans cannot bypass the OCR rights gate.
+      if (imageAreaFraction > 0) scanLikePageCount++;
+      page.cleanup();
+    }
+    const imageBackedPageFraction = pdf.numPages ? imageBackedPageCount / pdf.numPages : 0;
+    // A single scan-like page is enough to require the exact-file approval.
+    // Hidden text on the other pages must not dilute an image-backed page.
+    const scanLike = imageBackedPageCount > 0 || scanLikePageCount > 0 ||
+      (!meaningfulTextCharacters && largestImageAreaFraction > 0);
+    return {
+      detectedMathcounts: /math\s*counts|mathcounts\.org/i.test(searchableParts.join('\n')),
+      hasMeaningfulTextLayer: meaningfulTextCharacters >= 80,
+      meaningfulTextCharacters,
+      imageBackedPageCount,
+      scanLikePageCount,
+      imageBackedPageFraction,
+      largestImageAreaFraction,
+      scanLike,
+    };
+  } finally {
+    if (pdf) await pdf.destroy().catch(() => {});
+    else await loadingTask.destroy().catch(() => {});
+  }
+}
+
+function multiplyPdfTransforms(current, next) {
+  const [a, b, c, d, e, f] = current;
+  const [g, h, i, j, k, l] = next;
+  return [
+    a * g + c * h,
+    b * g + d * h,
+    a * i + c * j,
+    b * i + d * j,
+    a * k + c * l + e,
+    b * k + d * l + f,
+  ];
+}
+
+function estimatePaintedImageAreaFraction(operatorList, pageArea) {
+  const imageOps = new Set([
+    OPS.paintImageXObject,
+    OPS.paintJpegXObject,
+    OPS.paintInlineImageXObject,
+    OPS.paintInlineImageXObjectGroup,
+    OPS.paintImageMaskXObject,
+    OPS.paintImageMaskXObjectGroup,
+    OPS.paintImageXObjectRepeat,
+    OPS.paintImageMaskXObjectRepeat,
+  ].filter(Number.isInteger));
+  const stack = [];
+  let transform = [1, 0, 0, 1, 0, 0];
+  let totalArea = 0;
+  for (let index = 0; index < operatorList.fnArray.length; index++) {
+    const operation = operatorList.fnArray[index];
+    const args = operatorList.argsArray[index] || [];
+    if (operation === OPS.save) {
+      stack.push(transform);
+    } else if (operation === OPS.restore) {
+      transform = stack.pop() || [1, 0, 0, 1, 0, 0];
+    } else if (operation === OPS.transform && Array.isArray(args) && args.length >= 6) {
+      transform = multiplyPdfTransforms(transform, args.slice(0, 6).map(Number));
+    } else if (imageOps.has(operation)) {
+      const [a, b, c, d] = transform;
+      const drawnArea = Math.abs(a * d - b * c);
+      if (Number.isFinite(drawnArea)) totalArea += drawnArea;
+    }
+  }
+  return Math.min(1, totalArea / pageArea);
 }
 
 /**
@@ -515,11 +850,13 @@ export async function processPdfForImageMode(pdfBuffer, answerMap, allowedTagNam
  * @param {object} opts - { useImageMode: boolean, runVerification: boolean }
  */
 export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI = true, createdBy = null, opts = {}) {
+  await assertPdfPageLimit(pdfBuffer);
   const useImageMode = opts.useImageMode === true;
   const runVerification = opts.runVerification !== false;
   const errors = [];
   const answerMap = parseAnswerKey(answerKeyText);
 
+  await cleanupStaleUnreferencedUploads(pool);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -581,24 +918,30 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
               const cropPad = processed.hasDiagram ? 0.08 : 0.04;
               const pngBuffer = await renderFn(pdfBuffer, processed.problemPage, region, 2, cropPad);
               const base64 = pngBuffer.toString('base64');
-              const uploadRes = await client.query(
-                'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
-                [base64, `problem-${processed.number}.png`, 'image/png', createdBy]
-              );
+              const uploadRes = await insertImageUpload(client, {
+                data: base64,
+                filename: `problem-${processed.number}.png`,
+                contentType: 'image/png',
+                createdBy,
+              });
               imageUrl = '/uploads/db/' + uploadRes.rows[0].id;
             } catch (renderErr) {
+              if (renderErr.status === 413) throw renderErr;
               console.warn('Problem image extraction failed for problem', processed.number, renderErr.message);
             }
           } else if (!useImageMode && processed.hasDiagram && processed.diagramPage) {
             try {
               const pngBuffer = await renderFn(pdfBuffer, processed.diagramPage, processed.diagramRegion);
               const base64 = pngBuffer.toString('base64');
-              const uploadRes = await client.query(
-                'INSERT INTO uploads (data, filename, content_type, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
-                [base64, `problem-${processed.number}-diagram.png`, 'image/png', createdBy]
-              );
+              const uploadRes = await insertImageUpload(client, {
+                data: base64,
+                filename: `problem-${processed.number}-diagram.png`,
+                contentType: 'image/png',
+                createdBy,
+              });
               imageUrl = '/uploads/db/' + uploadRes.rows[0].id;
             } catch (renderErr) {
+              if (renderErr.status === 413) throw renderErr;
               console.warn('Diagram extraction failed for problem', processed.number, renderErr.message);
             }
           }

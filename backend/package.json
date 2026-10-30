@@ -17,11 +17,9 @@
     "jsonwebtoken": "^9.0.2",
     "mathjs": "^15.1.1",
     "multer": "^2.0.2",
+    "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^4.8.69",
     "pg": "^8.11.3"
-  },
-  "devDependencies": {
-    "pdf-lib": "^1.17.1"
   }
 }
