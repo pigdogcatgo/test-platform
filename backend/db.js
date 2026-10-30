@@ -221,6 +221,51 @@ export async function initDatabase() {
       )
     `);
 
+    // Private, rights-attested source documents. Keep the original available
+    // only to the owning teacher and store a separate question-pages-only copy
+    // for test delivery.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS source_documents (
+        id SERIAL PRIMARY KEY,
+        created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        source_title VARCHAR(200) NOT NULL,
+        source_url TEXT,
+        license_basis VARCHAR(40) NOT NULL CHECK (license_basis IN ('teacher_created', 'open_license', 'written_permission')),
+        license_name VARCHAR(200),
+        permission_reference TEXT,
+        rights_confirmed BOOLEAN NOT NULL DEFAULT false,
+        gemini_allowed BOOLEAN NOT NULL DEFAULT false,
+        original_data BYTEA NOT NULL,
+        student_data BYTEA NOT NULL,
+        original_sha256 VARCHAR(64) NOT NULL,
+        original_size INTEGER NOT NULL CHECK (original_size > 0 AND original_size <= 15728640),
+        student_size INTEGER NOT NULL CHECK (student_size > 0 AND student_size <= 15728640),
+        original_pages INTEGER NOT NULL CHECK (original_pages BETWEEN 1 AND 60),
+        student_pages INTEGER NOT NULL CHECK (student_pages BETWEEN 1 AND 60),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query('ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS license_name VARCHAR(200)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS pdf_document_id INTEGER REFERENCES source_documents(id) ON DELETE SET NULL');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS source_page INTEGER CHECK (source_page IS NULL OR source_page > 0)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS student_pdf_page INTEGER CHECK (student_pdf_page IS NULL OR student_pdf_page > 0)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS source_pages INTEGER[] NOT NULL DEFAULT ARRAY[]::INTEGER[]');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS student_pdf_pages INTEGER[] NOT NULL DEFAULT ARRAY[]::INTEGER[]');
+    await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS source_document_id INTEGER REFERENCES source_documents(id) ON DELETE SET NULL');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS test_problem_pdf_locations (
+        test_id INTEGER NOT NULL REFERENCES tests(id) ON DELETE CASCADE,
+        problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
+        source_page INTEGER NOT NULL CHECK (source_page > 0),
+        pdf_page INTEGER NOT NULL CHECK (pdf_page > 0),
+        source_pages INTEGER[] NOT NULL DEFAULT ARRAY[]::INTEGER[],
+        pdf_pages INTEGER[] NOT NULL DEFAULT ARRAY[]::INTEGER[],
+        PRIMARY KEY (test_id, problem_id)
+      )
+    `);
+    await client.query('ALTER TABLE test_problem_pdf_locations ADD COLUMN IF NOT EXISTS source_pages INTEGER[] NOT NULL DEFAULT ARRAY[]::INTEGER[]');
+    await client.query('ALTER TABLE test_problem_pdf_locations ADD COLUMN IF NOT EXISTS pdf_pages INTEGER[] NOT NULL DEFAULT ARRAY[]::INTEGER[]');
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS api_rate_limit_buckets (
         bucket_key VARCHAR(100) PRIMARY KEY,

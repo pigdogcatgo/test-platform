@@ -5,10 +5,11 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { isIP } from 'net';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
+import { PDFDocument, PDFName } from 'pdf-lib';
 import pool, { initDatabase, seedDatabase } from './db.js';
 import { cleanupStaleUnreferencedUploads, deleteUnreferencedImageUploads, insertImageUpload } from './storageLimits.js';
 import { parseAndValidateAnswer, parseAnswerToNumber, compareAnswers } from './answerUtils.js';
@@ -512,6 +513,207 @@ const IMPORT_SESSION_TTL = 20 * 60 * 1000;
 const MAX_IMPORT_SESSIONS = 5;
 const MAX_GEMINI_RETRIES_PER_SESSION = 3;
 let importStartReservations = 0;
+const PDF_STORAGE_GLOBAL_LIMIT = 200 * 1024 * 1024;
+const PDF_STORAGE_TEACHER_LIMIT = 50 * 1024 * 1024;
+
+function validatePdfRights(req, res) {
+  const sourceTitle = typeof req.body.sourceTitle === 'string' ? req.body.sourceTitle.trim() : '';
+  const sourceUrl = typeof req.body.sourceUrl === 'string' ? req.body.sourceUrl.trim() : '';
+  const licenseBasis = typeof req.body.licenseBasis === 'string' ? req.body.licenseBasis.trim() : '';
+  const licenseName = typeof req.body.licenseName === 'string' ? req.body.licenseName.trim() : '';
+  const permissionReference = typeof req.body.permissionReference === 'string' ? req.body.permissionReference.trim() : '';
+  if (req.body.rightsConfirmed !== 'true' || req.body.studentSafePagesConfirmed !== 'true') {
+    res.status(400).json({ error: 'Confirm you may upload, store, and share this PDF with assigned students, and that approved question pages contain no answers or solutions.' });
+    return null;
+  }
+  if (!sourceTitle || sourceTitle.length > 200 || !['teacher_created', 'open_license', 'written_permission'].includes(licenseBasis)) {
+    res.status(400).json({ error: 'Provide a source title and a valid rights basis (teacher-created, open-license, or written permission).' });
+    return null;
+  }
+  if (licenseBasis === 'open_license' && !licenseName) {
+    res.status(400).json({ error: 'Enter the name of the open license that permits this use.' });
+    return null;
+  }
+  if (licenseName.length > 200) {
+    res.status(400).json({ error: 'License name must be under 200 characters.' });
+    return null;
+  }
+  if (sourceUrl && (!/^https?:\/\//i.test(sourceUrl) || sourceUrl.length > 2000)) {
+    res.status(400).json({ error: 'Source URL must be a valid HTTP or HTTPS URL under 2000 characters.' });
+    return null;
+  }
+  if (licenseBasis === 'written_permission' && !permissionReference) {
+    res.status(400).json({ error: 'Add a reference for the written permission.' });
+    return null;
+  }
+  if (permissionReference.length > 2000) {
+    res.status(400).json({ error: 'Permission reference must be under 2000 characters.' });
+    return null;
+  }
+  const mathcountsMaterial = /mathcounts/i.test(`${sourceTitle} ${sourceUrl} ${req.file?.originalname || ''}`);
+  if (mathcountsMaterial && (licenseBasis !== 'written_permission' || !permissionReference)) {
+    res.status(403).json({ error: 'MATHCOUNTS material requires documented written permission before it can be uploaded for student viewing.' });
+    return null;
+  }
+  const useAI = req.body.useAI === 'true';
+  if (useAI && (req.body.allowGeminiProcessing !== 'true' || req.body.aiRightsConfirmed !== 'true')) {
+    res.status(400).json({ error: 'Gemini processing is optional. To use it, explicitly consent and confirm that the PDF rights allow external AI processing.' });
+    return null;
+  }
+  return { sourceTitle, sourceUrl: sourceUrl || null, licenseBasis, licenseName: licenseName || null, permissionReference: permissionReference || null, rightsConfirmed: true, geminiAllowed: useAI };
+}
+
+async function enforceMathcountsPermissionGate(req, rights) {
+  const declaredSource = `${rights.sourceTitle} ${rights.sourceUrl || ''} ${req.file?.originalname || ''}`;
+  const declaredMathcounts = /math\s*counts|mathcounts\.org/i.test(declaredSource);
+  const { inspectPdfForMathcountsMarkers } = await import('./pdfImport.js');
+  const inspection = await inspectPdfForMathcountsMarkers(req.file.buffer);
+  const digest = createHash('sha256').update(req.file.buffer).digest('hex');
+  if (inspection.scanLike || !inspection.hasMeaningfulTextLayer) {
+    const approvedScans = (process.env.PDF_APPROVED_SCANNED_SHA256 || '')
+      .split(',').map(value => value.trim().toLowerCase()).filter(value => /^[a-f0-9]{64}$/.test(value));
+    if (!approvedScans.includes(digest)) {
+      const error = new Error(`This PDF contains embedded images or has too little searchable text. Ask the platform administrator to add its exact SHA-256 (${digest}) to the Render PDF_APPROVED_SCANNED_SHA256 environment variable, then retry. If OCR uses Gemini, teacher consent and source rights are also required.`);
+      error.status = 403;
+      throw error;
+    }
+  }
+  const detectedMathcounts = inspection.detectedMathcounts;
+  if (!declaredMathcounts && !detectedMathcounts) return;
+  if (rights.licenseBasis !== 'written_permission' || !rights.permissionReference) {
+    const error = new Error('This PDF appears to contain MATHCOUNTS material. A server-approved written permission is required before import.');
+    error.status = 403;
+    throw error;
+  }
+  const approvedDigests = (process.env.MATHCOUNTS_APPROVED_PDF_SHA256 || '')
+    .split(',').map(value => value.trim().toLowerCase()).filter(value => /^[a-f0-9]{64}$/.test(value));
+  if (!approvedDigests.includes(digest)) {
+    const error = new Error('MATHCOUNTS PDFs are blocked unless this exact file has been approved by the platform administrator.');
+    error.status = 403;
+    throw error;
+  }
+}
+
+async function assertPdfStorageQuota(client, teacherId, addingBytes) {
+  const globalResult = await client.query(
+    'SELECT COALESCE(SUM(original_size + student_size), 0)::bigint AS used FROM source_documents'
+  );
+  if (Number(globalResult.rows[0].used) + addingBytes > PDF_STORAGE_GLOBAL_LIMIT) {
+    const error = new Error('Private PDF storage is temporarily full. Contact the platform administrator before importing another PDF.');
+    error.status = 413;
+    throw error;
+  }
+  const teacherResult = await client.query(
+    'SELECT COALESCE(SUM(original_size + student_size), 0)::bigint AS used FROM source_documents WHERE created_by = $1',
+    [teacherId]
+  );
+  if (Number(teacherResult.rows[0].used) + addingBytes > PDF_STORAGE_TEACHER_LIMIT) {
+    const error = new Error('Your private PDF storage limit is full. Contact the platform administrator before importing another PDF.');
+    error.status = 413;
+    throw error;
+  }
+}
+
+async function makeStudentPdf(pdfBuffer, sourcePages) {
+  const source = await PDFDocument.load(pdfBuffer, { updateMetadata: false });
+  const pageCount = source.getPageCount();
+  const selected = [...new Set(sourcePages)].sort((a, b) => a - b);
+  if (!selected.length || selected.some(page => !Number.isSafeInteger(page) || page < 1 || page > pageCount)) {
+    const error = new Error('The reviewed questions do not have valid PDF page locations.');
+    error.status = 400;
+    throw error;
+  }
+  const safeDocument = await PDFDocument.create();
+  const copiedPages = await safeDocument.copyPages(source, selected.map(page => page - 1));
+  for (const page of copiedPages) {
+    // Do not carry source links, annotations, or additional actions into the
+    // student copy. The in-app viewer displays page content only.
+    page.node.delete(PDFName.of('Annots'));
+    page.node.delete(PDFName.of('AA'));
+    safeDocument.addPage(page);
+  }
+  for (const key of ['OpenAction', 'AA', 'Names', 'AcroForm']) {
+    safeDocument.catalog.delete(PDFName.of(key));
+  }
+  const studentPageBySourcePage = Object.fromEntries(selected.map((sourcePage, index) => [sourcePage, index + 1]));
+  const safeBuffer = Buffer.from(await safeDocument.save({ useObjectStreams: true }));
+  return { safeBuffer, studentPageBySourcePage, studentPageCount: selected.length, originalPageCount: pageCount };
+}
+
+async function getPdfPageCount(pdfBuffer) {
+  const document = await PDFDocument.load(pdfBuffer, { updateMetadata: false });
+  return document.getPageCount();
+}
+
+async function persistReviewedPdfImport(importId, session) {
+  const { pdfBuffer, processedList, folderName, tagMap, allowedTagNames, defaultTag, createdBy, rights, useAI } = session;
+  const safeBuffer = session.studentPdfPreview;
+  const studentPageBySourcePage = session.studentPageBySourcePage;
+  const studentPageCount = session.studentPageCount;
+  const originalPageCount = session.sourcePageCount;
+  if (!Buffer.isBuffer(safeBuffer) || !studentPageBySourcePage || !studentPageCount) {
+    const error = new Error('The student PDF preview expired. Restart the import and review it again.');
+    error.status = 409;
+    throw error;
+  }
+  const sourcePages = [...new Set(processedList.flatMap(problem => problem.sourcePages || [problem.problemPage]))].sort((a, b) => a - b);
+  const originalSize = pdfBuffer.length;
+  const studentSize = safeBuffer.length;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await assertPdfStorageQuota(client, createdBy, originalSize + studentSize);
+    const sourceDocument = await client.query(
+      `INSERT INTO source_documents
+         (created_by, source_title, source_url, license_basis, license_name, permission_reference,
+          rights_confirmed, gemini_allowed, original_data, student_data, original_sha256,
+          original_size, student_size, original_pages, student_pages)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       RETURNING id`,
+      [createdBy, rights.sourceTitle, rights.sourceUrl, rights.licenseBasis, rights.licenseName, rights.permissionReference,
+        rights.rightsConfirmed, useAI, pdfBuffer, safeBuffer, createHash('sha256').update(pdfBuffer).digest('hex'),
+        originalSize, studentSize, originalPageCount, studentPageCount]
+    );
+    const sourceDocumentId = sourceDocument.rows[0].id;
+    let folderRow = await client.query('SELECT id FROM folders WHERE name = $1 AND (created_by IS NOT DISTINCT FROM $2)', [folderName, createdBy]);
+    if (folderRow.rows.length === 0) {
+      folderRow = await client.query('INSERT INTO folders (name, created_by) VALUES ($1, $2) RETURNING id', [folderName, createdBy]);
+    }
+    const folderId = folderRow.rows[0].id;
+    let imported = 0;
+    for (const problem of processedList) {
+      const tagName = (problem.topics?.[0] || defaultTag).trim();
+      const validTag = allowedTagNames.includes(tagName) ? tagName : defaultTag;
+      const imageUrl = problem.confirmedImageUrl || null;
+      const sourceProblemPages = [...new Set(problem.sourcePages || [problem.problemPage])].sort((a, b) => a - b);
+      const studentProblemPages = sourceProblemPages.map(page => studentPageBySourcePage[page]).filter(Number.isSafeInteger);
+      if (!studentProblemPages.length || studentProblemPages.length !== sourceProblemPages.length) {
+        const error = new Error(`The sanitized PDF is missing one or more reviewed pages for problem ${problem.number}.`);
+        error.status = 400;
+        throw error;
+      }
+      const ins = await client.query(
+        `INSERT INTO problems
+           (question, answer, topic, image_url, source, folder_id, created_by, pdf_document_id,
+            source_page, student_pdf_page, source_pages, student_pdf_pages)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+        [problem.question, String(problem.answer), validTag, imageUrl, problem.source, folderId, createdBy, sourceDocumentId,
+          problem.problemPage, studentPageBySourcePage[problem.problemPage], sourceProblemPages, studentProblemPages]
+      );
+      const tagId = tagMap[validTag];
+      if (tagId) await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.rows[0].id, tagId]);
+      imported++;
+    }
+    await client.query('COMMIT');
+    importSessions.delete(importId);
+    return { success: true, done: true, imported, folderId, folderName, sourceDocumentId, errors: session.errors };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 async function cleanupImportSessionImages(session) {
   const imageUrls = session?.processedList?.map((problem) => problem.confirmedImageUrl).filter(Boolean) || [];
   if (!imageUrls.length) return;
@@ -531,7 +733,7 @@ async function cleanupImportSessionImages(session) {
 function pruneImportSessions() {
   const now = Date.now();
   for (const [id, s] of importSessions) {
-    if (!s.busy && now - s.createdAt > IMPORT_SESSION_TTL) {
+    if (!s.busy && now - (s.lastActivityAt || s.createdAt) > IMPORT_SESSION_TTL) {
       importSessions.delete(id);
       void cleanupImportSessionImages(s);
     }
@@ -547,41 +749,40 @@ app.post('/api/import-pdf', authenticateToken, requireContentManager, pdfImportC
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
-  const useAI = req.user.role === 'teacher' ? true : (req.body.useAI !== 'false' && req.body.useAI !== false);
-  const useImageMode = req.body.useImageMode === 'true' || req.body.useImageMode === true;
-  const runVerification = req.body.runVerification !== 'false' && req.body.runVerification !== false;
-  const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  return res.status(409).json({ error: 'PDF imports must use the reviewed upload flow at /api/import-pdf/start.' });
+});
 
-  if (useImageMode) {
-    return res.status(400).json({ error: 'Use POST /api/import-pdf/start for image mode (teacher review flow)' });
+app.get('/api/import-pdf/:importId/preview', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).send('Teacher access required');
+  const session = importSessions.get(req.params.importId);
+  if (!session) return res.status(404).send('Import session expired or not found');
+  if (session.ownerUserId !== req.user.id) return res.status(403).send('This import session belongs to another teacher');
+  if (!session.awaitingStudentPdfApproval || !Buffer.isBuffer(session.studentPdfPreview)) {
+    return res.status(409).send('Review all questions before previewing the student PDF');
   }
-
-  try {
-    const { importPdfToDatabase } = await import('./pdfImport.js');
-    const result = await importPdfToDatabase(req.file.buffer, answerKey, useAI, createdBy, { useImageMode: false, runVerification });
-    res.json({
-      success: true,
-      imported: result.imported,
-      folderId: result.folderId,
-      folderName: result.folderName,
-      errors: result.errors,
-    });
-  } catch (error) {
-    console.error('PDF import error:', error);
-    res.status(error.status || 400).json({ error: error.message || 'Import failed' });
-  }
+  session.lastActivityAt = Date.now();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="student-pdf-preview.pdf"');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Content-Length', String(session.studentPdfPreview.length));
+  return res.status(200).send(session.studentPdfPreview);
 });
 
 app.post('/api/import-pdf/start', authenticateToken, requireContentManager, pdfImportConcurrencyLimit, pdfImportLimiter, uploadPdf.single('pdf'), requireValidPdfUpload, pdfImportGlobalLimiter, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
-    return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Teacher access required for private student PDF imports.' });
   }
+  const rights = validatePdfRights(req, res);
+  if (!rights) return;
   const answerKey = typeof req.body.answerKey === 'string' ? req.body.answerKey.trim() : '';
   if (!answerKey.trim()) {
-    return res.status(400).json({ error: 'Answer key is required for image mode import' });
+    return res.status(400).json({ error: 'Answer key is required for PDF import.' });
   }
-  const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  const useAI = rights.geminiAllowed;
+  const useImageMode = req.body.useImageMode === 'true';
+  const runVerification = req.body.runVerification === 'true';
+  const createdBy = req.user.id;
   pruneImportSessions();
   if (importSessions.size + importStartReservations >= MAX_IMPORT_SESSIONS) {
     return res.status(429).json({ error: 'Too many active PDF review sessions; try again later' });
@@ -589,15 +790,22 @@ app.post('/api/import-pdf/start', authenticateToken, requireContentManager, pdfI
   importStartReservations++;
   let importId;
   try {
-    const { processPdfForImageMode, renderProblemScreenshot, parseAnswerKey, ensureTags } = await import('./pdfImport.js');
+    const { processPdfForReview, renderProblemScreenshot, parseAnswerKey, ensureTags } = await import('./pdfImport.js');
+    await enforceMathcountsPermissionGate(req, rights);
     const answerMap = parseAnswerKey(answerKey);
+    if (Object.keys(answerMap).length === 0) return res.status(400).json({ error: 'Enter a numbered answer key before importing.' });
+    const sourcePageCount = await getPdfPageCount(req.file.buffer);
     const SYSTEM_TAG_NAMES = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
     const client = await pool.connect();
     const tagMap = await ensureTags(client, createdBy);
     client.release();
-    const { folderName, processedList, errors: batchErrors } = await processPdfForImageMode(req.file.buffer, answerMap, SYSTEM_TAG_NAMES);
+    const { folderName, processedList, errors: batchErrors } = await processPdfForReview(req.file.buffer, answerMap, SYSTEM_TAG_NAMES, { useAI, useImageMode, runVerification });
     if (processedList.length === 0) {
       return res.status(400).json({ error: 'No problems extracted from PDF' });
+    }
+    const invalidPage = processedList.find(problem => !Number.isSafeInteger(problem.problemPage) || problem.problemPage < 1);
+    if (invalidPage) {
+      return res.status(422).json({ error: `Could not map problem ${invalidPage.number} to a source PDF page.` });
     }
     importId = randomBytes(24).toString('hex');
     importSessions.set(importId, {
@@ -610,10 +818,15 @@ app.post('/api/import-pdf/start', authenticateToken, requireContentManager, pdfI
       allowedTagNames: SYSTEM_TAG_NAMES,
       defaultTag: 'Arithmetic',
       createdBy,
+      rights,
+      useAI,
+      useImageMode,
+      sourcePageCount,
       currentIndex: 0,
       retryCount: 0,
       retryAttemptsTotal: 0,
       createdAt: Date.now(),
+      lastActivityAt: Date.now(),
     });
     const screenshot = await renderProblemScreenshot(req.file.buffer, processedList[0]);
     res.json({
@@ -622,6 +835,10 @@ app.post('/api/import-pdf/start', authenticateToken, requireContentManager, pdfI
       problemNumber: processedList[0].number,
       total: processedList.length,
       folderName,
+      question: processedList[0].question,
+      answer: processedList[0].answer,
+      sourcePage: processedList[0].problemPage,
+      rights: { sourceTitle: rights.sourceTitle, licenseBasis: rights.licenseBasis },
       screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
       errors: batchErrors,
       reviewVersion: 0,
@@ -639,11 +856,8 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const { importId, accepted, direction } = req.body;
-  if (!importId || typeof accepted !== 'boolean') {
-    return res.status(400).json({ error: 'importId and accepted (boolean) required' });
-  }
-  const dir = direction === 'up' || direction === 'down' ? direction : null;
+  const { importId, accepted, direction, finalPdfApproved } = req.body;
+  if (!importId) return res.status(400).json({ error: 'importId is required' });
   const session = importSessions.get(importId);
   if (!session) {
     return res.status(404).json({ error: 'Import session expired or not found' });
@@ -652,8 +866,32 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
     return res.status(403).json({ error: 'This import session belongs to another user' });
   }
   if (session.busy) return res.status(409).json({ error: 'This import session is already processing a confirmation' });
+  if (Object.prototype.hasOwnProperty.call(req.body, 'finalPdfApproved')) {
+    if (typeof finalPdfApproved !== 'boolean') return res.status(400).json({ error: 'finalPdfApproved must be a boolean' });
+    if (!session.awaitingStudentPdfApproval) return res.status(409).json({ error: 'Review every question before approving the student PDF.' });
+    session.busy = true;
+    session.lastActivityAt = Date.now();
+    try {
+      if (!finalPdfApproved) {
+        importSessions.delete(importId);
+        await cleanupImportSessionImages(session);
+        return res.json({ cancelled: true, message: 'PDF import cancelled; no source document or problems were saved.' });
+      }
+      const result = await persistReviewedPdfImport(importId, session);
+      return res.json(result);
+    } catch (error) {
+      console.error('Final PDF approval error:', error);
+      return res.status(error.status || 500).json({ error: error.message || 'Could not save the reviewed PDF import.' });
+    } finally {
+      session.busy = false;
+    }
+  }
+  if (typeof accepted !== 'boolean') return res.status(400).json({ error: 'accepted (boolean) required for problem review' });
+  if (session.awaitingStudentPdfApproval) return res.status(409).json({ error: 'Approve or cancel the final student PDF preview.' });
+  const dir = direction === 'up' || direction === 'down' ? direction : null;
   session.busy = true;
-  const { pdfBuffer, processedList, folderName, tagMap, allowedTagNames, defaultTag, createdBy } = session;
+  session.lastActivityAt = Date.now();
+  const { pdfBuffer, processedList, folderName, tagMap, allowedTagNames, defaultTag, createdBy, rights, useAI, sourcePageCount } = session;
   const idx = session.currentIndex;
   const processed = processedList[idx];
   if (!processed) {
@@ -665,63 +903,95 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
     const { renderProblemScreenshot, retryRegionForProblem } = await import('./pdfImport.js');
 
     if (accepted) {
-      session.retryCount = 0;
-      const base64 = await renderProblemScreenshot(pdfBuffer, processed);
-      if (base64) {
-        await cleanupStaleUnreferencedUploads(pool);
-        const uploadClient = await pool.connect();
-        let uploadRes;
-        try {
-          await uploadClient.query('BEGIN');
-          uploadRes = await insertImageUpload(uploadClient, {
-            data: base64,
-            filename: `problem-${processed.number}.png`,
-            contentType: 'image/png',
-            createdBy,
-          });
-          await uploadClient.query('COMMIT');
-        } catch (error) {
-          await uploadClient.query('ROLLBACK').catch(() => {});
-          throw error;
-        } finally {
-          uploadClient.release();
+      if (req.body.question !== undefined) {
+        if (typeof req.body.question !== 'string' || !req.body.question.trim() || req.body.question.length > 20000) {
+          return res.status(400).json({ error: 'Corrected question text must contain 1 to 20000 characters.' });
         }
-        processed.confirmedImageUrl = '/uploads/db/' + uploadRes.rows[0].id;
+        processed.question = req.body.question.trim();
+      }
+      if (req.body.answer !== undefined) {
+        if (typeof req.body.answer !== 'string' || !req.body.answer.trim() || parseAndValidateAnswer(req.body.answer.trim()) === null) {
+          return res.status(400).json({ error: 'Corrected answer is invalid. Enter the answer in the supported plain-text format.' });
+        }
+        processed.answer = req.body.answer.trim();
+      }
+      if (!processed.question || processed.question.length > 20000 || !String(processed.answer || '').trim() || parseAndValidateAnswer(String(processed.answer)) === null) {
+        return res.status(400).json({ error: 'Review and correct the question and answer before accepting this item.' });
+      }
+      if (req.body.sourcePage !== undefined) {
+        const correctedPage = Number(req.body.sourcePage);
+        if (!Number.isSafeInteger(correctedPage) || correctedPage < 1 || correctedPage > sourcePageCount) {
+          return res.status(400).json({ error: `Source page must be a whole number between 1 and ${sourcePageCount}.` });
+        }
+        if (correctedPage !== processed.problemPage) {
+          processed.problemPage = correctedPage;
+          processed.sourcePages = [...new Set([correctedPage, processed.diagramPage, ...(processed.continuationPages || [])].filter(Boolean))].sort((a, b) => a - b);
+          processed.problemRegion = null;
+          session.reviewVersion = (session.reviewVersion || 0) + 1;
+          const screenshot = await renderProblemScreenshot(pdfBuffer, processed);
+          return res.json({
+            importId,
+            problemIndex: idx,
+            problemNumber: processed.number,
+            total: processedList.length,
+            question: processed.question,
+            answer: processed.answer,
+            sourcePage: processed.problemPage,
+            screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
+            pageChanged: true,
+            reviewVersion: session.reviewVersion,
+          });
+        }
+      }
+      if (!Number.isSafeInteger(processed.problemPage) || processed.problemPage < 1) {
+        return res.status(400).json({ error: 'This problem has no valid PDF page mapping and cannot be accepted.' });
+      }
+      session.retryCount = 0;
+      // Review screenshots are session-only unless image mode is selected. In
+      // that case, keep the accepted question crop for regular tests; its image
+      // endpoint independently checks that it belongs to an assigned test.
+      if (session.useImageMode) {
+        const base64 = await renderProblemScreenshot(pdfBuffer, processed);
+        if (base64) {
+          await cleanupStaleUnreferencedUploads(pool);
+          const uploadClient = await pool.connect();
+          let uploadRes;
+          try {
+            await uploadClient.query('BEGIN');
+            uploadRes = await insertImageUpload(uploadClient, {
+              data: base64,
+              filename: `problem-${processed.number}.png`,
+              contentType: 'image/png',
+              createdBy,
+            });
+            await uploadClient.query('COMMIT');
+          } catch (error) {
+            await uploadClient.query('ROLLBACK').catch(() => {});
+            throw error;
+          } finally {
+            uploadClient.release();
+          }
+          processed.confirmedImageUrl = '/uploads/db/' + uploadRes.rows[0].id;
+        }
       }
       session.currentIndex = idx + 1;
       if (session.currentIndex >= processedList.length) {
-        const client = await pool.connect();
-        try {
-          await client.query('BEGIN');
-          let folderRow = await client.query('SELECT id FROM folders WHERE name = $1 AND (created_by IS NOT DISTINCT FROM $2)', [folderName, createdBy]);
-          if (folderRow.rows.length === 0) {
-            folderRow = await client.query('INSERT INTO folders (name, created_by) VALUES ($1, $2) RETURNING id', [folderName, createdBy]);
-          }
-          const folderId = folderRow.rows[0].id;
-          let imported = 0;
-          for (const p of processedList) {
-            const tagName = (p.topics?.[0] || defaultTag).trim();
-            const validTag = allowedTagNames.includes(tagName) ? tagName : defaultTag;
-            const imageUrl = p.confirmedImageUrl || null;
-            const ins = await client.query(
-              'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-              [p.question, String(p.answer), validTag, imageUrl, p.source, folderId, createdBy]
-            );
-            const tagId = tagMap[validTag];
-            if (tagId) {
-              await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.rows[0].id, tagId]);
-            }
-            imported++;
-          }
-          await client.query('COMMIT');
-          importSessions.delete(importId);
-          return res.json({ success: true, done: true, imported, folderId, folderName, errors: session.errors });
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw err;
-        } finally {
-          client.release();
-        }
+        const sourcePages = [...new Set(processedList.flatMap(problem => problem.sourcePages || [problem.problemPage]))].sort((a, b) => a - b);
+        const { safeBuffer, studentPageBySourcePage, studentPageCount, originalPageCount } = await makeStudentPdf(pdfBuffer, sourcePages);
+        session.studentPdfPreview = safeBuffer;
+        session.studentPageBySourcePage = studentPageBySourcePage;
+        session.studentPageCount = studentPageCount;
+        session.originalPageCount = originalPageCount;
+        session.awaitingStudentPdfApproval = true;
+        session.lastActivityAt = Date.now();
+        return res.json({
+          importId,
+          awaitingStudentPdfApproval: true,
+          sourceTitle: rights.sourceTitle,
+          studentPageCount,
+          reviewedQuestionCount: processedList.length,
+          message: 'Review the exact student-facing PDF. No problems or source document have been saved yet.',
+        });
       }
       const nextProcessed = processedList[session.currentIndex];
       const screenshot = await renderProblemScreenshot(pdfBuffer, nextProcessed);
@@ -730,10 +1000,16 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
         problemIndex: session.currentIndex,
         problemNumber: nextProcessed.number,
         total: processedList.length,
+        question: nextProcessed.question,
+        answer: nextProcessed.answer,
+        sourcePage: nextProcessed.problemPage,
         screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
         reviewVersion: 0,
       });
     } else {
+      if (!useAI) {
+        return res.status(409).json({ error: 'AI retries were not enabled for this import. Edit the question or answer, then approve it only if the displayed source page is correct.' });
+      }
       if ((session.retryAttemptsTotal || 0) >= MAX_GEMINI_RETRIES_PER_SESSION) {
         return res.status(429).json({ error: `Retry limit reached for this PDF review session (${MAX_GEMINI_RETRIES_PER_SESSION})` });
       }
@@ -747,6 +1023,9 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
         problemIndex: idx,
         problemNumber: processed.number,
         total: processedList.length,
+        question: processed.question,
+        answer: processed.answer,
+        sourcePage: processed.problemPage,
         screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
         retried: ok,
         reviewVersion: session.reviewVersion,
@@ -939,6 +1218,19 @@ app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
       const studentRow = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
       const teacherId = studentRow.rows[0]?.teacher_id;
       if (row.created_by != null && row.created_by !== teacherId) return res.status(403).send('Forbidden');
+      const assignedProblemImage = await pool.query(
+        `SELECT 1
+         FROM problems p
+         JOIN tests t ON p.id = ANY(t.problem_ids)
+         LEFT JOIN test_sessions ts ON ts.test_id = t.id AND ts.student_id = $2
+         LEFT JOIN test_attempts ta ON ta.test_id = t.id AND ta.student_id = $2
+         WHERE p.image_url = $1 AND t.created_by = $3
+           AND ((ts.submitted_at IS NULL AND ts.expires_at + INTERVAL '30 seconds' >= CURRENT_TIMESTAMP)
+             OR ta.id IS NOT NULL)
+         LIMIT 1`,
+        ['/uploads/db/' + id, req.user.id, teacherId]
+      );
+      if (!assignedProblemImage.rowCount) return res.status(403).send('This image is not part of one of your tests');
     } else {
       return res.status(403).send('Forbidden');
     }
@@ -1252,17 +1544,70 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'problemIds must be unique positive integer ids' });
     }
     const accessible = await pool.query(
-      'SELECT id FROM problems WHERE id = ANY($1::int[]) AND (created_by IS NULL OR created_by = $2)',
+      `SELECT id, created_by, pdf_document_id, source_page, student_pdf_page, source_pages, student_pdf_pages
+       FROM problems WHERE id = ANY($1::int[]) AND (created_by IS NULL OR created_by = $2)`,
       [problemIds, req.user.id]
     );
     if (accessible.rowCount !== problemIds.length) {
       return res.status(400).json({ error: 'Every problem must be public or owned by you' });
     }
-    const result = await pool.query(
-      'INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type]
-    );
-    res.json(result.rows[0]);
+    const problemById = new Map(accessible.rows.map(problem => [problem.id, problem]));
+    const problemDocumentIds = [...new Set(accessible.rows.map(problem => problem.pdf_document_id).filter(Boolean))];
+    const hasSourceDocumentChoice = Object.prototype.hasOwnProperty.call(req.body, 'sourceDocumentId');
+    const rawDocumentChoice = req.body.sourceDocumentId;
+    const suppliedDocumentId = rawDocumentChoice == null || rawDocumentChoice === ''
+      ? null
+      : Number(rawDocumentChoice);
+    if (suppliedDocumentId != null && (!Number.isSafeInteger(suppliedDocumentId) || suppliedDocumentId < 1)) {
+      return res.status(400).json({ error: 'sourceDocumentId must be a positive integer.' });
+    }
+    // A null value means the teacher chose a regular test without a viewer.
+    // If older clients omit the field, infer only when every selected problem
+    // belongs to the same source PDF; mixed/legacy tests keep working as before.
+    const canInferSinglePdf = problemDocumentIds.length === 1 && accessible.rows.every(problem => problem.pdf_document_id === problemDocumentIds[0]);
+    const sourceDocumentId = hasSourceDocumentChoice
+      ? suppliedDocumentId
+      : (canInferSinglePdf ? problemDocumentIds[0] : null);
+    if (sourceDocumentId != null) {
+      if (problemDocumentIds.length !== 1 || problemDocumentIds[0] !== sourceDocumentId || accessible.rows.some(problem => problem.pdf_document_id !== sourceDocumentId)) {
+        return res.status(400).json({ error: 'All questions in a PDF-based test must come from the same PDF source.' });
+      }
+      const sourceDoc = await pool.query(
+        'SELECT id FROM source_documents WHERE id = $1 AND created_by = $2 AND rights_confirmed = true',
+        [sourceDocumentId, req.user.id]
+      );
+      if (!sourceDoc.rowCount) return res.status(403).json({ error: 'The PDF source is unavailable or has not been rights-approved.' });
+      if (accessible.rows.some(problem => !problem.source_page || !problem.student_pdf_page || !problem.source_pages?.length || !problem.student_pdf_pages?.length)) {
+        return res.status(400).json({ error: 'Every question must have a reviewed source page before it can be assigned with a PDF.' });
+      }
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        `INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type, source_document_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type, sourceDocumentId]
+      );
+      if (sourceDocumentId != null) {
+        for (const problemId of problemIds) {
+          const problem = problemById.get(problemId);
+          await client.query(
+            `INSERT INTO test_problem_pdf_locations (test_id, problem_id, source_page, pdf_page, source_pages, pdf_pages)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [result.rows[0].id, problemId, problem.source_page, problem.student_pdf_page, problem.source_pages, problem.student_pdf_pages]
+          );
+        }
+      }
+      await client.query('COMMIT');
+      res.json(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -1412,13 +1757,19 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
     if (problemIds.length === 0) return res.json([]);
-    const visibility = req.user.role === 'admin' ? '' : ' AND (p.created_by IS NULL OR p.created_by = $2)';
-    const queryParams = req.user.role === 'admin' ? [problemIds] : [problemIds, test.created_by];
+    const visibility = req.user.role === 'admin' ? '' : ' AND (p.created_by IS NULL OR p.created_by = $3)';
     const result = await pool.query(
-      `SELECT p.id, p.question, p.topic, p.image_url, p.source, p.folder_id, f.name AS folder_name
+      `SELECT p.id, p.question, p.topic, p.image_url, p.source, p.folder_id,
+              p.pdf_document_id, p.source_page, p.student_pdf_page,
+              f.name AS folder_name,
+              locations.source_page AS test_source_page,
+              locations.pdf_page AS test_pdf_page,
+              locations.source_pages AS test_source_pages,
+              locations.pdf_pages AS test_pdf_pages
        FROM problems p LEFT JOIN folders f ON p.folder_id = f.id
+       LEFT JOIN test_problem_pdf_locations locations ON locations.test_id = $2 AND locations.problem_id = p.id
        WHERE p.id = ANY($1)${visibility}`,
-      queryParams
+      req.user.role === 'admin' ? [problemIds, testId] : [problemIds, testId, test.created_by]
     );
     const visibleProblemIds = result.rows.map((problem) => problem.id);
     const tagResult = visibleProblemIds.length
@@ -1437,6 +1788,11 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
     const ordered = problemIds.map(id => problemMap[id]).filter(Boolean);
     const problems = ordered.map(p => ({
       ...p,
+      sourceDocumentId: test.source_document_id ?? null,
+      sourcePage: p.test_source_page ?? p.source_page ?? null,
+      pdfPage: p.test_pdf_page ?? p.student_pdf_page ?? null,
+      sourcePages: p.test_source_pages ?? p.source_pages ?? [],
+      pdfPages: p.test_pdf_pages ?? p.student_pdf_pages ?? [],
       tag_ids: tagsByProblem[p.id] || [],
       tag_names: (tagsByProblem[p.id] || []).map(tid => tagMap[tid]).filter(Boolean)
     }));
@@ -1444,6 +1800,89 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Get test problems error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Deliver only the sanitized, question-pages-only PDF for this specific test.
+// Unlike the image upload route, this endpoint authorizes against the test and
+// active student session on every request (including PDF byte-range requests).
+app.get('/api/tests/:id/pdf', authenticateToken, async (req, res) => {
+  const testId = Number(req.params.id);
+  if (!Number.isSafeInteger(testId) || testId < 1) return res.status(400).send('Invalid test id');
+  try {
+    const result = await pool.query(
+      `SELECT t.id, t.created_by, t.source_document_id, d.student_data
+       FROM tests t
+       JOIN source_documents d ON d.id = t.source_document_id
+       WHERE t.id = $1 AND d.rights_confirmed = true AND d.created_by = t.created_by`,
+      [testId]
+    );
+    const test = result.rows[0];
+    if (!test) return res.status(404).send('PDF not found');
+
+    if (req.user.role === 'teacher') {
+      if (req.user.id !== test.created_by) return res.status(403).send('Forbidden');
+    } else if (req.user.role === 'student') {
+      const student = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
+      if (student.rows[0]?.teacher_id !== test.created_by) return res.status(403).send('Forbidden');
+      const sessionResult = await pool.query(
+        `SELECT submitted_at,
+                expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP AS expired
+         FROM test_sessions WHERE test_id = $1 AND student_id = $2`,
+        [testId, req.user.id]
+      );
+      const session = sessionResult.rows[0];
+      if (!session) return res.status(409).send('Start this test before opening its PDF');
+      if (session.submitted_at) return res.status(403).send('Test already submitted');
+      if (session.expired) return res.status(410).send('Test session expired');
+    } else {
+      return res.status(403).send('Forbidden');
+    }
+
+    const pdf = Buffer.isBuffer(test.student_data) ? test.student_data : Buffer.from(test.student_data);
+    const total = pdf.length;
+    if (!total) return res.status(404).send('PDF not found');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="test-source.pdf"');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Accept-Ranges', 'bytes');
+    const rangeHeader = req.get('range');
+    if (!rangeHeader) {
+      res.setHeader('Content-Length', String(total));
+      return res.status(200).send(pdf);
+    }
+    const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (!match || (!match[1] && !match[2])) {
+      res.setHeader('Content-Range', `bytes */${total}`);
+      return res.status(416).end();
+    }
+    let start;
+    let end;
+    if (!match[1]) {
+      const suffixLength = Number(match[2]);
+      if (!Number.isSafeInteger(suffixLength) || suffixLength < 1) {
+        res.setHeader('Content-Range', `bytes */${total}`);
+        return res.status(416).end();
+      }
+      start = Math.max(0, total - suffixLength);
+      end = total - 1;
+    } else {
+      start = Number(match[1]);
+      end = match[2] ? Number(match[2]) : total - 1;
+    }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= total || end < start) {
+      res.setHeader('Content-Range', `bytes */${total}`);
+      return res.status(416).end();
+    }
+    end = Math.min(end, total - 1);
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+    res.setHeader('Content-Length', String(end - start + 1));
+    return res.end(pdf.subarray(start, end + 1));
+  } catch (error) {
+    console.error('Test PDF serve error:', error);
+    res.status(500).send('Unable to load PDF');
   }
 });
 

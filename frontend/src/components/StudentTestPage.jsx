@@ -1,7 +1,8 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import ConfirmationDialog from './ConfirmationDialog';
 import LatexRenderer from './LatexRenderer';
 import ProblemImage from './ProblemImage';
+import SourcePdfViewer from './SourcePdfViewer';
 
 function formatTime(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -16,12 +17,24 @@ export default function StudentTestPage({
   testAnswers,
   setTestAnswers,
   token,
+  pdfUrl,
   onSubmit,
   submitting,
   submissionError,
   onOpenReview,
 }) {
   const [showSubmitConfirmation, setShowSubmitConfirmation] = useState(false);
+  const [activeProblemId, setActiveProblemId] = useState(testProblems[0]?.id ?? null);
+  const [viewerPage, setViewerPage] = useState(() => {
+    const page = Number(testProblems[0]?.pdfPage ?? testProblems[0]?.source_page ?? testProblems[0]?.sourcePage);
+    return Number.isInteger(page) && page > 0 ? page : 1;
+  });
+  const [mobilePanel, setMobilePanel] = useState('answers');
+  const pdfBacked = Boolean(pdfUrl);
+  const activeProblem = useMemo(
+    () => testProblems.find(problem => String(problem.id) === String(activeProblemId)) || testProblems[0],
+    [testProblems, activeProblemId]
+  );
   const answeredQuestions = testProblems
     .map((problem, index) => ({ id: problem.id, number: index + 1, answer: testAnswers[problem.id] || '' }))
     .filter(item => item.answer.trim());
@@ -32,6 +45,16 @@ export default function StudentTestPage({
   const unansweredCount = unansweredQuestions.length;
   const progress = testProblems.length ? (answeredCount / testProblems.length) * 100 : 0;
   const closeReview = useCallback(() => setShowSubmitConfirmation(false), []);
+
+  const selectProblem = (problemId, focusAnswer = true) => {
+    setActiveProblemId(problemId);
+    const problem = testProblems.find(item => String(item.id) === String(problemId));
+    const page = Number(problem?.pdfPage ?? problem?.source_page ?? problem?.sourcePage);
+    if (Number.isInteger(page) && page > 0) setViewerPage(page);
+    if (focusAnswer) {
+      window.setTimeout(() => document.getElementById(`answer-${problemId}`)?.focus({ preventScroll: true }), 0);
+    }
+  };
 
   return (
     <main className="min-h-screen bg-[#f5f7f8] flex justify-center">
@@ -73,6 +96,7 @@ export default function StudentTestPage({
                     aria-label={`Question ${index + 1}, ${answered ? 'answered' : 'unanswered'}`}
                     title={`Question ${index + 1}: ${answered ? 'answered' : 'unanswered'}`}
                     onClick={() => {
+                      if (pdfBacked) selectProblem(problem.id, false);
                       const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
                       document.getElementById(`question-${problem.id}`)?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
                       document.getElementById(`answer-${problem.id}`)?.focus({ preventScroll: true });
@@ -87,6 +111,13 @@ export default function StudentTestPage({
           </ol>
           <p className="mt-3 text-xs text-gray-600">Blue questions have an answer; outlined questions are blank.</p>
         </nav>
+
+        {pdfBacked && (
+          <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-gray-200 p-1 lg:hidden" role="tablist" aria-label="Test content">
+            <button type="button" role="tab" aria-selected={mobilePanel === 'pdf'} onClick={() => setMobilePanel('pdf')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold ${mobilePanel === 'pdf' ? 'bg-white text-[#006da6] shadow-sm' : 'text-gray-700'}`}>PDF</button>
+            <button type="button" role="tab" aria-selected={mobilePanel === 'answers'} onClick={() => setMobilePanel('answers')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold ${mobilePanel === 'answers' ? 'bg-white text-[#006da6] shadow-sm' : 'text-gray-700'}`}>Answers</button>
+          </div>
+        )}
 
         <section className="mb-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700 space-y-2" aria-labelledby="answer-format-heading">
           <h2 id="answer-format-heading" className="font-semibold">How to format answers</h2>
@@ -109,35 +140,62 @@ export default function StudentTestPage({
           </div>
         )}
 
-        <div className="space-y-4">
-          {testProblems.map((problem, index) => (
-            <section key={problem.id} id={`question-${problem.id}`} className="scroll-mt-28 bg-white rounded-xl shadow p-4 sm:p-6" aria-labelledby={`question-heading-${problem.id}`}>
-              <div className="mb-4">
-                <span className="text-xs font-medium text-gray-500">Question {index + 1} of {testProblems.length}</span>
-                {problem.source && <p className="text-xs text-gray-500 mt-0.5">Source: {problem.source}</p>}
-                <h2 id={`question-heading-${problem.id}`} className="text-base font-semibold text-gray-800 mt-1"><LatexRenderer text={problem.question} /></h2>
-                {problem.image_url && <ProblemImage url={problem.image_url} token={token} />}
-              </div>
-              <label htmlFor={`answer-${problem.id}`} className="sr-only">Answer for question {index + 1}</label>
-              <input
-                id={`answer-${problem.id}`}
-                type="text"
-                value={testAnswers[problem.id] || ''}
-                onChange={event => setTestAnswers({ ...testAnswers, [problem.id]: event.target.value })}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:border-[#006da6] focus:outline-none text-center text-base sm:text-sm"
-                placeholder="e.g. 42, 3/4, √2, √2/2"
-                autoComplete="off"
-                autoCapitalize="off"
-                spellCheck="false"
+        <div className={pdfBacked ? 'grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(20rem,0.9fr)]' : ''}>
+          {pdfBacked && (
+            <div className={`${mobilePanel === 'pdf' ? 'block' : 'hidden'} lg:sticky lg:top-24 lg:block`}>
+              <SourcePdfViewer
+                pdfUrl={pdfUrl}
+                pageNumber={viewerPage}
+                onPageChange={setViewerPage}
+                problems={testProblems.map((problem, index) => ({
+                  id: problem.id,
+                  pageNumber: problem.pdfPage ?? problem.source_page ?? problem.sourcePage,
+                  number: index + 1,
+                }))}
+                activeProblemId={activeProblem?.id}
+                onSelectProblem={problemId => selectProblem(problemId)}
+                className="h-[70vh] min-h-[28rem] lg:h-[calc(100vh-8rem)]"
               />
-              {(testAnswers[problem.id] || '').trim() && (
-                <div className="mt-2 text-sm text-gray-500 flex items-center gap-2">
-                  <span>Will be interpreted as:</span>
-                  <code className="px-2 py-1 bg-[#f5f7f8] rounded border border-gray-200 font-mono text-gray-800">{String(testAnswers[problem.id]).trim()}</code>
+            </div>
+          )}
+          <div className={`${pdfBacked ? `${mobilePanel === 'answers' ? 'block' : 'hidden'} lg:block ` : ''}space-y-4`}>
+            {testProblems.map((problem, index) => (
+              <section key={problem.id} id={`question-${problem.id}`} className={`scroll-mt-28 rounded-xl bg-white p-4 shadow sm:p-6 ${pdfBacked && String(activeProblem?.id) === String(problem.id) ? 'ring-2 ring-[#006da6]' : ''}`} aria-labelledby={`question-heading-${problem.id}`}>
+                <div className="mb-4">
+                  <span className="text-xs font-medium text-gray-500">Question {index + 1} of {testProblems.length}</span>
+                  {!pdfBacked && problem.source && <p className="text-xs text-gray-500 mt-0.5">Source: {problem.source}</p>}
+                  {!pdfBacked && <h2 id={`question-heading-${problem.id}`} className="text-base font-semibold text-gray-800 mt-1"><LatexRenderer text={problem.question} /></h2>}
+                  {!pdfBacked && problem.image_url && <ProblemImage url={problem.image_url} token={token} />}
+                  {pdfBacked && Number(problem.pdfPage ?? problem.source_page ?? problem.sourcePage) > 0 && <p className="text-xs text-gray-500 mt-1">Source PDF page {problem.pdfPage ?? problem.source_page ?? problem.sourcePage}</p>}
+                  {pdfBacked && problem.question && (
+                    <details className="mt-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                      <summary className="cursor-pointer text-sm font-medium text-[#006da6]">Read question text</summary>
+                      <div className="mt-2 text-sm leading-6 text-gray-800"><LatexRenderer text={problem.question} /></div>
+                    </details>
+                  )}
                 </div>
-              )}
-            </section>
-          ))}
+                <label htmlFor={`answer-${problem.id}`} className="sr-only">Answer for question {index + 1}</label>
+                <input
+                  id={`answer-${problem.id}`}
+                  type="text"
+                  value={testAnswers[problem.id] || ''}
+                  onFocus={() => { if (pdfBacked) selectProblem(problem.id, false); }}
+                  onChange={event => setTestAnswers({ ...testAnswers, [problem.id]: event.target.value })}
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 text-center text-base focus:border-[#006da6] focus:outline-none sm:text-sm"
+                  placeholder="e.g. 42, 3/4, √2, √2/2"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck="false"
+                />
+                {(testAnswers[problem.id] || '').trim() && (
+                  <div className="mt-2 flex items-center gap-2 text-sm text-gray-500">
+                    <span>Will be interpreted as:</span>
+                    <code className="rounded border border-gray-200 bg-[#f5f7f8] px-2 py-1 font-mono text-gray-800">{String(testAnswers[problem.id]).trim()}</code>
+                  </div>
+                )}
+              </section>
+            ))}
+          </div>
         </div>
 
         <div className="mt-6">
