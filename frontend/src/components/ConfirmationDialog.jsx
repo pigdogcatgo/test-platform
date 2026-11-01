@@ -67,7 +67,7 @@ export default function ConfirmationDialog({ title, description, confirmLabel, b
             <p className="text-sm font-semibold text-gray-800">Review blank answers</p>
             <div className="mt-2 flex flex-wrap gap-2">
               {reviewItems.map(item => (
-                <button key={item.id} type="button" onClick={() => onReviewItem(item.id)} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:border-[#006da6] hover:bg-blue-50 disabled:cursor-wait disabled:opacity-60">Question {item.number}</button>
+                <button key={item.id} type="button" onClick={() => onReviewItem(item.id)} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:border-[#2a61ba] hover:bg-blue-50 disabled:cursor-wait disabled:opacity-60">Question {item.number}</button>
               ))}
             </div>
           </div>
@@ -75,7 +75,7 @@ export default function ConfirmationDialog({ title, description, confirmLabel, b
         {error && <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{error}</p>}
         <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
           <button ref={cancelRef} type="button" onClick={onCancel} disabled={busy} className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60">Keep working</button>
-          <button ref={confirmRef} type="button" onClick={onConfirm} disabled={busy} className="rounded-lg bg-[#006da6] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#006699] disabled:opacity-60">{busy ? busyLabel : confirmLabel}</button>
+          <button ref={confirmRef} type="button" onClick={onConfirm} disabled={busy} className="rounded-lg bg-[#2a61ba] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#20529f] disabled:opacity-60">{busy ? busyLabel : confirmLabel}</button>
         </div>
       </section>
     </div>

@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: mathcounts-oplet-prototype
+    runtime: node
+    plan: free
+    buildCommand: npm ci --prefix backend && npm ci --include=dev --prefix frontend && npm run build --prefix frontend
+    startCommand: npm start --prefix backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEMO_MODE
+        value: "true"
+      - key: VITE_DEMO_MODE
+        value: "true"
+      - key: CLIENT_IP_HEADER
+        value: cf-connecting-ip
+      - key: ENABLE_TEACHER_SIGNUP
+        value: "false"
+      - key: DEMO_DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL_CA_BASE64
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DEMO_TEACHER_USERNAME
+        value: demo-teacher
+      - key: DEMO_TEACHER_PASSWORD
+        value: teacher-preview-26
+      - key: DEMO_STUDENT_USERNAME
+        value: demo-student
+      - key: DEMO_STUDENT_PASSWORD
+        value: student-preview-26
+      - key: VITE_DEMO_TEACHER_USERNAME
+        value: demo-teacher
+      - key: VITE_DEMO_STUDENT_USERNAME
+        value: demo-student
+      - key: VITE_DEMO_TEACHER_PASSWORD
+        value: teacher-preview-26
+      - key: VITE_DEMO_STUDENT_PASSWORD
+        value: student-preview-26

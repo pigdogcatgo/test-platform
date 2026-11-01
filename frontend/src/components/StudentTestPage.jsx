@@ -12,6 +12,7 @@ function formatTime(seconds) {
 
 export default function StudentTestPage({
   activeTest,
+  demoMode = false,
   timeRemaining,
   testProblems,
   testAnswers,
@@ -52,21 +53,27 @@ export default function StudentTestPage({
     const page = Number(problem?.pdfPage ?? problem?.source_page ?? problem?.sourcePage);
     if (Number.isInteger(page) && page > 0) setViewerPage(page);
     if (focusAnswer) {
+      if (pdfBacked) setMobilePanel('answers');
       window.setTimeout(() => document.getElementById(`answer-${problemId}`)?.focus({ preventScroll: true }), 0);
     }
   };
 
   return (
-    <main className="min-h-screen bg-[#f5f7f8] flex justify-center">
+    <main className="test-workspace min-h-screen bg-[#f1f6fd] flex justify-center">
       <div className="w-full max-w-4xl p-3 sm:p-6">
-        <header className="sticky top-0 z-50 mb-6">
+        <header className="test-header sticky top-0 z-50 mb-6">
           <div className="bg-white rounded-xl shadow px-4 sm:px-6 py-4 flex items-center gap-3">
-            <h1 className="text-base sm:text-xl font-semibold text-gray-800 text-left flex-1 min-w-0 break-words">{activeTest.name}</h1>
+            <div className="flex-1 min-w-0">
+              <h1 className="text-base sm:text-xl font-semibold text-gray-800 break-words">{activeTest.name}</h1>
+              <p className="mt-1 text-xs text-gray-600">
+                {demoMode ? 'Demo scoring · ' : ''}{activeTest.test_type === 'target' ? 'Target · 8 questions · 2 points per correct answer' : 'Sprint · 30 questions · 1 point per correct answer'}
+              </p>
+            </div>
             <div className="flex justify-end shrink-0">
               <div
                 role="timer"
                 aria-label={`Time remaining ${formatTime(timeRemaining)}`}
-                className={`px-4 py-2 rounded-lg font-semibold text-sm ${timeRemaining < 60 ? 'bg-red-100 text-red-700' : 'bg-[#e8f4f9] text-[#006da6]'}`}
+                className={`px-4 py-2 rounded-lg font-semibold text-sm ${timeRemaining < 60 ? 'bg-red-100 text-red-700' : 'bg-[#e6effb] text-[#2a61ba]'}`}
               >
                 {formatTime(timeRemaining)}
               </div>
@@ -80,7 +87,7 @@ export default function StudentTestPage({
             <p className="text-gray-600">{unansweredCount} unanswered</p>
           </div>
           <div className="h-2 overflow-hidden rounded-full bg-gray-100" role="progressbar" aria-label="Questions answered" aria-valuemin="0" aria-valuemax={testProblems.length} aria-valuenow={answeredCount}>
-            <div className="h-full rounded-full bg-[#006da6] transition-[width] duration-200" style={{ width: `${progress}%` }} />
+            <div className="h-full rounded-full bg-[#2a61ba] transition-[width] duration-200" style={{ width: `${progress}%` }} />
           </div>
         </section>
 
@@ -96,26 +103,28 @@ export default function StudentTestPage({
                     aria-label={`Question ${index + 1}, ${answered ? 'answered' : 'unanswered'}`}
                     title={`Question ${index + 1}: ${answered ? 'answered' : 'unanswered'}`}
                     onClick={() => {
-                      if (pdfBacked) selectProblem(problem.id, false);
+                      if (pdfBacked) { setMobilePanel('answers'); selectProblem(problem.id, false); }
+                      window.setTimeout(() => {
                       const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
                       document.getElementById(`question-${problem.id}`)?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
                       document.getElementById(`answer-${problem.id}`)?.focus({ preventScroll: true });
+                      }, 0);
                     }}
-                    className={`min-h-11 w-full rounded-lg border px-2 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007bb8] ${answered ? 'border-[#006da6] bg-[#006da6] text-white hover:bg-[#006699]' : 'border-gray-300 bg-white text-gray-700 hover:border-[#006da6] hover:bg-blue-50'}`}
+                    className={`min-h-11 w-full rounded-lg border px-2 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007bb8] ${answered ? 'border-[#2a61ba] bg-[#2a61ba] text-white hover:bg-[#20529f]' : 'border-gray-300 bg-white text-gray-700 hover:border-[#2a61ba] hover:bg-blue-50'}`}
                   >
-                    {index + 1}
+                    {index + 1}{answered && <span className="ml-0.5" aria-hidden="true">✓</span>}
                   </button>
                 </li>
               );
             })}
           </ol>
-          <p className="mt-3 text-xs text-gray-600">Blue questions have an answer; outlined questions are blank.</p>
+          <p className="mt-3 text-xs text-gray-600">Checked questions have an answer; outlined questions are blank.</p>
         </nav>
 
         {pdfBacked && (
           <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-gray-200 p-1 lg:hidden" role="tablist" aria-label="Test content">
-            <button type="button" role="tab" aria-selected={mobilePanel === 'pdf'} onClick={() => setMobilePanel('pdf')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold ${mobilePanel === 'pdf' ? 'bg-white text-[#006da6] shadow-sm' : 'text-gray-700'}`}>PDF</button>
-            <button type="button" role="tab" aria-selected={mobilePanel === 'answers'} onClick={() => setMobilePanel('answers')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold ${mobilePanel === 'answers' ? 'bg-white text-[#006da6] shadow-sm' : 'text-gray-700'}`}>Answers</button>
+            <button type="button" role="tab" aria-selected={mobilePanel === 'pdf'} onClick={() => setMobilePanel('pdf')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold ${mobilePanel === 'pdf' ? 'bg-white text-[#2a61ba] shadow-sm' : 'text-gray-700'}`}>PDF</button>
+            <button type="button" role="tab" aria-selected={mobilePanel === 'answers'} onClick={() => setMobilePanel('answers')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold ${mobilePanel === 'answers' ? 'bg-white text-[#2a61ba] shadow-sm' : 'text-gray-700'}`}>Answers</button>
           </div>
         )}
 
@@ -131,7 +140,9 @@ export default function StudentTestPage({
         </section>
 
         <div className="mb-4 rounded-xl border-2 border-amber-500 bg-amber-100 px-4 py-4 text-center text-sm sm:text-base font-semibold text-amber-900 shadow-sm" role="note">
-          Keep this page open and in the foreground. Switching tabs automatically submits your answers when you return. Reloading or closing the page can also submit them.
+          {demoMode
+            ? 'Shared demo: you may switch tabs or apps; the timer keeps running. Your draft answers are saved in this browser tab until you submit.'
+            : 'Keep this page open and in the foreground. Switching tabs automatically submits your answers when you return. Reloading or closing the page can also submit them.'}
         </div>
 
         {timeRemaining < 60 && (
@@ -160,16 +171,17 @@ export default function StudentTestPage({
           )}
           <div className={`${pdfBacked ? `${mobilePanel === 'answers' ? 'block' : 'hidden'} lg:block ` : ''}space-y-4`}>
             {testProblems.map((problem, index) => (
-              <section key={problem.id} id={`question-${problem.id}`} className={`scroll-mt-28 rounded-xl bg-white p-4 shadow sm:p-6 ${pdfBacked && String(activeProblem?.id) === String(problem.id) ? 'ring-2 ring-[#006da6]' : ''}`} aria-labelledby={`question-heading-${problem.id}`}>
+              <section key={problem.id} id={`question-${problem.id}`} className={`question-sheet scroll-mt-28 rounded-xl bg-white p-4 shadow sm:p-6 ${pdfBacked && String(activeProblem?.id) === String(problem.id) ? 'ring-2 ring-[#2a61ba]' : ''}`} aria-labelledby={`question-heading-${problem.id}`}>
                 <div className="mb-4">
-                  <span className="text-xs font-medium text-gray-500">Question {index + 1} of {testProblems.length}</span>
+                  <div className="question-index"><span aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><p>Question {index + 1} of {testProblems.length}</p></div>
+                  {pdfBacked && <h2 id={`question-heading-${problem.id}`} className="sr-only">Question {index + 1}</h2>}
                   {!pdfBacked && problem.source && <p className="text-xs text-gray-500 mt-0.5">Source: {problem.source}</p>}
                   {!pdfBacked && <h2 id={`question-heading-${problem.id}`} className="text-base font-semibold text-gray-800 mt-1"><LatexRenderer text={problem.question} /></h2>}
                   {!pdfBacked && problem.image_url && <ProblemImage url={problem.image_url} token={token} />}
                   {pdfBacked && Number(problem.pdfPage ?? problem.source_page ?? problem.sourcePage) > 0 && <p className="text-xs text-gray-500 mt-1">Source PDF page {problem.pdfPage ?? problem.source_page ?? problem.sourcePage}</p>}
                   {pdfBacked && problem.question && (
                     <details className="mt-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-                      <summary className="cursor-pointer text-sm font-medium text-[#006da6]">Read question text</summary>
+                      <summary className="cursor-pointer text-sm font-medium text-[#2a61ba]">Read question text</summary>
                       <div className="mt-2 text-sm leading-6 text-gray-800"><LatexRenderer text={problem.question} /></div>
                     </details>
                   )}
@@ -181,7 +193,7 @@ export default function StudentTestPage({
                   value={testAnswers[problem.id] || ''}
                   onFocus={() => { if (pdfBacked) selectProblem(problem.id, false); }}
                   onChange={event => setTestAnswers({ ...testAnswers, [problem.id]: event.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 text-center text-base focus:border-[#006da6] focus:outline-none sm:text-sm"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 text-center text-base focus:border-[#2a61ba] focus:outline-none sm:text-sm"
                   placeholder="e.g. 42, 3/4, √2, √2/2"
                   autoComplete="off"
                   autoCapitalize="off"
@@ -189,8 +201,8 @@ export default function StudentTestPage({
                 />
                 {(testAnswers[problem.id] || '').trim() && (
                   <div className="mt-2 flex items-center gap-2 text-sm text-gray-500">
-                    <span>Will be interpreted as:</span>
-                    <code className="rounded border border-gray-200 bg-[#f5f7f8] px-2 py-1 font-mono text-gray-800">{String(testAnswers[problem.id]).trim()}</code>
+                    <span>Your entered answer:</span>
+                    <code className="rounded border border-gray-200 bg-[#f1f6fd] px-2 py-1 font-mono text-gray-800">{String(testAnswers[problem.id]).trim()}</code>
                   </div>
                 )}
               </section>
@@ -199,7 +211,7 @@ export default function StudentTestPage({
         </div>
 
         <div className="mt-6">
-          <button type="button" onClick={() => { onOpenReview(); setShowSubmitConfirmation(true); }} disabled={submitting} className="w-full bg-[#006da6] hover:bg-[#006699] disabled:opacity-60 text-white py-3 rounded-lg font-semibold">
+          <button type="button" onClick={() => { onOpenReview(); setShowSubmitConfirmation(true); }} disabled={submitting} className="w-full bg-[#2a61ba] hover:bg-[#20529f] disabled:opacity-60 text-white py-3 rounded-lg font-semibold">
             Review and submit test
           </button>
           {submissionError && !showSubmitConfirmation && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">{submissionError} Reopen the review to retry.</p>}
@@ -217,9 +229,10 @@ export default function StudentTestPage({
           reviewItems={unansweredQuestions}
           onReviewItem={questionId => {
             closeReview();
+            if (pdfBacked) setMobilePanel('answers');
             window.setTimeout(() => {
               const answerField = document.getElementById(`answer-${questionId}`);
-              answerField?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              answerField?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
               answerField?.focus({ preventScroll: true });
             }, 0);
           }}

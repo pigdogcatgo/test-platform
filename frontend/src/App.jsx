@@ -7,7 +7,93 @@ import { AuthLayout, PasswordField } from './components/AuthLayout';
 import AccessibleDialog from './components/AccessibleDialog';
 import ConfirmationDialog from './components/ConfirmationDialog';
 import LatexRenderer from './components/LatexRenderer';
+import DemoBanner from './components/DemoBanner';
+import ProblemCatalogFilters from './components/ProblemCatalogFilters';
+import PrototypeInsights from './components/PrototypeInsights';
+import { PracticeHeader, FolioIntro } from './components/PracticeLayout';
 import './index.css';
+
+const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true';
+const DEMO_TEACHER_USERNAME = import.meta.env.VITE_DEMO_TEACHER_USERNAME || 'demo-teacher';
+const DEMO_STUDENT_USERNAME = import.meta.env.VITE_DEMO_STUDENT_USERNAME || 'demo-student';
+const DEMO_TEACHER_PASSWORD = import.meta.env.VITE_DEMO_TEACHER_PASSWORD || 'teacher-preview-26';
+const DEMO_STUDENT_PASSWORD = import.meta.env.VITE_DEMO_STUDENT_PASSWORD || 'student-preview-26';
+const EMPTY_CATALOG_FILTERS = { search: '', topic: '', difficulty: '', roundType: '', yearFrom: '', yearTo: '' };
+const DEMO_ROUND_TYPES = ['Sprint', 'Target', 'Practice'];
+
+function getCatalogMetadata(problem, demoMode) {
+  const source = typeof problem.source === 'string' ? problem.source : '';
+  const yearFromSource = source.match(/\b(19\d{2}|20\d{2})\b/);
+  const rawYearBlock = problem.year_block ?? problem.yearBlock;
+  const yearBlock = typeof rawYearBlock === 'string' ? rawYearBlock : '';
+  const yearRange = yearBlock.match(/\b(19\d{2}|20\d{2})\s*(?:-|–|—|to)\s*(19\d{2}|20\d{2})\b/i);
+  const explicitYear = Number(problem.year ?? problem.source_year ?? problem.sourceYear ?? yearFromSource?.[0]);
+  const id = Number(problem.id) || 0;
+  const elo = Number(problem.elo);
+  const topicValues = [...new Set([
+    ...(Array.isArray(problem.tag_names) ? problem.tag_names : []),
+    problem.topic,
+  ].filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
+  const difficultyLabels = ['Foundational', 'Developing', 'Intermediate', 'Advanced', 'Challenge'];
+  const rawDifficulty = problem.difficulty;
+  const difficulty = Number.isInteger(Number(rawDifficulty)) && Number(rawDifficulty) >= 1 && Number(rawDifficulty) <= 5
+    ? difficultyLabels[Number(rawDifficulty) - 1]
+    : typeof rawDifficulty === 'string' && rawDifficulty.trim()
+      ? rawDifficulty.trim()
+      : Number.isFinite(elo)
+        ? elo < 1400 ? 'Foundational' : elo < 1600 ? 'Intermediate' : 'Advanced'
+        : 'Unrated';
+  const rawFormats = Array.isArray(problem.catalog_formats) ? problem.catalog_formats : [];
+  const explicitRoundType = problem.round_type || problem.roundType || source.match(/\b(Sprint|Target|Practice)\b/i)?.[0];
+  const roundTypes = [...new Set((rawFormats.length ? rawFormats : explicitRoundType ? [explicitRoundType] : [])
+    .filter(value => typeof value === 'string' && value.trim())
+    .map(value => value.trim().replace(/\b\w/g, letter => letter.toUpperCase())))];
+  if (roundTypes.length === 0) roundTypes.push(demoMode ? DEMO_ROUND_TYPES[id % DEMO_ROUND_TYPES.length] : 'Unspecified');
+  let yearStart = yearRange ? Number(yearRange[1]) : Number.isInteger(explicitYear) && explicitYear >= 1900 && explicitYear <= 2100 ? explicitYear : null;
+  let yearEnd = yearRange ? Number(yearRange[2]) : yearStart;
+  if (yearStart == null && demoMode) yearStart = yearEnd = 2018 + (Math.abs(id) % 8);
+  const yearLabel = yearBlock || (yearStart == null ? '' : yearStart === yearEnd ? String(yearStart) : `${yearStart}–${yearEnd}`);
+  return {
+    topics: topicValues.length ? topicValues : ['Other'],
+    difficulty,
+    roundTypes,
+    yearStart,
+    yearEnd,
+    yearLabel,
+  };
+}
+
+function getCatalogOptions(problems, demoMode) {
+  const metadata = problems.map(problem => getCatalogMetadata(problem, demoMode));
+  return {
+    topics: [...new Set(metadata.flatMap(item => item.topics))].sort((a, b) => a.localeCompare(b)),
+    difficulties: [...new Set(metadata.map(item => item.difficulty))].sort((a, b) => a.localeCompare(b)),
+    roundTypes: [...new Set(metadata.flatMap(item => item.roundTypes).filter(value => value !== 'Unspecified'))].sort((a, b) => a.localeCompare(b)),
+    years: [...new Set(metadata.flatMap(item => {
+      if (!Number.isInteger(item.yearStart) || !Number.isInteger(item.yearEnd)) return [];
+      const start = Math.max(1900, Math.min(item.yearStart, item.yearEnd));
+      const end = Math.min(2100, Math.max(item.yearStart, item.yearEnd));
+      return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+    }))].sort((a, b) => a - b),
+  };
+}
+
+function filterCatalogProblems(problems, filters, demoMode) {
+  const query = filters.search.trim().toLocaleLowerCase();
+  const from = filters.yearFrom ? Number(filters.yearFrom) : null;
+  const to = filters.yearTo ? Number(filters.yearTo) : null;
+  return problems.filter(problem => {
+    const metadata = getCatalogMetadata(problem, demoMode);
+    const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.topic || ''} ${(problem.tag_names || []).join(' ')} ${problem.folder_name || ''} ${metadata.difficulty} ${metadata.roundTypes.join(' ')} ${metadata.yearLabel}`.toLocaleLowerCase();
+    if (query && !searchable.includes(query)) return false;
+    if (filters.topic && !metadata.topics.includes(filters.topic)) return false;
+    if (filters.difficulty && metadata.difficulty !== filters.difficulty) return false;
+    if (filters.roundType && !metadata.roundTypes.includes(filters.roundType)) return false;
+    if (from && (!metadata.yearEnd || metadata.yearEnd < from)) return false;
+    if (to && (!metadata.yearStart || metadata.yearStart > to)) return false;
+    return true;
+  });
+}
 
 const App = () => {
   const [token, setToken] = useState(() => localStorage.getItem('token'));
@@ -73,7 +159,14 @@ const App = () => {
   const [analyticsSolutionsLink, setAnalyticsSolutionsLink] = useState('');
   const [analyticsAnswersReleased, setAnalyticsAnswersReleased] = useState(false);
   const [selectedProblemIds, setSelectedProblemIds] = useState([]);
-  const [problemSearch, setProblemSearch] = useState('');
+  const [catalogFilters, setCatalogFilters] = useState(EMPTY_CATALOG_FILTERS);
+  const [studentClassEloVisible, setStudentClassEloVisible] = useState(true);
+  const [teacherSettingsLoading, setTeacherSettingsLoading] = useState(true);
+  const [teacherSettingsSaving, setTeacherSettingsSaving] = useState(false);
+  const [teacherSettingsError, setTeacherSettingsError] = useState('');
+  const [classElo, setClassElo] = useState(null);
+  const [classEloStatus, setClassEloStatus] = useState('idle');
+  const [classEloError, setClassEloError] = useState('');
   const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudent, setSelectedStudent] = useState(null);
@@ -84,6 +177,13 @@ const App = () => {
   const [submissionNotice, setSubmissionNotice] = useState('');
   const [testExpirationNotice, setTestExpirationNotice] = useState('');
   const submissionInProgressRef = useRef(false);
+
+  const catalogOptions = useMemo(() => getCatalogOptions(problems, DEMO_MODE), [problems]);
+  const visibleCatalogProblems = useMemo(
+    () => filterCatalogProblems(problems, catalogFilters, DEMO_MODE),
+    [problems, catalogFilters]
+  );
+  const hasCatalogFilters = Object.values(catalogFilters).some(Boolean);
 
   const selectedProblemsForTest = newTest.problemIds
     .map(problemId => problems.find(problem => problem.id === problemId))
@@ -107,10 +207,44 @@ const App = () => {
     setStudents([]);
     setSelectedStudentId(null);
     setSelectedStudent(null);
-    setProblemSearch('');
+    setCatalogFilters(EMPTY_CATALOG_FILTERS);
     setSelectedTestAnalytics(null);
     setAttemptDetails(null);
   }, []);
+
+  const handleLogout = useCallback((message) => {
+    localStorage.removeItem('token');
+    setToken(null);
+    setUser(null);
+    setLoginForm({ username: '', password: '' });
+    setSignupForm({ username: '', password: '' });
+    setShowPassword(false);
+    setShowSignupPassword(false);
+    setAuthBusy(false);
+    setAuthError(typeof message === 'string' ? message : '');
+    setSubmissionError('');
+    setTestPdfUrl(null);
+    setStudentClassEloVisible(true);
+    setTeacherSettingsLoading(true);
+    setTeacherSettingsSaving(false);
+    setTeacherSettingsError('');
+    setClassElo(null);
+    setClassEloStatus('idle');
+    setClassEloError('');
+    clearDashboardData();
+    setSessionError(null);
+    setDashboardLoadError(null);
+    setView('login');
+    setActiveTest(null);
+    setTestDeadlineAt(null);
+    setTestExpirationNotice('');
+    setStartingTestId(null);
+    for (const key of Object.keys(sessionStorage)) {
+      if (key === 'testInProgress' || key.startsWith('testAnswers_')) {
+        sessionStorage.removeItem(key);
+      }
+    }
+  }, [clearDashboardData]);
 
   // Create axios instance with useMemo with useMemo to prevent recreation on every render
   const api = useMemo(() => {
@@ -119,6 +253,87 @@ const App = () => {
       headers: token ? { Authorization: `Bearer ${token}` } : {}
     });
   }, [token]);
+
+  const loadTeacherSettings = useCallback(async () => {
+    if (user?.role !== 'teacher') return;
+    const requestToken = token;
+    setTeacherSettingsLoading(true);
+    setTeacherSettingsError('');
+    try {
+      const { data } = await api.get('/api/teacher/settings');
+      if (localStorage.getItem('token') !== requestToken) return;
+      setStudentClassEloVisible(data.studentClassEloVisible === true);
+    } catch (error) {
+      if (localStorage.getItem('token') !== requestToken) return;
+      if (error.response?.status === 401) {
+        handleLogout();
+        return;
+      }
+      setTeacherSettingsError('Could not load the class ELO setting. Retry before changing it.');
+    } finally {
+      if (localStorage.getItem('token') === requestToken) setTeacherSettingsLoading(false);
+    }
+  }, [api, handleLogout, token, user?.role]);
+
+  useEffect(() => {
+    if (user?.role === 'teacher') loadTeacherSettings();
+  }, [loadTeacherSettings, user?.role]);
+
+  const updateStudentClassEloVisibility = async (visible) => {
+    const requestToken = token;
+    setTeacherSettingsSaving(true);
+    setTeacherSettingsError('');
+    try {
+      const { data } = await api.put('/api/teacher/settings', { studentClassEloVisible: visible });
+      if (localStorage.getItem('token') !== requestToken) return;
+      setStudentClassEloVisible(data.studentClassEloVisible === true);
+    } catch (error) {
+      if (localStorage.getItem('token') !== requestToken) return;
+      if (error.response?.status === 401) {
+        handleLogout();
+        return;
+      }
+      setTeacherSettingsError('Could not save this setting. Your previous server setting is still in effect.');
+    } finally {
+      if (localStorage.getItem('token') === requestToken) setTeacherSettingsSaving(false);
+    }
+  };
+
+  const loadClassElo = useCallback(async () => {
+    if (user?.role !== 'student') return;
+    const requestToken = token;
+    setClassElo(null);
+    setClassEloStatus('loading');
+    setClassEloError('');
+    try {
+      const { data } = await api.get('/api/class/elo');
+      if (localStorage.getItem('token') !== requestToken) return;
+      if (data.available === true && Number.isFinite(data.classElo)) {
+        setClassElo(data.classElo);
+        setClassEloStatus('available');
+      } else {
+        setClassElo(null);
+        setClassEloStatus('unavailable');
+      }
+    } catch (error) {
+      if (localStorage.getItem('token') !== requestToken) return;
+      setClassElo(null);
+      if (error.response?.status === 401) {
+        handleLogout();
+        return;
+      }
+      if (error.response?.status === 403) {
+        setClassEloStatus('unavailable');
+      } else {
+        setClassEloStatus('error');
+        setClassEloError('Could not load the anonymous class average.');
+      }
+    }
+  }, [api, handleLogout, token, user?.role]);
+
+  useEffect(() => {
+    if (user?.role === 'student') loadClassElo();
+  }, [loadClassElo, user?.role]);
 
   const loadTestPdf = useCallback(async (testId, problemList) => {
     const hasSourcePdf = problemList.some(problem =>
@@ -136,33 +351,6 @@ const App = () => {
   useEffect(() => () => {
     if (pdfImportPreviewUrl) URL.revokeObjectURL(pdfImportPreviewUrl);
   }, [pdfImportPreviewUrl]);
-
-  const handleLogout = useCallback((message) => {
-    localStorage.removeItem('token');
-    setToken(null);
-    setUser(null);
-    setLoginForm({ username: '', password: '' });
-    setSignupForm({ username: '', password: '' });
-    setShowPassword(false);
-    setShowSignupPassword(false);
-    setAuthBusy(false);
-    setAuthError(typeof message === 'string' ? message : '');
-    setSubmissionError('');
-    setTestPdfUrl(null);
-    clearDashboardData();
-    setSessionError(null);
-    setDashboardLoadError(null);
-    setView('login');
-    setActiveTest(null);
-    setTestDeadlineAt(null);
-    setTestExpirationNotice('');
-    setStartingTestId(null);
-    for (const key of Object.keys(sessionStorage)) {
-      if (key === 'testInProgress' || key.startsWith('testAnswers_')) {
-        sessionStorage.removeItem(key);
-      }
-    }
-  }, [clearDashboardData]);
 
   const loadUserData = useCallback(async (opts = {}) => {
     const preserveView = opts.preserveView ?? false;
@@ -390,7 +578,10 @@ const App = () => {
 
   // Lockdown: auto-submit on leave / tab switch
   useEffect(() => {
-    if (view !== 'taking-test' || !activeTest) return;
+    // The shared prototype is for exploration, so changing tabs or using another
+    // app must not irreversibly consume the one shared student account's attempt.
+    // Production exam behavior keeps its existing lockdown policy.
+    if (DEMO_MODE || view !== 'taking-test' || !activeTest) return;
     let leftWhileHidden = false;
     const onBeforeUnload = (e) => {
       const { activeTest: at, testAnswers: ta, testProblems: tp } = testSubmitRef.current;
@@ -681,11 +872,7 @@ const App = () => {
 
   const bulkDeleteProblems = async () => {
     if (selectedProblemIds.length === 0) return;
-    const search = problemSearch.trim().toLocaleLowerCase();
-    const visibleIds = new Set(problems.filter(problem => {
-      const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.topic || ''} ${problem.folder_name || ''}`.toLocaleLowerCase();
-      return !search || searchable.includes(search);
-    }).map(problem => problem.id));
+    const visibleIds = new Set(visibleCatalogProblems.map(problem => problem.id));
     const hiddenCount = selectedProblemIds.filter(id => !visibleIds.has(id)).length;
     const hiddenMessage = hiddenCount ? ` ${hiddenCount} selected problem${hiddenCount === 1 ? ' is' : 's are'} hidden by the current search and will also be deleted.` : '';
     if (!confirm(`Delete all ${selectedProblemIds.length} selected problem(s)?${hiddenMessage}`)) return;
@@ -919,78 +1106,110 @@ const App = () => {
 
 if (view === 'session-error') {
   return (
-    <div className="min-h-screen bg-[#f5f7f8] flex items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-xl bg-white p-6 text-center shadow">
-        <h1 className="mb-2 text-xl font-semibold text-gray-800">Session check unavailable</h1>
-        <p className="mb-5 text-sm text-gray-600">{sessionError}</p>
-        <div className="flex justify-center gap-3">
-          <button type="button" onClick={() => loadUserData()} className="rounded-lg bg-[#006da6] px-4 py-2 text-sm font-medium text-white">Retry</button>
-          <button type="button" onClick={handleLogout} className="rounded-lg border px-4 py-2 text-sm text-gray-700">Log out</button>
+    <>
+      <DemoBanner />
+      <div className="min-h-screen bg-[#f1f6fd] flex items-center justify-center p-6">
+        <div className="w-full max-w-md rounded-xl bg-white p-6 text-center shadow">
+          <h1 className="mb-2 text-xl font-semibold text-gray-800">Session check unavailable</h1>
+          <p className="mb-5 text-sm text-gray-600">{sessionError}</p>
+          <div className="flex justify-center gap-3">
+            <button type="button" onClick={() => loadUserData()} className="rounded-lg bg-[#2a61ba] px-4 py-2 text-sm font-medium text-white">Retry</button>
+            <button type="button" onClick={handleLogout} className="rounded-lg border px-4 py-2 text-sm text-gray-700">Log out</button>
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
 if (view === 'login') {
   return (
-    <AuthLayout>
-      <div className="auth-card">
-        <p className="auth-kicker">Welcome back</p>
-        <h1>Sign in to your team</h1>
-        <p className="auth-subtitle">Continue to your MATHCOUNTS practice space.</p>
-        {authError && <div className="auth-alert" role="alert">{authError}</div>}
-        <form onSubmit={handleLogin} className="auth-form">
-          <div className="auth-field">
-            <label htmlFor="login-username">Username</label>
-            <input id="login-username" name="username" type="text" autoComplete="username" value={loginForm.username} onChange={e => setLoginForm({ ...loginForm, username: e.target.value })} required />
-          </div>
-          <PasswordField id="login-password" value={loginForm.password} onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} autoComplete="current-password" visible={showPassword} onToggle={() => setShowPassword(value => !value)} />
-          <button type="submit" className="auth-primary-button" disabled={authBusy}>{authBusy ? 'Signing in…' : 'Sign in'}</button>
-        </form>
-        <p className="auth-switch">New teacher? <button type="button" onClick={() => { setAuthError(''); setView('signup'); }}>Create an account</button></p>
-      </div>
-    </AuthLayout>
+    <>
+      <DemoBanner />
+      <AuthLayout demoMode={DEMO_MODE}>
+        <div className="auth-card">
+          <p className="auth-kicker">Welcome back</p>
+          <h1>Sign in to your team</h1>
+          <p className="auth-subtitle">{DEMO_MODE ? 'Continue to the shared practice prototype.' : 'Continue to your MATHCOUNTS practice space.'}</p>
+          {DEMO_MODE && <div className="mb-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 text-sm leading-5 text-sky-950" role="note">
+            <p>Use a fictional shared demo account. Signup is disabled; this preview is separate from production.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" onClick={() => setLoginForm({ username: DEMO_TEACHER_USERNAME, password: DEMO_TEACHER_PASSWORD })} className="min-h-10 rounded-lg border border-sky-300 bg-white px-3 font-semibold text-sky-900 hover:bg-sky-100">Fill teacher login</button>
+              <button type="button" onClick={() => setLoginForm({ username: DEMO_STUDENT_USERNAME, password: DEMO_STUDENT_PASSWORD })} className="min-h-10 rounded-lg border border-sky-300 bg-white px-3 font-semibold text-sky-900 hover:bg-sky-100">Fill student login</button>
+            </div>
+            <p className="mt-2 text-xs">Teacher password: <code className="rounded bg-white px-1">{DEMO_TEACHER_PASSWORD}</code> · Student password: <code className="rounded bg-white px-1">{DEMO_STUDENT_PASSWORD}</code></p>
+          </div>}
+          {authError && <div className="auth-alert" role="alert">{authError}</div>}
+          <form onSubmit={handleLogin} className="auth-form">
+            <div className="auth-field">
+              <label htmlFor="login-username">Username</label>
+              <input id="login-username" name="username" type="text" autoComplete="username" value={loginForm.username} onChange={e => setLoginForm({ ...loginForm, username: e.target.value })} required />
+            </div>
+            <PasswordField id="login-password" value={loginForm.password} onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} autoComplete="current-password" visible={showPassword} onToggle={() => setShowPassword(value => !value)} />
+            <button type="submit" className="auth-primary-button" disabled={authBusy}>{authBusy ? 'Signing in…' : 'Sign in'}</button>
+          </form>
+          {!DEMO_MODE && <p className="auth-switch">New teacher? <button type="button" onClick={() => { setAuthError(''); setView('signup'); }}>Create an account</button></p>}
+        </div>
+      </AuthLayout>
+    </>
   );
 }
 
 if (view === 'signup') {
   return (
-    <AuthLayout>
-      <div className="auth-card">
-        <p className="auth-kicker">Teacher access</p>
-        <h1>Create your account</h1>
-        <p className="auth-subtitle">Set up a space for your team and practice sessions.</p>
-        {authError && <div className="auth-alert" role="alert">{authError}</div>}
-        <form onSubmit={handleSignup} className="auth-form">
-          <div className="auth-field">
-            <label htmlFor="signup-username">Username</label>
-            <input id="signup-username" name="username" type="text" autoComplete="username" value={signupForm.username} onChange={e => setSignupForm({ ...signupForm, username: e.target.value })} required />
-          </div>
-          <PasswordField id="signup-password" value={signupForm.password} onChange={e => setSignupForm({ ...signupForm, password: e.target.value })} autoComplete="new-password" visible={showSignupPassword} onToggle={() => setShowSignupPassword(value => !value)} minLength={12} hint="Use at least 12 characters. A longer passphrase is easier to remember and harder to guess." />
-          <button type="submit" className="auth-primary-button" disabled={authBusy}>{authBusy ? 'Creating account…' : 'Create teacher account'}</button>
-        </form>
-        <p className="auth-switch">Already have an account? <button type="button" onClick={() => { setAuthError(''); setView('login'); }}>Sign in</button></p>
-      </div>
-    </AuthLayout>
+    <>
+      <DemoBanner />
+      <AuthLayout demoMode={DEMO_MODE}>
+        <div className="auth-card">
+          {DEMO_MODE ? (
+            <>
+              <p className="auth-kicker">Shared preview</p>
+              <h1>Teacher signup is off</h1>
+              <p className="auth-subtitle">Use the fictional teacher or student credentials supplied with this preview.</p>
+              <button type="button" className="auth-primary-button w-full" onClick={() => setView('login')}>Back to sign in</button>
+            </>
+          ) : (
+            <>
+              <p className="auth-kicker">Teacher access</p>
+              <h1>Create your account</h1>
+              <p className="auth-subtitle">Set up a space for your team and practice sessions.</p>
+              {authError && <div className="auth-alert" role="alert">{authError}</div>}
+              <form onSubmit={handleSignup} className="auth-form">
+                <div className="auth-field">
+                  <label htmlFor="signup-username">Username</label>
+                  <input id="signup-username" name="username" type="text" autoComplete="username" value={signupForm.username} onChange={e => setSignupForm({ ...signupForm, username: e.target.value })} required />
+                </div>
+                <PasswordField id="signup-password" value={signupForm.password} onChange={e => setSignupForm({ ...signupForm, password: e.target.value })} autoComplete="new-password" visible={showSignupPassword} onToggle={() => setShowSignupPassword(value => !value)} minLength={12} hint="Use at least 12 characters. A longer passphrase is easier to remember and harder to guess." />
+                <button type="submit" className="auth-primary-button" disabled={authBusy}>{authBusy ? 'Creating account…' : 'Create teacher account'}</button>
+              </form>
+              <p className="auth-switch">Already have an account? <button type="button" onClick={() => { setAuthError(''); setView('login'); }}>Sign in</button></p>
+            </>
+          )}
+        </div>
+      </AuthLayout>
+    </>
   );
 }
 
 if (view === 'taking-test' && activeTest) {
   return (
-    <StudentTestPage
-      activeTest={activeTest}
-      timeRemaining={timeRemaining}
-      testProblems={testProblems}
-      testAnswers={testAnswers}
-      setTestAnswers={setTestAnswers}
-      token={token}
-      pdfUrl={testPdfUrl}
-      onSubmit={handleSubmitTest}
-      submitting={submittingTest}
-      submissionError={submissionError}
-      onOpenReview={() => setSubmissionError('')}
-    />
+    <>
+      <DemoBanner />
+      <StudentTestPage
+        activeTest={activeTest}
+        demoMode={DEMO_MODE}
+        timeRemaining={timeRemaining}
+        testProblems={testProblems}
+        testAnswers={testAnswers}
+        setTestAnswers={setTestAnswers}
+        token={token}
+        pdfUrl={testPdfUrl}
+        onSubmit={handleSubmitTest}
+        submitting={submittingTest}
+        submissionError={submissionError}
+        onOpenReview={() => setSubmissionError('')}
+      />
+    </>
   );
 }
 
@@ -1000,24 +1219,13 @@ if (view === 'student-dashboard' && user) {
   );
 
   return (
-    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
-      <div className="w-full max-w-6xl p-6">
+    <>
+      <DemoBanner />
+      <main className="min-h-screen bg-[#f1f6fd] flex justify-center">
+        <div className="w-full max-w-6xl p-6">
 
-        {/* Top Nav */}
-        <div className="bg-white rounded-xl shadow mb-6 px-6 py-4 flex items-center justify-between">
-          <div className="w-1/4" />
-          <h1 className="text-xl font-semibold text-gray-800 text-center flex-1">
-            Student Portal
-          </h1>
-          <div className="w-1/4 flex justify-end">
-            <button
-              onClick={handleLogout}
-              className="text-sm text-[#006da6] font-medium hover:underline"
-            >
-              Logout
-            </button>
-          </div>
-        </div>
+        <PracticeHeader audience="Student workspace" demoMode={DEMO_MODE} onLogout={handleLogout} />
+        <FolioIntro title={`Ready when you are, ${user.username}.`} description="Find your next practice below. Take it one problem at a time." count={availableTests.length} countLabel="tests to explore" />
 
         {dashboardLoadError && (
           <div role="alert" className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
@@ -1033,78 +1241,38 @@ if (view === 'student-dashboard' && user) {
           <div role="status" className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-950">{testExpirationNotice}</div>
         )}
 
-        {/* Welcome Card */}
-        <div className="bg-white rounded-xl shadow p-6 mb-6 text-center">
-          <h2 className="text-2xl font-semibold text-gray-800 mb-1">
-            Welcome, {user.username}
-          </h2>
-          <p className="text-sm text-gray-500 mb-4">
-            Here’s a snapshot of your progress
-          </p>
-
-          <div className="flex flex-wrap gap-4 justify-center">
-            <div className="inline-flex flex-col items-center bg-[#e8f4f9] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when you solve harder problems correctly, decreases when you miss easier ones">
-              <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
-              <span className="text-4xl font-bold text-[#006da6]">
-                {user.elo}
-              </span>
-            </div>
-            {typeof user.cumulative_score === 'number' && (
-              <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
-                <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
-                <span className="text-4xl font-bold text-[#006da6]">
-                  {user.cumulative_score}
-                </span>
-              </div>
-            )}
-            {user.tag_elos?.length > 0 && (
-              <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
-                <span className="text-xs text-gray-600 mb-2">By Subject</span>
-                <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                  {user.tag_elos.map(t => (
-                    <span key={t.name} className="text-gray-800">
-                      {t.name}: <span className="font-semibold text-[#006da6]">{t.elo}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
         {/* Content */}
         <div className="grid md:grid-cols-2 gap-6">
 
           {/* Available Tests */}
           <div>
-            <h3 className="text-lg font-semibold mb-4 text-gray-800">
+            <h2 className="text-lg font-semibold mb-4 text-gray-800">
               Available Tests
-            </h3>
+            </h2>
 
             {availableTests.length === 0 ? (
               <div className="bg-white rounded-xl shadow p-6 text-gray-500 text-center">
-                No tests available
+                {DEMO_MODE ? 'No fresh tests available. The shared student account can take each assignment once; ask the demo teacher to create a new assignment for another run.' : 'You’re all caught up. New tests from your teacher will appear here.'}
               </div>
             ) : (
               <div className="space-y-3">
                 {availableTests.map((test) => (
                   <div key={test.id} className="bg-white rounded-xl shadow p-4">
-                    <h4 className="font-semibold text-gray-800 mb-1">
+                    <h3 className="font-semibold text-gray-800 mb-1">
                       {test.name}
-                    </h4>
+                    </h3>
                     <p className="text-sm text-gray-500 mb-3">
-                      {(test.problem_ids || []).length} questions •{' '}
+                      {test.test_type === 'target' ? 'Target' : 'Sprint'} · {(test.problem_ids || []).length} questions ·{' '}
                       {test.time_limit} min
                     </p>
-                    <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                      This test submits automatically if you switch to another tab or app. Keep it open in the foreground until you finish.
-                    </p>
+                    <p className="mb-3 text-xs leading-5 text-gray-600">{DEMO_MODE ? 'Demo scoring: ' : 'Scoring: '}{test.test_type === 'target' ? '2 points per correct answer.' : '1 point per correct answer.'} ELO updates separately for each problem.</p>
+                    {!DEMO_MODE && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">This test submits automatically if you switch to another tab or app. Keep it open in the foreground until you finish.</p>}
                     <button
                       type="button"
                       onClick={() => startTest(test)}
                       disabled={startingTestId !== null || test.session_expired}
                       aria-busy={startingTestId === test.id}
-                      className="w-full bg-[#006da6] hover:bg-[#006699] disabled:cursor-not-allowed disabled:opacity-70 text-white py-2 rounded-lg text-sm font-medium"
+                      className="w-full bg-[#2a61ba] hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-70 text-white py-2 rounded-lg text-sm font-medium"
                     >
                       {startingTestId === test.id ? 'Preparing test…' : test.session_expired ? 'Time expired' : 'Start Test'}
                     </button>
@@ -1116,9 +1284,9 @@ if (view === 'student-dashboard' && user) {
 
           {/* Test History */}
           <div>
-            <h3 className="text-lg font-semibold mb-4 text-gray-800">
+            <h2 className="text-lg font-semibold mb-4 text-gray-800">
               Test History
-            </h3>
+            </h2>
             <p className="text-sm text-gray-500 mb-3">
               Click View Details to see your answers and the solutions link (when your teacher releases them).
             </p>
@@ -1140,9 +1308,9 @@ if (view === 'student-dashboard' && user) {
                       key={attempt.id}
                       className="bg-white rounded-xl shadow p-4"
                     >
-                      <h4 className="font-semibold text-gray-800 mb-1">
+                      <h3 className="font-semibold text-gray-800 mb-1">
                         {test?.name || 'Unknown Test'}
-                      </h4>
+                      </h3>
                       <p className="text-sm text-gray-500">
                         Score: {attempt.score}/{attempt.total} (
                         {Math.round(
@@ -1169,7 +1337,7 @@ if (view === 'student-dashboard' && user) {
                             alert('Error loading attempt details');
                           }
                         }}
-                        className="mt-2 text-sm text-[#006da6] font-medium hover:underline"
+                        className="mt-2 text-sm text-[#2a61ba] font-medium hover:underline"
                       >
                         View Details
                       </button>
@@ -1181,7 +1349,66 @@ if (view === 'student-dashboard' && user) {
           </div>
         </div>
 
-        {/* Attempt Details Modal */}
+        {/* Progress summary */}
+        <div className="progress-summary bg-white rounded-xl p-6 mt-8">
+          <h2 className="text-2xl font-semibold text-gray-800 mb-1">
+            Your progress
+          </h2>
+          <p className="text-sm text-gray-500 mb-4">
+            A snapshot of what you’re learning
+          </p>
+
+          <div className="flex flex-wrap gap-4 justify-start">
+            <div className="inline-flex flex-col items-center bg-[#e6effb] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when you solve harder problems correctly, decreases when you miss easier ones">
+              <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
+              <span className="text-4xl font-bold text-[#2a61ba]">{user.elo}</span>
+            </div>
+            {typeof user.cumulative_score === 'number' && (
+              <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
+                <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
+                <span className="text-4xl font-bold text-[#2a61ba]">
+                  {user.cumulative_score}
+                </span>
+              </div>
+            )}
+            {user.tag_elos?.length > 0 && (
+              <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
+                <span className="text-xs text-gray-600 mb-2">By Subject</span>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                  {user.tag_elos.map(t => (
+                    <span key={t.name} className="text-gray-800">
+                      {t.name}: <span className="font-semibold text-[#2a61ba]">{t.elo}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <p className="mt-3 max-w-xl text-xs leading-5 text-gray-600">
+            ELO is a skill estimate that adjusts based on which problems you solve correctly. It is not a grade. Class averages are anonymous and shown only when the group is large enough.
+          </p>
+          {classEloStatus !== 'idle' && (
+            <div className="mt-4 max-w-sm rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-left" aria-live="polite">
+              <h3 className="text-sm font-semibold text-gray-800">Anonymous class ELO average</h3>
+              {classEloStatus === 'loading' && <p className="mt-1 text-sm text-gray-600">Loading class average…</p>}
+              {classEloStatus === 'available' && <p className="mt-1 text-2xl font-bold text-[#2a61ba]">{classElo}</p>}
+              {classEloStatus === 'unavailable' && (
+                <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <p className="text-gray-600">Not available. Your teacher may have hidden it, or the class needs more learners for a private aggregate.</p>
+                  <button type="button" onClick={loadClassElo} className="font-semibold text-[#2a61ba] underline">Check again</button>
+                </div>
+              )}
+              {classEloStatus === 'error' && (
+                <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <p className="text-red-800" role="alert">{classEloError}</p>
+                  <button type="button" onClick={loadClassElo} className="font-semibold text-[#2a61ba] underline">Retry</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+
         {attemptDetails && (
           <AccessibleDialog ariaLabel="Test results" onClose={() => setAttemptDetails(null)} panelClassName="max-w-2xl p-6">
               <div className="flex justify-between items-center mb-4">
@@ -1197,9 +1424,9 @@ if (view === 'student-dashboard' && user) {
               {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                 <div className="space-y-4">
                   {attemptDetails.solutionsLink && (
-                    <div className="mb-4 p-3 bg-[#e8f4f9] rounded-lg border border-[#006da6]/30">
+                    <div className="mb-4 p-3 bg-[#e6effb] rounded-lg border border-[#2a61ba]/30">
                       <span className="text-sm font-medium text-gray-700">Solutions: </span>
-                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#006da6] hover:underline font-medium">
+                      <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#2a61ba] hover:underline font-medium">
                         View solutions →
                       </a>
                     </div>
@@ -1216,7 +1443,7 @@ if (view === 'student-dashboard' && user) {
                         ) : (
                           <>
                             <span className="text-red-600 ml-2">✗ Incorrect</span>
-                            <span className="block mt-1 text-[#006da6]"><span className="font-medium">Correct answer:</span> {String(item.correct_answer ?? '')}</span>
+                            <span className="block mt-1 text-[#2a61ba]"><span className="font-medium">Correct answer:</span> {String(item.correct_answer ?? '')}</span>
                           </>
                         )}
                       </p>
@@ -1230,29 +1457,18 @@ if (view === 'student-dashboard' && user) {
               )}
           </AccessibleDialog>
         )}
-      </div>
-    </div>
+        </div>
+      </main>
+    </>
   );
 }
 
 
 if (view === 'teacher-dashboard' && user) {
   return (
-    <div className="min-h-screen bg-[#f5f7f8]">
-      {/* Top Nav */}
-      <div className="sticky top-0 z-50 bg-white shadow">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-          <h1 className="text-lg font-semibold text-gray-800">
-            Teacher Dashboard
-          </h1>
-          <button
-            onClick={handleLogout}
-            className="text-sm text-[#006da6] font-medium hover:underline"
-          >
-            Logout
-          </button>
-        </div>
-      </div>
+    <main className="min-h-screen bg-[#f1f6fd]">
+      <DemoBanner />
+      <PracticeHeader audience="Teacher workspace" demoMode={DEMO_MODE} onLogout={handleLogout} />
 
       <div className="max-w-7xl mx-auto px-6 py-8">
         {dashboardLoadError && (
@@ -1261,26 +1477,12 @@ if (view === 'teacher-dashboard' && user) {
             <button type="button" onClick={() => loadUserData({ preserveView: true })} className="font-semibold underline">Retry loading</button>
           </div>
         )}
-        <div className="mb-6 flex gap-3">
-          <button
-            onClick={() => setView('register-students')}
-            className="bg-[#006da6] hover:bg-[#006699] text-white px-6 py-3 rounded-lg font-medium"
-          >
-            Register Students
-          </button>
-          <button
-            onClick={() => setView('create-test')}
-            className="bg-[#006da6] hover:bg-[#006699] text-white px-6 py-3 rounded-lg font-medium"
-          >
-            Create New Test
-          </button>
-          <button
-            onClick={() => setView('teacher-admin')}
-            className="bg-gray-700 hover:bg-gray-800 text-white px-6 py-3 rounded-lg font-medium"
-          >
-            Team Problem Bank
-          </button>
-        </div>
+        <FolioIntro title="A little practice. A lot of possibility." description="Build a thoughtful test, bring your team together, and see what clicks." count={tests.length} countLabel="tests in your collection">
+          <button type="button" onClick={() => setView('create-test')} className="folio-primary">Create test</button>
+          {!DEMO_MODE && <button type="button" onClick={() => setView('register-students')} className="folio-secondary">Manage students</button>}
+          {!DEMO_MODE && <button type="button" onClick={() => setView('teacher-admin')} className="folio-secondary">Problem bank</button>}
+          {DEMO_MODE && <button type="button" onClick={() => setView('prototype-insights')} className="folio-secondary">Class insights · aggregate only</button>}
+        </FolioIntro>
 
         <div className="grid lg:grid-cols-2 gap-6">
           {/* Tests */}
@@ -1291,7 +1493,8 @@ if (view === 'teacher-dashboard' && user) {
 
             {tests.length === 0 ? (
               <div className="bg-white rounded-xl shadow p-6 text-center text-gray-500">
-                No tests created yet
+                Your first practice starts here.
+                <button type="button" onClick={() => setView('create-test')} className="mt-3 block mx-auto font-semibold text-[#2a61ba] underline">Create your first test</button>
               </div>
             ) : (
               <div className="space-y-3">
@@ -1304,15 +1507,24 @@ if (view === 'teacher-dashboard' && user) {
                       {(test.problem_ids || []).length} questions • {test.time_limit} min
                     </p>
 
-                    <button
-                      onClick={async () => {
-                        await loadTestAnalytics(test.id);
-                        setView('test-analytics');
-                      }}
-                      className="text-sm text-[#006da6] font-medium hover:underline"
-                    >
-                      View Analytics →
-                    </button>
+                    {DEMO_MODE ? (
+                      <div>
+                        <span className="text-sm font-medium text-gray-700">
+                          Class insights are available in the aggregate view.
+                        </span>
+                        <p className="mt-1 text-xs text-gray-600">These trends include the whole demo class; they are not specific to this test or student.</p>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={async () => {
+                          await loadTestAnalytics(test.id);
+                          setView('test-analytics');
+                        }}
+                        className="text-sm text-[#2a61ba] font-medium hover:underline"
+                      >
+                        View Analytics →
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1320,7 +1532,7 @@ if (view === 'teacher-dashboard' && user) {
           </div>
 
           {/* Student leaderboard */}
-          <div>
+          {!DEMO_MODE && <div>
             <h2 className="text-lg font-semibold mb-4 text-gray-800">
               Student Leaderboard
             </h2>
@@ -1329,8 +1541,9 @@ if (view === 'teacher-dashboard' && user) {
                 Click a name to view their profile. Only students you register can see your tests.
               </p>
               <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
-                <span className="text-sm text-gray-600">Rank by:</span>
+                <label htmlFor={`rank-by-${view}`} className="text-sm text-gray-600">Rank by:</label>
                 <select
+                  id={`rank-by-${view}`}
                   value={leaderboardSortBy}
                   onChange={(e) => setLeaderboardSortBy(e.target.value)}
                   className="text-sm border border-gray-200 rounded px-2 py-1 bg-white"
@@ -1343,7 +1556,7 @@ if (view === 'teacher-dashboard' && user) {
             <div className="bg-white rounded-xl shadow divide-y">
               {students.length === 0 ? (
                 <div className="p-6 text-center text-gray-500 text-sm">
-                  No students yet. <button type="button" onClick={() => setView('register-students')} className="text-[#006da6] font-medium hover:underline">Register students</button> to get started.
+                  No students yet. <button type="button" onClick={() => setView('register-students')} className="text-[#2a61ba] font-medium hover:underline">Register students</button> to get started.
                 </div>
               ) : (
                 [...students]
@@ -1355,21 +1568,21 @@ if (view === 'teacher-dashboard' && user) {
                   })
                   .map((s, i) => (
                     <div key={s.id} className="p-4">
-                      <div className="flex justify-between items-center">
+                      <div className="flex flex-wrap justify-between items-center gap-3 min-w-0">
                         <button
                           type="button"
                           onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                          className="font-medium text-left hover:text-[#006da6] hover:underline"
+                          className="min-w-0 [overflow-wrap:anywhere] font-medium text-left hover:text-[#2a61ba] hover:underline"
                         >
                           {i + 1}. {s.username}
                         </button>
-                        <div className="flex gap-4">
+                        <div className="flex flex-wrap gap-4">
                           {typeof s.cumulative_score === 'number' && (
                             <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
-                              Cumulative: <span className="font-semibold text-[#006da6]">{s.cumulative_score}</span>
+                              Cumulative: <span className="font-semibold text-[#2a61ba]">{s.cumulative_score}</span>
                             </span>
                           )}
-                          <span className="text-[#006da6] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                          <span className="text-[#2a61ba] font-semibold" title="Skill rating based on problem difficulty and correctness">
                             ELO: {s.elo}
                           </span>
                         </div>
@@ -1378,10 +1591,58 @@ if (view === 'teacher-dashboard' && user) {
                   ))
               )}
             </div>
-          </div>
+          </div>}
         </div>
+        <section className="mt-8 rounded-xl border border-gray-200 bg-white p-4 shadow-sm" aria-labelledby="elo-visibility-title">
+          <h2 id="elo-visibility-title" className="text-sm font-semibold text-gray-900">Anonymous class ELO average</h2>
+          <label className="mt-2 flex items-start gap-3 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={studentClassEloVisible}
+              disabled={teacherSettingsLoading || teacherSettingsSaving || Boolean(teacherSettingsError)}
+              onChange={event => updateStudentClassEloVisibility(event.target.checked)}
+              aria-describedby="elo-visibility-help"
+              className="mt-1"
+            />
+            <span>Show the anonymous class ELO average to students</span>
+          </label>
+          <p id="elo-visibility-help" className="ml-7 mt-1 text-xs leading-5 text-gray-600">
+            The server suppresses the average when the class is too small to protect student privacy. Individual student ratings remain part of each student’s progress view.
+          </p>
+          {teacherSettingsLoading && <p className="ml-7 mt-2 text-sm text-gray-600" role="status">Loading saved setting…</p>}
+          {teacherSettingsSaving && <p className="ml-7 mt-2 text-sm text-gray-600" role="status">Saving setting…</p>}
+          {teacherSettingsError && (
+            <div className="ml-7 mt-2 flex flex-wrap items-center gap-3">
+              <p className="text-sm text-red-800" role="alert">{teacherSettingsError}</p>
+              <button type="button" onClick={loadTeacherSettings} disabled={teacherSettingsLoading} className="text-sm font-semibold text-[#2a61ba] underline disabled:opacity-50">Retry</button>
+            </div>
+          )}
+        </section>
+
       </div>
-    </div>
+    </main>
+  );
+}
+
+if (DEMO_MODE && view === 'test-analytics' && user?.role === 'teacher') {
+  return (
+    <>
+      <DemoBanner />
+      <main className="min-h-screen bg-[#f1f6fd] px-4 py-8 sm:px-6">
+        <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6 shadow-sm" aria-labelledby="demo-analytics-title">
+          <h1 id="demo-analytics-title" className="text-xl font-semibold text-gray-900">Per-test analytics are unavailable in this shared demo</h1>
+          <p className="mt-3 text-sm leading-6 text-gray-700">The preview provides aggregate class insights only. Student-level results and editable test settings are disabled here.</p>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button type="button" onClick={() => setView('prototype-insights')} className="min-h-11 rounded-lg bg-[#2a61ba] px-4 py-2 text-sm font-semibold text-white hover:bg-[#20529f] focus-visible:outline">
+              View aggregate class insights
+            </button>
+            <button type="button" onClick={() => setView('teacher-dashboard')} className="min-h-11 rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus-visible:outline">
+              Back to dashboard
+            </button>
+          </div>
+        </section>
+      </main>
+    </>
   );
 }
 
@@ -1424,13 +1685,14 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
   }
 
   return (
-    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
+    <div className="min-h-screen bg-[#f1f6fd] flex justify-center">
       <div className="w-full max-w-4xl p-6">
-        <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
+        <DemoBanner />
+        <div className="bg-white rounded-xl shadow p-6 mb-6 flex flex-wrap gap-3 justify-between items-center">
           <button
             type="button"
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#006da6] hover:underline"
+            className="text-sm text-[#2a61ba] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1479,7 +1741,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                     alert(err.response?.data?.error || 'Failed to save');
                   }
                 }}
-                className="px-4 py-2 bg-[#006da6] text-white rounded-lg text-sm font-medium hover:bg-[#006699]"
+                className="px-4 py-2 bg-[#2a61ba] text-white rounded-lg text-sm font-medium hover:bg-[#20529f]"
               >
                 Save settings
               </button>
@@ -1517,7 +1779,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                                 alert('Error loading submission');
                               }
                             }}
-                            className="text-sm text-[#006da6] font-medium hover:underline"
+                            className="text-sm text-[#2a61ba] font-medium hover:underline"
                           >
                             View submission
                           </button>
@@ -1547,9 +1809,9 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                 {attemptDetails.showAnswers && attemptDetails.problems?.length > 0 ? (
                   <div className="space-y-4">
                     {attemptDetails.solutionsLink && (
-                      <div className="mb-4 p-3 bg-[#e8f4f9] rounded-lg border border-[#006da6]/30">
+                      <div className="mb-4 p-3 bg-[#e6effb] rounded-lg border border-[#2a61ba]/30">
                         <span className="text-sm font-medium text-gray-700">Solutions: </span>
-                        <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#006da6] hover:underline font-medium">
+                        <a href={attemptDetails.solutionsLink} target="_blank" rel="noopener noreferrer" className="text-[#2a61ba] hover:underline font-medium">
                           View solutions →
                         </a>
                       </div>
@@ -1566,7 +1828,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                           ) : (
                             <>
                               <span className="text-red-600 ml-2">✗ Incorrect</span>
-                              <span className="block mt-1 text-[#006da6]"><span className="font-medium">Correct:</span> {String(item.correct_answer ?? '')}</span>
+                              <span className="block mt-1 text-[#2a61ba]"><span className="font-medium">Correct:</span> {String(item.correct_answer ?? '')}</span>
                             </>
                           )}
                         </p>
@@ -1609,14 +1871,24 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
   );
 }
 
+if (view === 'prototype-insights' && DEMO_MODE && user?.role === 'teacher') {
+  return (
+    <>
+      <DemoBanner />
+      <PrototypeInsights api={api} onBack={() => setView('teacher-dashboard')} />
+    </>
+  );
+}
+
 if (view === 'register-students' && user) {
   return (
-    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
+    <div className="min-h-screen bg-[#f1f6fd] flex justify-center">
       <div className="w-full max-w-2xl p-6">
-        <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
+        <DemoBanner />
+        <div className="bg-white rounded-xl shadow p-6 mb-6 flex flex-wrap gap-3 justify-between items-center">
           <button
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#006da6] hover:underline"
+            className="text-sm text-[#2a61ba] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1646,7 +1918,7 @@ if (view === 'register-students' && user) {
             <button
               type="button"
               onClick={() => registerStudent()}
-              className="bg-[#006da6] hover:bg-[#006699] text-white px-5 py-2 rounded-lg font-medium"
+              className="bg-[#2a61ba] hover:bg-[#20529f] text-white px-5 py-2 rounded-lg font-medium"
             >
               Add student
             </button>
@@ -1660,8 +1932,9 @@ if (view === 'register-students' && user) {
               Only these students can see and take your tests.
             </p>
             <div className="flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-2">
-              <span className="text-sm text-gray-600">Rank by:</span>
+              <label htmlFor={`rank-by-${view}`} className="text-sm text-gray-600">Rank by:</label>
               <select
+                id={`rank-by-${view}`}
                 value={leaderboardSortBy}
                 onChange={(e) => setLeaderboardSortBy(e.target.value)}
                 className="text-sm border border-gray-200 rounded px-2 py-1 bg-white"
@@ -1686,21 +1959,21 @@ if (view === 'register-students' && user) {
                 })
                 .map((s, i) => (
                   <div key={s.id} className="p-4">
-                    <div className="flex justify-between items-center">
+                    <div className="flex flex-wrap justify-between items-center gap-3 min-w-0">
                       <button
                         type="button"
                         onClick={() => { setSelectedStudentId(s.id); setView('student-profile'); }}
-                        className="font-medium text-left hover:text-[#006da6] hover:underline"
+                        className="min-w-0 [overflow-wrap:anywhere] font-medium text-left hover:text-[#2a61ba] hover:underline"
                       >
                         {i + 1}. {s.username}
                       </button>
-                      <div className="flex gap-4">
+                      <div className="flex flex-wrap gap-4">
                         {typeof s.cumulative_score === 'number' && (
                           <span className="text-gray-600" title="Sprint problems correct + 2× target problems correct">
-                            Cumulative: <span className="font-semibold text-[#006da6]">{s.cumulative_score}</span>
+                            Cumulative: <span className="font-semibold text-[#2a61ba]">{s.cumulative_score}</span>
                           </span>
                         )}
-                        <span className="text-[#006da6] font-semibold" title="Skill rating based on problem difficulty and correctness">
+                        <span className="text-[#2a61ba] font-semibold" title="Skill rating based on problem difficulty and correctness">
                           ELO: {s.elo}
                         </span>
                       </div>
@@ -1718,18 +1991,22 @@ if (view === 'register-students' && user) {
 if (view === 'student-profile' && user) {
   if (!selectedStudent) {
     return (
-      <div className="min-h-screen bg-[#f5f7f8] flex items-center justify-center">
-        <p className="text-gray-500">Loading student profile...</p>
+      <div className="min-h-screen bg-[#f1f6fd]">
+        <DemoBanner />
+        <div className="flex min-h-[60vh] items-center justify-center">
+          <p className="text-gray-500">Loading student profile...</p>
+        </div>
       </div>
     );
   }
   return (
-    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
+    <div className="min-h-screen bg-[#f1f6fd] flex justify-center">
       <div className="w-full max-w-4xl p-6">
-        <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
+        <DemoBanner />
+        <div className="bg-white rounded-xl shadow p-6 mb-6 flex flex-wrap gap-3 justify-between items-center">
           <button
             onClick={() => { setView('teacher-dashboard'); setSelectedStudentId(null); setSelectedStudent(null); }}
-            className="text-sm text-[#006da6] hover:underline"
+            className="text-sm text-[#2a61ba] hover:underline"
           >
             ← Back to Dashboard
           </button>
@@ -1742,20 +2019,20 @@ if (view === 'student-profile' && user) {
         <div className="bg-white rounded-xl shadow p-6 mb-6">
           <h2 className="text-base font-semibold text-gray-800 mb-4">Ratings</h2>
           <div className="flex flex-wrap gap-4">
-            <div className="inline-flex flex-col items-center bg-[#e8f4f9] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when solving harder problems correctly, decreases when missing easier ones">
+            <div className="inline-flex flex-col items-center bg-[#e6effb] px-6 py-4 rounded-xl" title="Skill rating based on problem difficulty and correctness; increases when solving harder problems correctly, decreases when missing easier ones">
               <span className="text-xs text-gray-600 mb-1">Overall ELO</span>
-              <span className="text-2xl font-bold text-[#006da6]">{selectedStudent.elo}</span>
+              <span className="text-2xl font-bold text-[#2a61ba]">{selectedStudent.elo}</span>
             </div>
             <div className="inline-flex flex-col items-center bg-white border border-gray-200 px-6 py-4 rounded-xl" title="Sprint problems correct + 2× target problems correct">
               <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
-              <span className="text-2xl font-bold text-[#006da6]">{selectedStudent.cumulative_score ?? 0}</span>
+              <span className="text-2xl font-bold text-[#2a61ba]">{selectedStudent.cumulative_score ?? 0}</span>
             </div>
             {selectedStudent.tag_elos?.length > 0 && (
               <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
                 <span className="text-xs text-gray-600 mb-2">By Subject</span>
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                   {selectedStudent.tag_elos.map(t => (
-                    <span key={t.name}>{t.name}: <span className="font-semibold text-[#006da6]">{t.elo}</span></span>
+                    <span key={t.name}>{t.name}: <span className="font-semibold text-[#2a61ba]">{t.elo}</span></span>
                   ))}
                 </div>
               </div>
@@ -1803,15 +2080,26 @@ if (view === 'student-profile' && user) {
 }
 
 if (view === 'create-test' && user) {
+  const changeTestType = (type) => setNewTest(current => ({
+    ...current,
+    testType: type,
+    problemIds: DEMO_MODE
+      ? current.problemIds.filter(id => getCatalogMetadata(problems.find(problem => problem.id === id) || {}, true).roundTypes.includes(type === 'target' ? 'Target' : 'Sprint'))
+      : current.problemIds,
+  }));
+  const hiddenSelectedProblemCount = newTest.problemIds.filter(
+    id => !visibleCatalogProblems.some(problem => problem.id === id)
+  ).length;
   return (
-    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
+    <div className="min-h-screen bg-[#f1f6fd] flex justify-center">
       <div className="w-full max-w-4xl p-6">
-        <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
+        <DemoBanner />
+        <div className="bg-white rounded-xl shadow p-6 mb-6 flex flex-wrap gap-3 justify-between items-center">
           <button
             onClick={() => setView('teacher-dashboard')}
-            className="text-sm text-[#006da6] hover:underline"
+            className="text-sm text-[#2a61ba] hover:underline"
           >
-            ← Back
+            ← Back to dashboard
           </button>
           <h1 className="text-lg font-semibold text-gray-800">
             Create New Test
@@ -1869,12 +2157,12 @@ if (view === 'create-test' && user) {
                   type="radio"
                   name="testType"
                   checked={newTest.testType === 'sprint'}
-                  onChange={() => setNewTest({ ...newTest, testType: 'sprint' })}
+                  onChange={() => changeTestType('sprint')}
                   className="mt-1"
                 />
                 <div>
                   <span className="font-medium text-gray-800">Sprint</span>
-                  <p className="text-sm text-gray-500 mt-0.5">30 problems, 1 point each. Counts toward MATHCOUNTS score as 1× correct answers.</p>
+                  <p className="text-sm text-gray-500 mt-0.5">30 problems, 1 point each. {DEMO_MODE ? 'Fictional demo scoring: 1× correct answers.' : 'Counts toward MATHCOUNTS score as 1× correct answers.'}</p>
                 </div>
               </label>
               <label className="flex flex-1 items-start gap-3 rounded-lg border border-gray-200 p-4 cursor-pointer">
@@ -1882,21 +2170,27 @@ if (view === 'create-test' && user) {
                   type="radio"
                   name="testType"
                   checked={newTest.testType === 'target'}
-                  onChange={() => setNewTest({ ...newTest, testType: 'target' })}
+                  onChange={() => changeTestType('target')}
                   className="mt-1"
                 />
                 <div>
                   <span className="font-medium text-gray-800">Target</span>
-                  <p className="text-sm text-gray-500 mt-0.5">8 problems, 2 points each. Counts toward MATHCOUNTS score as 2× correct answers.</p>
+                  <p className="text-sm text-gray-500 mt-0.5">8 problems, 2 points each. {DEMO_MODE ? 'Fictional demo scoring: 2× correct answers.' : 'Counts toward MATHCOUNTS score as 2× correct answers.'}</p>
                 </div>
               </label>
             </div>
           </fieldset>
 
+          <ProblemCatalogFilters demoMode={DEMO_MODE} filters={catalogFilters} options={catalogOptions} onChange={setCatalogFilters} />
+
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="text-base font-semibold text-gray-800">Choose problems</h2>
             <p className="text-sm text-gray-600" role="status" aria-live="polite">{newTest.problemIds.length} selected · {newTest.testType === 'target' ? '8' : '30'} required</p>
           </div>
+          <p className="-mt-4 text-xs text-gray-600">
+            Catalog filters change which items are shown; selected problem IDs remain in this test.
+            {hiddenSelectedProblemCount > 0 && ` ${hiddenSelectedProblemCount} selected problem${hiddenSelectedProblemCount === 1 ? ' is' : 's are'} currently hidden by the filters.`}
+          </p>
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
             <label className={`flex items-start gap-3 text-sm ${selectedPdfDocumentId ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
               <input
@@ -1919,7 +2213,7 @@ if (view === 'create-test' && user) {
           <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-1" role="region" aria-label="Problem selection">
             {(() => {
               const byFolder = {};
-              for (const p of problems) {
+              for (const p of visibleCatalogProblems) {
                 const fname = p.folder_name || 'Uncategorized';
                 if (!byFolder[fname]) byFolder[fname] = [];
                 byFolder[fname].push(p);
@@ -1935,7 +2229,10 @@ if (view === 'create-test' && user) {
                   return next;
                 });
                 const folderProbs = byFolder[fname];
-                const folderIds = folderProbs.map(p => p.id);
+                const requiredFormat = newTest.testType === 'target' ? 'Target' : 'Sprint';
+                const folderIds = folderProbs
+                  .filter(problem => !DEMO_MODE || getCatalogMetadata(problem, true).roundTypes.includes(requiredFormat))
+                  .map(p => p.id);
                 const allSelected = folderIds.length > 0 && folderIds.every(id => newTest.problemIds.includes(id));
                 const someSelected = folderIds.some(id => newTest.problemIds.includes(id));
                 const toggleFolderSelection = (e) => {
@@ -1970,11 +2267,15 @@ if (view === 'create-test' && user) {
                       </button>
                     </div>
                     <div id={folderPanelId} hidden={!isExpanded} className="border-t border-gray-200 p-3 space-y-2">
-                        {folderProbs.map(p => (
-                          <label key={p.id} className="flex gap-3 text-sm items-center cursor-pointer hover:bg-gray-50 -mx-1 px-2 py-1.5 rounded">
+                        {folderProbs.map(p => {
+                    const metadata = getCatalogMetadata(p, DEMO_MODE);
+                    const requiredFormat = newTest.testType === 'target' ? 'Target' : 'Sprint';
+                    const formatCompatible = !DEMO_MODE || metadata.roundTypes.includes(requiredFormat);
+                          return <label key={p.id} className="flex gap-3 text-sm items-center cursor-pointer hover:bg-gray-50 -mx-1 px-2 py-1.5 rounded">
                             <input
                               type="checkbox"
                               checked={newTest.problemIds.includes(p.id)}
+                              disabled={!formatCompatible}
                               onChange={(e) =>
                                 setNewTest({
                                   ...newTest,
@@ -1990,10 +2291,12 @@ if (view === 'create-test' && user) {
                               {p.tag_names?.length > 0 && (
                                 <span className="text-gray-500 ml-1">[{p.tag_names.join(', ')}]</span>
                               )}
-                              <span className="text-[#006da6] font-medium ml-2">ELO {p.elo}</span>
+                              <span className="ml-2 text-gray-600">{metadata.difficulty} · {metadata.roundTypes.join(', ')}{metadata.yearLabel ? ` · ${metadata.yearLabel}` : ''}</span>
+                              <span className="text-[#2a61ba] font-medium ml-2">ELO {p.elo}</span>
+                              {!formatCompatible && <span className="ml-2 text-xs text-gray-500">Not available for {requiredFormat}</span>}
                             </span>
                           </label>
-                        ))}
+                        })}
                     </div>
                   </div>
                 );
@@ -2001,11 +2304,15 @@ if (view === 'create-test' && user) {
             })()}
           </div>
 
+          {visibleCatalogProblems.length === 0 && (
+            <p className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600" role="status">No problems match these filters.</p>
+          )}
+
           {createTestError && <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">{createTestError}</p>}
           <button
             type="submit"
             disabled={newTest.problemIds.length !== (newTest.testType === 'target' ? 8 : 30) || !newTest.name.trim() || !newTest.dueDate || !Number.isInteger(Number(newTest.timeLimit)) || Number(newTest.timeLimit) < 1 || Number(newTest.timeLimit) > 240 || (newTest.showSourcePdf && !selectedPdfDocumentId)}
-            className="w-full bg-[#006da6] hover:bg-[#006699] disabled:cursor-not-allowed disabled:opacity-50 text-white py-3 rounded-lg font-medium"
+            className="w-full bg-[#2a61ba] hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-50 text-white py-3 rounded-lg font-medium"
           >
             Create Test
           </button>
@@ -2017,33 +2324,28 @@ if (view === 'create-test' && user) {
 
 if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
   const isTeacherAdmin = user.role === 'teacher';
-  const normalizedProblemSearch = problemSearch.trim().toLocaleLowerCase();
-  const visibleProblemIds = new Set(problems
-    .filter(problem => {
-      const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.topic || ''} ${problem.folder_name || ''}`.toLocaleLowerCase();
-      return !normalizedProblemSearch || searchable.includes(normalizedProblemSearch);
-    })
-    .map(problem => problem.id));
+  const visibleProblemIds = new Set(visibleCatalogProblems.map(problem => problem.id));
   const hiddenSelectedCount = selectedProblemIds.filter(id => !visibleProblemIds.has(id)).length;
   return (
-    <div className="min-h-screen bg-[#f5f7f8] flex justify-center">
+    <div className="min-h-screen bg-[#f1f6fd] flex justify-center">
       <div className="w-full max-w-6xl p-6">
+        <DemoBanner />
         <div className="bg-white rounded-xl shadow p-4 mb-6 flex justify-between">
           <h1 className="font-semibold text-gray-800">
             {isTeacherAdmin ? 'Team Problem Bank' : 'Admin Portal'}
           </h1>
-          <div className="flex gap-4">
+          <div className="flex flex-wrap gap-4">
             {isTeacherAdmin && (
               <button
                 onClick={() => setView('teacher-dashboard')}
-                className="text-sm text-[#006da6] hover:underline"
+                className="text-sm text-[#2a61ba] hover:underline"
               >
                 ← Back to Dashboard
               </button>
             )}
             <button
               onClick={handleLogout}
-              className="text-sm text-[#006da6] hover:underline"
+              className="text-sm text-[#2a61ba] hover:underline"
             >
               Logout
             </button>
@@ -2072,13 +2374,13 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                       className="w-32 px-1 py-0.5 border rounded text-sm"
                       autoFocus
                     />
-                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#006da6] hover:underline text-xs">✓</button>
+                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#2a61ba] hover:underline text-xs">✓</button>
                     <button type="button" onClick={() => { setEditingFolderId(null); setEditingFolderName(''); }} className="text-gray-500 hover:underline text-xs">✗</button>
                   </>
                 ) : (
                   <>
                     {f.name}
-                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#006da6] hover:underline text-xs">edit</button>
+                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#2a61ba] hover:underline text-xs">edit</button>
                     <button type="button" onClick={() => deleteFolder(f.id)} className="text-red-600 hover:underline text-xs">×</button>
                   </>
                 )}
@@ -2093,7 +2395,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               placeholder="New folder name"
               className="flex-1 px-3 py-2 border rounded-lg text-sm"
             />
-            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#006da6] text-white rounded-lg text-sm">Add</button>
+            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#2a61ba] text-white rounded-lg text-sm">Add</button>
           </div>
         </div>
 
@@ -2215,7 +2517,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               type="button"
               onClick={handlePdfImport}
               disabled={pdfImportLoading || !pdfImportFile}
-              className="px-4 py-2 bg-[#006da6] text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 bg-[#2a61ba] text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pdfImportLoading ? 'Importing…' : 'Import'}
             </button>
@@ -2375,7 +2677,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
 
         <button
           onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '', source: '', folder_id: null, tag_ids: [] })}
-          className="mb-6 bg-[#006da6] text-white px-6 py-3 rounded-lg"
+          className="mb-6 bg-[#2a61ba] text-white px-6 py-3 rounded-lg"
         >
           Add Problem
         </button>
@@ -2504,7 +2806,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   <button
                     type="button"
                     onClick={saveProblem}
-                    className="flex-1 bg-[#006da6] text-white py-2 rounded-lg"
+                    className="flex-1 bg-[#2a61ba] text-white py-2 rounded-lg"
                   >
                     Save
                   </button>
@@ -2541,21 +2843,10 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
           </AccessibleDialog>
         )}
 
-        <div className="mb-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-          <label htmlFor="problem-bank-search" className="mb-2 block text-sm font-semibold text-gray-800">Search problems</label>
-          <input
-            id="problem-bank-search"
-            type="search"
-            value={problemSearch}
-            onChange={event => setProblemSearch(event.target.value)}
-            placeholder="Search question text, source, topic, or folder"
-            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-[#006da6] focus:outline-none"
-          />
-          {normalizedProblemSearch && <p className="mt-2 text-xs text-gray-600">Showing matches for “{problemSearch.trim()}”.</p>}
-        </div>
+        <ProblemCatalogFilters demoMode={DEMO_MODE} filters={catalogFilters} options={catalogOptions} onChange={setCatalogFilters} />
 
         {selectedProblemIds.length > 0 && (
-          <div className="bg-[#006da6]/10 border border-[#006da6]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
+          <div className="mt-4 bg-[#2a61ba]/10 border border-[#2a61ba]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
             <span className="font-medium text-gray-800">{selectedProblemIds.length} selected</span>
             {hiddenSelectedCount > 0 && <span role="status" className="text-sm text-gray-700">{hiddenSelectedCount} selected problem{hiddenSelectedCount === 1 ? ' is' : 's are'} hidden by this search; bulk actions still include {hiddenSelectedCount} hidden item{hiddenSelectedCount === 1 ? '' : 's'}.</span>}
             <select
@@ -2573,7 +2864,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               type="button"
               onClick={bulkMoveProblems}
               disabled={!bulkMoveFolderId}
-              className="px-3 py-1.5 bg-[#006da6] text-white rounded-lg text-sm hover:bg-[#006699] disabled:opacity-50"
+              className="px-3 py-1.5 bg-[#2a61ba] text-white rounded-lg text-sm hover:bg-[#20529f] disabled:opacity-50"
             >
               Move
             </button>
@@ -2602,9 +2893,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               byFolder[f.id] = { name: f.name, problems: [] };
             }
             byFolder[UNCategorized] = { name: 'Uncategorized', problems: [] };
-            for (const p of problems) {
-              const searchable = `${p.question || ''} ${p.source || ''} ${p.topic || ''} ${p.folder_name || ''}`.toLocaleLowerCase();
-              if (normalizedProblemSearch && !searchable.includes(normalizedProblemSearch)) continue;
+            for (const p of visibleCatalogProblems) {
               const fid = p.folder_id ?? UNCategorized;
               if (!byFolder[fid]) byFolder[fid] = { name: p.folder_name || 'Uncategorized', problems: [] };
               byFolder[fid].problems.push(p);
@@ -2613,9 +2902,9 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
             const orderedFolders = [
               ...folderIds,
               ...(byFolder[UNCategorized]?.problems?.length ? [UNCategorized] : [])
-            ].filter(id => !normalizedProblemSearch || byFolder[id]?.problems?.length > 0);
-            if (orderedFolders.length === 0 && normalizedProblemSearch) {
-              return <div role="status" className="rounded-xl border border-gray-200 bg-white p-8 text-center text-gray-600">No problems match “{problemSearch.trim()}”.</div>;
+            ].filter(id => !hasCatalogFilters || byFolder[id]?.problems?.length > 0);
+            if (orderedFolders.length === 0 && hasCatalogFilters) {
+              return <div role="status" className="rounded-xl border border-gray-200 bg-white p-8 text-center text-gray-600">No problems match these catalog filters.</div>;
             }
             if (orderedFolders.length === 0 && problems.length === 0) {
               return (
@@ -2628,7 +2917,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               const { name, problems: folderProbs } = byFolder[fid] || { name: 'Uncategorized', problems: [] };
               const expandKey = fid === UNCategorized ? -1 : fid;
               const folderPanelId = `problem-folder-panel-${expandKey}`;
-              const isExpanded = normalizedProblemSearch ? folderProbs.length > 0 : adminExpandedFolders.has(expandKey);
+              const isExpanded = hasCatalogFilters ? folderProbs.length > 0 : adminExpandedFolders.has(expandKey);
               const toggle = () => setAdminExpandedFolders(prev => {
                 const next = new Set(prev);
                 if (next.has(expandKey)) next.delete(expandKey);
@@ -2641,10 +2930,10 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     <button
                       type="button"
                       onClick={toggle}
-                      disabled={Boolean(normalizedProblemSearch)}
+                      disabled={hasCatalogFilters}
                       aria-expanded={isExpanded}
                       aria-controls={folderPanelId}
-                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#006da6] disabled:cursor-default disabled:hover:text-gray-800"
+                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#2a61ba] disabled:cursor-default disabled:hover:text-gray-800"
                     >
                       <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
                       <span>{name}</span>
@@ -2724,7 +3013,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                                 <button
                                   type="button"
                                   onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '', folder_id: p.folder_id ?? null, tag_ids: p.tag_ids ?? [] })}
-                                  className="text-[#006da6] hover:underline font-medium"
+                                  className="text-[#2a61ba] hover:underline font-medium"
                                 >
                                   Edit
                                 </button>
@@ -2753,7 +3042,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
 
 
 return (
-  <div className="min-h-screen bg-[#f5f7f8] flex items-center justify-center text-gray-500">
+  <div className="min-h-screen bg-[#f1f6fd] flex items-center justify-center text-gray-500">
     Loading…
   </div>
 );

@@ -18,6 +18,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const DEMO_MODE = process.env.DEMO_MODE === 'true';
 const frontendDistDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../frontend/dist');
 if (process.env.TRUST_PROXY != null && process.env.TRUST_PROXY.trim() !== '') {
   const proxyHops = Number(process.env.TRUST_PROXY);
@@ -176,6 +177,28 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
+function demoFeatureDisabled(_req, res, next) {
+  if (DEMO_MODE) return res.status(403).json({ error: 'This feature is disabled on the fictional demo preview.' });
+  next();
+}
+
+// The demo preview is intentionally a read-only catalog plus test-taking
+// sandbox. Disable all ingestion and catalog/roster mutations server-side.
+app.use(['/api/import-pdf', '/api/upload', '/api/uploads'], demoFeatureDisabled);
+app.use(['/api/problems', '/api/folders', '/api/tags'], (req, res, next) => {
+  if (DEMO_MODE && req.method !== 'GET') {
+    return res.status(403).json({ error: 'Catalog editing is disabled on the fictional demo preview.' });
+  }
+  next();
+});
+app.use('/api/students', (req, res, next) => {
+  const isRosterList = /^\/api\/students\/?(?:\?.*)?$/.test(req.originalUrl);
+  if (DEMO_MODE && (req.method !== 'GET' || !isRosterList)) {
+    return res.status(403).json({ error: 'Student roster editing and individual profiles are disabled on the fictional demo preview.' });
+  }
+  next();
+});
+
 function hasValidImageSignature(buffer, mimeType) {
   if (!Buffer.isBuffer(buffer)) return false;
   switch (mimeType) {
@@ -222,6 +245,9 @@ const authenticateToken = (req, res, next) => {
       );
       const currentUser = result.rows[0];
       if (!currentUser) return res.status(401).json({ error: 'Account no longer exists' });
+      if (DEMO_MODE && !['teacher', 'student'].includes(currentUser.role)) {
+        return res.status(403).json({ error: 'Administrator access is disabled on the fictional demo preview.' });
+      }
       req.user = currentUser;
       next();
     } catch (queryError) {
@@ -279,6 +305,9 @@ app.get('/api/health', async (_req, res) => {
 // Teacher signup
 app.post('/api/signup', signupLimiter, async (req, res) => {
   try {
+    if (DEMO_MODE) {
+      return res.status(403).json({ error: 'Teacher signup is disabled on the fictional demo preview.' });
+    }
     if (process.env.ENABLE_TEACHER_SIGNUP === 'false') {
       return res.status(403).json({ error: 'Teacher self-signup is disabled' });
     }
@@ -343,6 +372,9 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     }
     
     const user = result.rows[0];
+    if (DEMO_MODE && ![process.env.DEMO_TEACHER_USERNAME, process.env.DEMO_STUDENT_USERNAME].includes(user.username)) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
     const validPassword = await bcrypt.compare(password, user.password_hash);
     
     if (!validPassword) {
@@ -405,10 +437,88 @@ app.get('/api/me', authenticateToken, async (req, res) => {
   }
 });
 
+// Teachers control whether students can see one anonymous, cohort-level ELO
+// figure. Ordinary teachers default to off; the fictional demo opts in at seed.
+app.get('/api/teacher/settings', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Teacher access required' });
+  try {
+    const result = await pool.query(
+      `SELECT COALESCE(
+         (SELECT student_class_elo_visible FROM teacher_settings WHERE teacher_id = $1),
+         false
+       ) AS student_class_elo_visible`,
+      [req.user.id]
+    );
+    res.json({ studentClassEloVisible: result.rows[0].student_class_elo_visible });
+  } catch (error) {
+    console.error('Teacher settings read failed:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/teacher/settings', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Teacher access required' });
+  if (typeof req.body?.studentClassEloVisible !== 'boolean') {
+    return res.status(400).json({ error: 'studentClassEloVisible must be a boolean' });
+  }
+  try {
+    const result = await pool.query(
+      `INSERT INTO teacher_settings (teacher_id, student_class_elo_visible)
+       VALUES ($1, $2)
+       ON CONFLICT (teacher_id) DO UPDATE
+         SET student_class_elo_visible = EXCLUDED.student_class_elo_visible,
+             updated_at = CURRENT_TIMESTAMP
+       RETURNING student_class_elo_visible`,
+      [req.user.id, req.body.studentClassEloVisible]
+    );
+    res.json({ studentClassEloVisible: result.rows[0].student_class_elo_visible });
+  } catch (error) {
+    console.error('Teacher settings update failed:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Students receive only a rounded average, and only for cohorts large enough
+// to make the aggregate meaningfully anonymous. No member rows are returned.
+app.get('/api/class/elo', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'student') return res.status(403).json({ error: 'Student access required' });
+  try {
+    const student = await pool.query('SELECT teacher_id FROM users WHERE id = $1 AND role = $2', [req.user.id, 'student']);
+    const teacherId = student.rows[0]?.teacher_id;
+    if (teacherId == null) return res.status(403).json({ error: 'No assigned class' });
+    const setting = await pool.query(
+      `SELECT COALESCE(
+         (SELECT student_class_elo_visible FROM teacher_settings WHERE teacher_id = $1),
+         false
+       ) AS visible`,
+      [teacherId]
+    );
+    if (setting.rows[0]?.visible !== true) {
+      return res.status(403).json({ error: 'Class ELO visibility is disabled by your teacher' });
+    }
+    const aggregate = await pool.query(
+      `SELECT COUNT(*)::int AS cohort_size, ROUND(AVG(elo))::int AS class_elo
+       FROM users WHERE role = 'student' AND teacher_id = $1`,
+      [teacherId]
+    );
+    if (aggregate.rows[0].cohort_size < 5) {
+      return res.json({ available: false, minimumCohort: 5 });
+    }
+    return res.json({
+      available: true,
+      classElo: aggregate.rows[0].class_elo,
+      cohortSize: aggregate.rows[0].cohort_size
+    });
+  } catch (error) {
+    console.error('Class ELO read failed:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Folders: read = public+own; write = admin all, teacher own only
 function folderReadWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
+  if (user.role === 'teacher') return { sql: DEMO_MODE ? 'created_by = $1' : '(created_by IS NULL OR created_by = $1)', params: [user.id] };
   return { sql: '1=0', params: [] };
 }
 function folderWriteWhere(user) {
@@ -1094,7 +1204,7 @@ app.delete('/api/tags/:id', authenticateToken, async (req, res) => {
 // Problems: read = admin all, teacher public+own; write = admin all, teacher own only
 function problemReadWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(p.created_by IS NULL OR p.created_by = $1)', params: [user.id] };
+  if (user.role === 'teacher') return { sql: DEMO_MODE ? 'p.created_by = $1' : '(p.created_by IS NULL OR p.created_by = $1)', params: [user.id] };
   return { sql: '1=0', params: [] };
 }
 function problemWriteWhere(user) {
@@ -1141,6 +1251,9 @@ async function validateProblemTags(client, user, rawTagIds) {
 
 // Get all problems (with folder and tags)
 app.get('/api/problems', authenticateToken, async (req, res) => {
+  if (DEMO_MODE && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Catalog access is limited to the demo teacher account.' });
+  }
   try {
     const { sql, params } = problemReadWhere(req.user);
     const result = await pool.query(`
@@ -1543,13 +1656,19 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
     if (!problemIds.every((id) => Number.isSafeInteger(id) && id > 0 && id <= 2147483647) || new Set(problemIds).size !== problemIds.length) {
       return res.status(400).json({ error: 'problemIds must be unique positive integer ids' });
     }
+    const problemVisibility = DEMO_MODE
+      ? 'created_by = $2 AND source = \'Fictional demo catalog\''
+      : '(created_by IS NULL OR created_by = $2)';
     const accessible = await pool.query(
-      `SELECT id, created_by, pdf_document_id, source_page, student_pdf_page, source_pages, student_pdf_pages
-       FROM problems WHERE id = ANY($1::int[]) AND (created_by IS NULL OR created_by = $2)`,
+      `SELECT id, created_by, pdf_document_id, source_page, student_pdf_page, source_pages, student_pdf_pages, catalog_formats
+       FROM problems WHERE id = ANY($1::int[]) AND ${problemVisibility}`,
       [problemIds, req.user.id]
     );
     if (accessible.rowCount !== problemIds.length) {
       return res.status(400).json({ error: 'Every problem must be public or owned by you' });
+    }
+    if (DEMO_MODE && accessible.rows.some(problem => !problem.catalog_formats.includes(type === 'target' ? 'Target' : 'Sprint'))) {
+      return res.status(400).json({ error: `Every fictional demo problem in this test must be marked for the ${type === 'target' ? 'Target' : 'Sprint'} format.` });
     }
     const problemById = new Map(accessible.rows.map(problem => [problem.id, problem]));
     const problemDocumentIds = [...new Set(accessible.rows.map(problem => problem.pdf_document_id).filter(Boolean))];
@@ -1568,6 +1687,9 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
     const sourceDocumentId = hasSourceDocumentChoice
       ? suppliedDocumentId
       : (canInferSinglePdf ? problemDocumentIds[0] : null);
+    if (DEMO_MODE && sourceDocumentId != null) {
+      return res.status(400).json({ error: 'PDF-based tests are disabled on the fictional demo preview.' });
+    }
     if (sourceDocumentId != null) {
       if (problemDocumentIds.length !== 1 || problemDocumentIds[0] !== sourceDocumentId || accessible.rows.some(problem => problem.pdf_document_id !== sourceDocumentId)) {
         return res.status(400).json({ error: 'All questions in a PDF-based test must come from the same PDF source.' });
@@ -1585,6 +1707,32 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      if (DEMO_MODE) {
+        // Serialize quota checks with inserts across replicas and restarts.
+        // Keep lock order consistent: global cap first, then teacher window.
+        await client.query('SELECT pg_advisory_xact_lock(20261030, 1)');
+        await client.query('SELECT pg_advisory_xact_lock(20261031, $1)', [req.user.id]);
+        const quota = await client.query(
+          `SELECT COUNT(*)::int AS total_tests,
+                  COUNT(*) FILTER (
+                    WHERE created_by = $1 AND created_at >= CURRENT_TIMESTAMP - INTERVAL '1 hour'
+                  )::int AS teacher_recent_tests
+           FROM tests`,
+          [req.user.id]
+        );
+        if (quota.rows[0].total_tests >= 250) {
+          await client.query('ROLLBACK');
+          return res.status(429).json({
+            error: 'The shared demo has reached its 250-test limit. Existing tests remain available; demo data is not automatically reset.'
+          });
+        }
+        if (quota.rows[0].teacher_recent_tests >= 5) {
+          await client.query('ROLLBACK');
+          return res.status(429).json({
+            error: 'The demo teacher has created 5 tests in the past hour. Please try again after the hourly limit resets.'
+          });
+        }
+      }
       const result = await client.query(
         `INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type, source_document_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
@@ -1615,6 +1763,7 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
 
 // Update test (teacher only) - solutions_link, answers_released
 app.put('/api/tests/:id', authenticateToken, async (req, res) => {
+  if (DEMO_MODE) return res.status(403).json({ error: 'Test editing is disabled on the fictional demo preview.' });
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Teacher access required' });
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid test id' });
@@ -1659,6 +1808,9 @@ app.get('/api/attempts', authenticateToken, async (req, res) => {
 
 // Get attempt details with answers/correct answers (when test complete: due passed or all submitted)
 app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
+  if (DEMO_MODE && req.user.role !== 'student') {
+    return res.status(403).json({ error: 'Student-level attempt details are disabled on the fictional demo preview.' });
+  }
   try {
     const attemptId = parseInt(req.params.id, 10);
     if (Number.isNaN(attemptId)) return res.status(400).json({ error: 'Invalid attempt id' });
@@ -1807,6 +1959,7 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
 // Unlike the image upload route, this endpoint authorizes against the test and
 // active student session on every request (including PDF byte-range requests).
 app.get('/api/tests/:id/pdf', authenticateToken, async (req, res) => {
+  if (DEMO_MODE) return res.status(404).send('PDF delivery is disabled on the fictional demo preview');
   const testId = Number(req.params.id);
   if (!Number.isSafeInteger(testId) || testId < 1) return res.status(400).send('Invalid test id');
   try {
@@ -1888,6 +2041,7 @@ app.get('/api/tests/:id/pdf', authenticateToken, async (req, res) => {
 
 // Get all attempts for a test (teacher only; only their students)
 app.get('/api/tests/:id/attempts', authenticateToken, async (req, res) => {
+  if (DEMO_MODE) return res.status(403).json({ error: 'Student-level test analytics are disabled on the fictional demo preview.' });
   if (req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Teacher access required' });
   }
@@ -1904,6 +2058,57 @@ app.get('/api/tests/:id/attempts', authenticateToken, async (req, res) => {
     );
     res.json(result.rows);
   } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Aggregate-only classroom insights. Cohort size is checked independently for
+// each topic and problem; suppressed groups disclose no small-cohort counts.
+app.get('/api/insights/class', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Teacher access required' });
+  const minimumCohort = 5;
+  const outcomesCte = `
+    WITH outcomes AS (
+      SELECT ta.student_id, p.id AS problem_id,
+             COALESCE(NULLIF(BTRIM(p.topic), ''), 'Untagged') AS topic,
+             p.difficulty, p.catalog_formats, p.year_block,
+             (ta.results ->> p.id::text = 'true') AS correct
+      FROM test_attempts ta
+      JOIN tests t ON t.id = ta.test_id AND t.created_by = $1
+      JOIN users u ON u.id = ta.student_id AND u.role = 'student' AND u.teacher_id = $1
+      CROSS JOIN LATERAL UNNEST(t.problem_ids) AS selected(problem_id)
+      JOIN problems p ON p.id = selected.problem_id
+      WHERE ta.results ? p.id::text
+    )`;
+  try {
+    const [topics, problems] = await Promise.all([
+      pool.query(
+        `${outcomesCte}
+         SELECT topic, COUNT(*)::int AS responses,
+                COUNT(DISTINCT student_id)::int AS learners,
+                ROUND(100.0 * COUNT(*) FILTER (WHERE correct) / NULLIF(COUNT(*), 0))::int AS accuracy_percent
+         FROM outcomes GROUP BY topic
+         HAVING COUNT(DISTINCT student_id) >= $2 ORDER BY topic`,
+        [req.user.id, minimumCohort]
+      ),
+      pool.query(
+        `${outcomesCte}
+         SELECT problem_id, topic, difficulty, catalog_formats AS formats, year_block,
+                COUNT(*)::int AS responses,
+                COUNT(DISTINCT student_id)::int AS learners,
+                ROUND(100.0 * COUNT(*) FILTER (WHERE correct) / NULLIF(COUNT(*), 0))::int AS accuracy_percent
+         FROM outcomes GROUP BY problem_id, topic, difficulty, catalog_formats, year_block
+         HAVING COUNT(DISTINCT student_id) >= $2 ORDER BY topic, problem_id`,
+        [req.user.id, minimumCohort]
+      )
+    ]);
+    res.json({
+      minimumCohort,
+      topics: topics.rows,
+      problems: problems.rows
+    });
+  } catch (error) {
+    console.error('Class insight query failed:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -2171,6 +2376,11 @@ app.get('/api/students', authenticateToken, async (req, res) => {
   if (req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Teacher access required' });
   }
+  if (DEMO_MODE) {
+    // The demo insights are aggregate-only; never expose cohort identities or
+    // individual ratings through the standard teacher roster API.
+    return res.json([]);
+  }
   
   try {
     const result = await pool.query(
@@ -2221,6 +2431,9 @@ app.get('/api/students', authenticateToken, async (req, res) => {
 app.get('/api/students/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Teacher access required' });
+  }
+  if (DEMO_MODE) {
+    return res.status(403).json({ error: 'Student-level profiles are unavailable in the shared demo.' });
   }
   const studentId = parseInt(req.params.id, 10);
   if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid student ID' });

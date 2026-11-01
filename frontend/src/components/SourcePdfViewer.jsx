@@ -118,7 +118,7 @@ export default function SourcePdfViewer({
                 disabled={!pdfUrl}
                 aria-current={selected ? 'page' : undefined}
                 title={page ? `Question ${index + 1}, page ${page}` : `Question ${index + 1}`}
-                className={`min-h-10 min-w-10 rounded-lg border px-3 text-sm font-semibold disabled:opacity-50 ${selected ? 'border-[#006da6] bg-[#006da6] text-white' : 'border-gray-300 bg-white text-gray-700 hover:border-[#006da6] hover:bg-blue-50'}`}
+                className={`min-h-10 min-w-10 rounded-lg border px-3 text-sm font-semibold disabled:opacity-50 ${selected ? 'border-[#2a61ba] bg-[#2a61ba] text-white' : 'border-gray-300 bg-white text-gray-700 hover:border-[#2a61ba] hover:bg-blue-50'}`}
               >
                 {index + 1}
               </button>

@@ -2,6 +2,7 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { createSecureContext } from 'node:tls';
 import { randomBytes } from 'crypto';
+import { DEMO_CATALOG } from './demoCatalog.js';
 
 dotenv.config();
 
@@ -32,9 +33,9 @@ function configuredDatabaseCa() {
 
 const databaseCa = configuredDatabaseCa();
 const isProduction = process.env.NODE_ENV === 'production';
+const isDemoMode = process.env.DEMO_MODE === 'true';
 
-function productionDatabaseUrl() {
-  const configuredUrl = process.env.DATABASE_URL;
+function productionDatabaseUrl(configuredUrl) {
   if (!configuredUrl) return configuredUrl;
   let parsedUrl;
   try {
@@ -52,7 +53,27 @@ function productionDatabaseUrl() {
   return parsedUrl.toString();
 }
 
-const databaseUrl = isProduction ? productionDatabaseUrl() : process.env.DATABASE_URL;
+if (isDemoMode && !isProduction) {
+  throw new Error('DEMO_MODE=true requires NODE_ENV=production');
+}
+if (isDemoMode && !process.env.DEMO_DATABASE_URL) {
+  throw new Error('DEMO_MODE=true requires DEMO_DATABASE_URL; DATABASE_URL is never used as a fallback');
+}
+
+if (isDemoMode && process.env.DATABASE_URL) {
+  const demoUrl = new URL(productionDatabaseUrl(process.env.DEMO_DATABASE_URL));
+  const productionUrl = new URL(productionDatabaseUrl(process.env.DATABASE_URL));
+  const sameDatabase = demoUrl.hostname.toLowerCase() === productionUrl.hostname.toLowerCase()
+    && (demoUrl.port || '5432') === (productionUrl.port || '5432')
+    && decodeURIComponent(demoUrl.pathname) === decodeURIComponent(productionUrl.pathname);
+  if (sameDatabase) {
+    throw new Error('DEMO_DATABASE_URL must identify a different normalized database connection than DATABASE_URL');
+  }
+}
+
+const databaseUrl = isDemoMode
+  ? productionDatabaseUrl(process.env.DEMO_DATABASE_URL)
+  : (isProduction ? productionDatabaseUrl(process.env.DATABASE_URL) : process.env.DATABASE_URL);
 const databaseSsl = isProduction
   ? { rejectUnauthorized: true, ...(databaseCa ? { ca: databaseCa } : {}) }
   : false;
@@ -190,6 +211,23 @@ export async function initDatabase() {
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS teacher_id INTEGER REFERENCES users(id)
     `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS teacher_settings (
+        teacher_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        student_class_elo_visible BOOLEAN NOT NULL DEFAULT false,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query('ALTER TABLE teacher_settings ALTER COLUMN student_class_elo_visible SET DEFAULT false');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS demo_instance (
+        singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton = true),
+        teacher_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+        teacher_username VARCHAR(50) NOT NULL,
+        student_username_prefix VARCHAR(47) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     
     // Problems table
     await client.query(`
@@ -203,9 +241,15 @@ export async function initDatabase() {
         elo INTEGER DEFAULT 1500,
         times_used INTEGER DEFAULT 0,
         times_correct INTEGER DEFAULT 0,
+        catalog_formats TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+        difficulty SMALLINT,
+        year_block VARCHAR(50),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS catalog_formats TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS difficulty SMALLINT');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS year_block VARCHAR(50)');
     
     // Tests table (problem_elo_snapshot = frozen ELOs for this test so all students see same difficulties)
     await client.query(`
@@ -217,9 +261,11 @@ export async function initDatabase() {
         time_limit INTEGER NOT NULL,
         created_by INTEGER REFERENCES users(id),
         problem_elo_snapshot JSONB,
+        is_synthetic BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN NOT NULL DEFAULT false');
 
     // Private, rights-attested source documents. Keep the original available
     // only to the owning teacher and store a separate question-pages-only copy
@@ -286,10 +332,12 @@ export async function initDatabase() {
         total INTEGER NOT NULL,
         elo_before INTEGER NOT NULL,
         elo_after INTEGER NOT NULL,
+        is_synthetic BOOLEAN NOT NULL DEFAULT false,
         completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(test_id, student_id)
       )
     `);
+    await client.query('ALTER TABLE test_attempts ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN NOT NULL DEFAULT false');
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS test_sessions (
@@ -314,9 +362,11 @@ export async function initDatabase() {
         old_problem_elo INTEGER NOT NULL,
         new_problem_elo INTEGER NOT NULL,
         was_correct BOOLEAN NOT NULL,
+        is_synthetic BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await client.query('ALTER TABLE elo_history ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN NOT NULL DEFAULT false');
 
     // Ensure problem_id FK cascades on delete (so sample problems can be deleted)
     await client.query(`
@@ -373,6 +423,230 @@ export async function seedDatabase() {
   const client = await pool.connect();
   
   try {
+    if (process.env.DEMO_MODE === 'true') {
+      if (process.env.NODE_ENV !== 'production') {
+        throw new Error('DEMO_MODE=true is only allowed with NODE_ENV=production on the isolated preview service');
+      }
+      if (process.env.BOOTSTRAP_ADMIN_USERNAME || process.env.BOOTSTRAP_ADMIN_PASSWORD) {
+        throw new Error('DEMO_MODE cannot be combined with production administrator bootstrap credentials');
+      }
+      const teacherUsername = process.env.DEMO_TEACHER_USERNAME?.trim();
+      const teacherPassword = process.env.DEMO_TEACHER_PASSWORD;
+      const studentUsername = process.env.DEMO_STUDENT_USERNAME?.trim();
+      const studentPassword = process.env.DEMO_STUDENT_PASSWORD;
+      const validUsername = (value) => typeof value === 'string' && /^[A-Za-z0-9._-]{3,50}$/.test(value);
+      const validPassword = (value) => typeof value === 'string'
+        && Array.from(value).length >= 12
+        && Buffer.byteLength(value, 'utf8') <= 72;
+      const generatedStudentNames = validUsername(studentUsername)
+        ? [studentUsername, ...Array.from({ length: 4 }, (_, index) => `${studentUsername}-cohort-${String(index + 2).padStart(2, '0')}`)]
+        : [];
+      if (!validUsername(teacherUsername)
+        || !validUsername(studentUsername)
+        || studentUsername.length > 40
+        || !validPassword(teacherPassword)
+        || !validPassword(studentPassword)
+        || teacherPassword === studentPassword
+        || generatedStudentNames.some((username) => username.toLowerCase() === teacherUsername.toLowerCase())) {
+        throw new Error('DEMO_MODE requires distinct, valid DEMO_TEACHER_USERNAME/PASSWORD and DEMO_STUDENT_USERNAME/PASSWORD settings');
+      }
+
+      const demoInstance = await client.query('SELECT teacher_id, teacher_username, student_username_prefix FROM demo_instance WHERE singleton = true');
+      if (demoInstance.rowCount) {
+        const marker = demoInstance.rows[0];
+        if (marker.teacher_username !== teacherUsername || marker.student_username_prefix !== studentUsername) {
+          throw new Error('DEMO_MODE credentials do not match the initialized dedicated preview database');
+        }
+        const fixtureState = await client.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM users WHERE role = 'teacher' AND id = $1 AND username = $2) AS teachers,
+             (SELECT COUNT(*)::int FROM users WHERE role = 'student') AS students,
+             (SELECT COUNT(*)::int FROM users WHERE role = 'student' AND teacher_id IS DISTINCT FROM $1) AS misassigned_students,
+             (SELECT COUNT(*)::int FROM users WHERE role = 'admin') AS admins,
+             (SELECT COUNT(*)::int FROM problems) AS all_problems,
+             (SELECT COUNT(*)::int FROM problems WHERE created_by = $1 AND source = 'Fictional demo catalog') AS catalog_problems,
+             (SELECT COUNT(*)::int FROM test_attempts ta JOIN tests t ON t.id = ta.test_id
+               WHERE t.created_by = $1 AND t.name = 'Synthetic demo history: Target baseline'
+                 AND t.is_synthetic = true AND ta.is_synthetic = true) AS baseline_attempts,
+             (SELECT COUNT(*)::int FROM elo_history eh JOIN problems p ON p.id = eh.problem_id
+               WHERE eh.is_synthetic = true AND p.created_by = $1) AS synthetic_elo_rows`,
+          [marker.teacher_id, teacherUsername]
+        );
+        const state = fixtureState.rows[0];
+        if (state.teachers !== 1 || state.students !== 5 || state.misassigned_students !== 0
+          || state.admins !== 0 || state.all_problems !== 30 || state.catalog_problems !== 30
+          || state.baseline_attempts !== 5 || state.synthetic_elo_rows < 40) {
+          throw new Error('Initialized demo database no longer matches its protected fictional fixture');
+        }
+        return;
+      }
+
+      // DEMO_MODE is a one-time initializer for a dedicated, empty preview DB.
+      // Fail startup on any existing user/content instead of ever mixing fixtures
+      // into a database that may contain real or historical records.
+      const existingData = await client.query(`
+        SELECT
+          EXISTS (SELECT 1 FROM users) OR
+          EXISTS (SELECT 1 FROM problems) OR
+          EXISTS (SELECT 1 FROM tests) OR
+          EXISTS (SELECT 1 FROM test_attempts) OR
+          EXISTS (SELECT 1 FROM test_sessions) OR
+          EXISTS (SELECT 1 FROM source_documents) OR
+          EXISTS (SELECT 1 FROM uploads) OR
+          EXISTS (SELECT 1 FROM folders WHERE created_by IS NOT NULL OR name <> 'Uncategorized') OR
+          EXISTS (SELECT 1 FROM tags WHERE created_by IS NOT NULL
+            OR name NOT IN ('Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability')) AS has_data
+      `);
+      if (existingData.rows[0].has_data) {
+        throw new Error('DEMO_MODE requires a fresh dedicated database with no existing users or content');
+      }
+      if (DEMO_CATALOG.length !== 30 || DEMO_CATALOG.filter((problem) => Array.isArray(problem.formats) && problem.formats.includes('Target')).length < 8) {
+        throw new Error('Fictional demo catalog must provide 30 Sprint questions and at least 8 Target questions');
+      }
+
+      await client.query('BEGIN');
+      const teacherHash = await bcrypt.hash(teacherPassword, 12);
+      const studentHash = await bcrypt.hash(studentPassword, 12);
+      const teacherResult = await client.query(
+        "INSERT INTO users (username, password_hash, role, elo) VALUES ($1, $2, 'teacher', 1500) RETURNING id",
+        [teacherUsername, teacherHash]
+      );
+      const teacherId = teacherResult.rows[0].id;
+      await client.query(
+        'INSERT INTO teacher_settings (teacher_id, student_class_elo_visible) VALUES ($1, true)',
+        [teacherId]
+      );
+      await client.query(
+        'INSERT INTO demo_instance (singleton, teacher_id, teacher_username, student_username_prefix) VALUES (true, $1, $2, $3)',
+        [teacherId, teacherUsername, studentUsername]
+      );
+      const studentValues = [];
+      const studentRows = [];
+      for (let index = 1; index <= 5; index++) {
+        const username = generatedStudentNames[index - 1];
+        studentValues.push(username, studentHash, teacherId);
+        const offset = (index - 1) * 3;
+        studentRows.push(`($${offset + 1}, $${offset + 2}, 'student', $${offset + 3}, 1500)`);
+      }
+      const insertedStudents = await client.query(
+        `INSERT INTO users (username, password_hash, role, teacher_id, elo) VALUES ${studentRows.join(', ')} RETURNING id, username`,
+        studentValues
+      );
+      const studentIdByUsername = Object.fromEntries(insertedStudents.rows.map((row) => [row.username, row.id]));
+      const folderResult = await client.query(
+        "INSERT INTO folders (name, created_by) VALUES ('Fictional Preview Catalog', $1) RETURNING id",
+        [teacherId]
+      );
+      const folderId = folderResult.rows[0].id;
+      const seededProblemIds = [];
+      const seededProblemElos = [];
+      for (const problem of DEMO_CATALOG) {
+        const validFormats = new Set(['Sprint', 'Target', 'Team', 'Countdown']);
+        if (!Array.isArray(problem.formats) || !problem.formats.includes('Sprint')
+          || !problem.formats.every((format) => validFormats.has(format))
+          || new Set(problem.formats).size !== problem.formats.length
+          || !Number.isInteger(problem.difficulty) || problem.difficulty < 1 || problem.difficulty > 5
+          || typeof problem.yearBlock !== 'string' || problem.yearBlock.length > 50
+          || typeof problem.topic !== 'string' || !problem.topic
+          || typeof problem.question !== 'string' || !problem.question
+          || typeof problem.answer !== 'string' || !problem.answer) {
+          throw new Error('Fictional demo catalog contains an invalid entry');
+        }
+        const insertedProblem = await client.query(
+          `INSERT INTO problems
+             (question, answer, topic, source, elo, folder_id, created_by, catalog_formats, difficulty, year_block)
+           VALUES ($1, $2, $3, 'Fictional demo catalog', $4, $5, $6, $7, $8, $9)
+           RETURNING id, elo`,
+          [problem.question, problem.answer, problem.topic, 1100 + (problem.difficulty * 180), folderId, teacherId, problem.formats, problem.difficulty, problem.yearBlock]
+        );
+        seededProblemIds.push(insertedProblem.rows[0].id);
+        seededProblemElos.push(insertedProblem.rows[0].elo);
+      }
+
+      const baselineProblemIds = seededProblemIds.slice(0, 8);
+      const baselineSnapshot = Object.fromEntries(
+        baselineProblemIds.map((problemId, index) => [problemId, seededProblemElos[index]])
+      );
+      const baselineTest = await client.query(
+        `INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type, problem_elo_snapshot, is_synthetic)
+         VALUES ('Synthetic demo history: Target baseline', $1, CURRENT_DATE + 1, 30, $2, 'target', $3::jsonb, true)
+         RETURNING id`,
+        [baselineProblemIds, teacherId, JSON.stringify(baselineSnapshot)]
+      );
+      const baselineTestId = baselineTest.rows[0].id;
+      const correctnessByStudent = [
+        [true, true, true, false, true, true, false, true],
+        [true, false, true, true, false, true, true, true],
+        [false, true, true, true, true, false, true, false],
+        [true, true, false, true, false, true, false, true],
+        [false, false, true, false, true, true, true, false],
+      ];
+      const startingRatings = [1420, 1485, 1550, 1610, 1375];
+      const problemUseCounts = Array(baselineProblemIds.length).fill(0);
+      const calculateDemoElo = (player, opponent, outcome, kFactor) => {
+        const expected = 1 / (1 + Math.pow(10, (opponent - player) / 400));
+        return Math.round(player + kFactor * (outcome - expected));
+      };
+
+      for (let studentIndex = 0; studentIndex < generatedStudentNames.length; studentIndex++) {
+        const studentId = studentIdByUsername[generatedStudentNames[studentIndex]];
+        let studentElo = startingRatings[studentIndex];
+        await client.query('UPDATE users SET elo = $1 WHERE id = $2', [studentElo, studentId]);
+        const eloBefore = studentElo;
+        const answers = {};
+        const results = {};
+        let score = 0;
+
+        for (let problemIndex = 0; problemIndex < baselineProblemIds.length; problemIndex++) {
+          const problemId = baselineProblemIds[problemIndex];
+          const correct = correctnessByStudent[studentIndex][problemIndex];
+          const outcome = correct ? 1 : 0;
+          const snapshotElo = baselineSnapshot[problemId];
+          const problemDifficultyK = 24 / Math.sqrt(1 + problemUseCounts[problemIndex]);
+          const nextStudentElo = calculateDemoElo(
+            studentElo,
+            snapshotElo,
+            outcome,
+            32 / Math.sqrt(1 + problemIndex)
+          );
+          const nextProblemElo = calculateDemoElo(
+            snapshotElo,
+            studentElo,
+            1 - outcome,
+            problemDifficultyK
+          );
+          answers[problemId] = correct ? DEMO_CATALOG[problemIndex].answer : '0';
+          results[problemId] = correct;
+          if (correct) score++;
+
+          await client.query(
+            `INSERT INTO elo_history
+               (user_id, problem_id, old_user_elo, new_user_elo, old_problem_elo, new_problem_elo, was_correct, is_synthetic)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, true)`,
+            [studentId, problemId, studentElo, nextStudentElo, snapshotElo, nextProblemElo, correct]
+          );
+          await client.query(
+            `UPDATE problems
+             SET elo = $1, times_used = times_used + 1, times_correct = times_correct + $2
+             WHERE id = $3`,
+            [nextProblemElo, correct ? 1 : 0, problemId]
+          );
+          problemUseCounts[problemIndex]++;
+          studentElo = nextStudentElo;
+        }
+
+        await client.query('UPDATE users SET elo = $1 WHERE id = $2', [studentElo, studentId]);
+        await client.query(
+          `INSERT INTO test_attempts (test_id, student_id, answers, results, score, total, elo_before, elo_after, is_synthetic)
+           VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, 8, $6, $7, true)`,
+          [baselineTestId, studentId, JSON.stringify(answers), JSON.stringify(results), score, eloBefore, studentElo]
+        );
+      }
+      await client.query('COMMIT');
+      console.log(`Dedicated fictional preview initialized for teacher ${teacherUsername} with five student accounts and ${DEMO_CATALOG.length} catalog problems.`);
+      return;
+    }
+
     // Never create the historical demo accounts in production. A fresh
     // production database can receive one explicitly configured administrator.
     const userCheck = await client.query('SELECT COUNT(*) FROM users');
