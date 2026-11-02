@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import { createSecureContext } from 'node:tls';
 import { randomBytes } from 'crypto';
 import { DEMO_CATALOG } from './demoCatalog.js';
+import { inferCatalogMetadata } from './catalogMetadata.js';
 
 dotenv.config();
 
@@ -141,7 +142,6 @@ export async function initDatabase() {
         )
       `);
       await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES folders(id)');
-      await client.query(`INSERT INTO folders (name) SELECT 'Uncategorized' WHERE NOT EXISTS (SELECT 1 FROM folders LIMIT 1)`);
       console.log('Folders table and problems.folder_id ensured');
     } catch (migErr) {
       console.warn('Migration folders (non-fatal):', migErr.message);
@@ -247,9 +247,32 @@ export async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS folders (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(200) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES folders(id)');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS catalog_formats TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS difficulty SMALLINT');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS year_block VARCHAR(50)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS year INTEGER');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS level VARCHAR(50)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS round VARCHAR(50)');
+    const metadataRows = await client.query(`
+      SELECT p.id, p.source, f.name AS folder_name
+      FROM problems p LEFT JOIN folders f ON f.id = p.folder_id
+      WHERE p.year IS NULL OR p.level IS NULL OR p.round IS NULL
+    `);
+    for (const problem of metadataRows.rows) {
+      const inferred = inferCatalogMetadata(problem.source, problem.folder_name);
+      await client.query(
+        `UPDATE problems SET year = COALESCE(year, $1), level = COALESCE(level, $2), round = COALESCE(round, $3) WHERE id = $4`,
+        [inferred.year, inferred.level, inferred.round, problem.id]
+      );
+    }
     
     // Tests table (problem_elo_snapshot = frozen ELOs for this test so all students see same difficulties)
     await client.query(`
@@ -683,8 +706,8 @@ export async function seedDatabase() {
       for (const sample of licensedNationalSprintSamples) {
         const source = `2022 MATHCOUNTS National Competition, Sprint Round, Problem ${sample.number}`;
         await client.query(
-          `INSERT INTO problems (question, answer, topic, source, created_by)
-           SELECT $1, $2, '', $3, NULL
+          `INSERT INTO problems (question, answer, topic, source, created_by, year, level, round)
+           SELECT $1, $2, '', $3, NULL, 2022, 'Nationals', 'Sprint'
            WHERE NOT EXISTS (
              SELECT 1 FROM problems WHERE source = $3
            )`,
@@ -764,11 +787,7 @@ export async function seedDatabase() {
       WHERE role = 'student'
     `);
     
-    // Create default folder and tags if empty
-    const folderCheck = await client.query('SELECT COUNT(*) FROM folders');
-    if (parseInt(folderCheck.rows[0].count) === 0) {
-      await client.query(`INSERT INTO folders (name) VALUES ('Uncategorized')`);
-    }
+    // Create default tags if empty
     const tagCheck = await client.query('SELECT COUNT(*) FROM tags');
     if (parseInt(tagCheck.rows[0].count) === 0) {
       await client.query(`

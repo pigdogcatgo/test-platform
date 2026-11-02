@@ -3,10 +3,10 @@
 ## What it supports
 
 - Teacher, student, and administrator accounts, with teacher-managed student rosters and student histories.
-- A shared searchable problem bank with folders, source information, and image diagrams. Teachers can choose any bank problem for Sprint tests; Target tests use exactly eight problems.
+- A shared searchable problem bank grouped by contest year and level, with separate year, level, round, and shared Elo details. Teachers can choose any bank problem for Sprint tests; Target tests use exactly eight problems.
 - Timed Sprint and Target tests, answer grading, student rating updates, teacher analytics, and answer/solution release controls.
 
-Teacher signup is public by default for this relaunch. Teachers can manage their students, folders, and tests, and choose from the shared problem bank. Only administrators can add problems or upload problem images. Source details are shown in teacher problem selection, but source round does not limit whether a problem can be used in Sprint or Target.
+Teacher signup is public by default for this relaunch. Teachers can manage their students and tests, and choose from the shared problem bank; contest year and level determine the bank's groups. Only administrators can add problems, create catalog folders, or upload problem images. Student submissions from all classes contribute to each problem's shared Elo. Source details are shown in teacher problem selection, but source round does not limit whether a problem can be used in Sprint or Target.
 
 ## Run locally
 

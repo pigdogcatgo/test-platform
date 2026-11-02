@@ -18,60 +18,43 @@ const DEMO_TEACHER_USERNAME = import.meta.env.VITE_DEMO_TEACHER_USERNAME || 'dem
 const DEMO_STUDENT_USERNAME = import.meta.env.VITE_DEMO_STUDENT_USERNAME || 'demo-student';
 const DEMO_TEACHER_PASSWORD = import.meta.env.VITE_DEMO_TEACHER_PASSWORD || 'teacher-preview-26';
 const DEMO_STUDENT_PASSWORD = import.meta.env.VITE_DEMO_STUDENT_PASSWORD || 'student-preview-26';
-const EMPTY_CATALOG_FILTERS = { search: '', difficulty: '', yearFrom: '', yearTo: '' };
+const EMPTY_CATALOG_FILTERS = { search: '', year: '', level: '', round: '' };
 function getCatalogMetadata(problem, demoMode) {
   const source = typeof problem.source === 'string' ? problem.source : '';
-  const yearFromSource = source.match(/\b(19\d{2}|20\d{2})\b/);
-  const rawYearBlock = problem.year_block ?? problem.yearBlock;
-  const yearBlock = typeof rawYearBlock === 'string' ? rawYearBlock : '';
-  const yearRange = yearBlock.match(/\b(19\d{2}|20\d{2})\s*(?:-|–|—|to)\s*(19\d{2}|20\d{2})\b/i);
-  const explicitYear = Number(problem.year ?? problem.source_year ?? problem.sourceYear ?? yearFromSource?.[0]);
-  const elo = Number(problem.elo);
-  const difficultyLabels = ['Foundational', 'Developing', 'Intermediate', 'Advanced', 'Challenge'];
-  const rawDifficulty = problem.difficulty;
-  const difficulty = Number.isInteger(Number(rawDifficulty)) && Number(rawDifficulty) >= 1 && Number(rawDifficulty) <= 5
-    ? difficultyLabels[Number(rawDifficulty) - 1]
-    : typeof rawDifficulty === 'string' && rawDifficulty.trim()
-      ? rawDifficulty.trim()
-      : Number.isFinite(elo)
-        ? elo < 1400 ? 'Foundational' : elo < 1600 ? 'Intermediate' : 'Advanced'
-        : 'Unrated';
-  let yearStart = yearRange ? Number(yearRange[1]) : Number.isInteger(explicitYear) && explicitYear >= 1900 && explicitYear <= 2100 ? explicitYear : null;
-  let yearEnd = yearRange ? Number(yearRange[2]) : yearStart;
-  if (yearStart == null && demoMode) yearStart = yearEnd = 2018 + (Math.abs(Number(problem.id) || 0) % 8);
-  const yearLabel = yearBlock || (yearStart == null ? '' : yearStart === yearEnd ? String(yearStart) : `${yearStart}–${yearEnd}`);
+  const sourceText = `${source} ${problem.folder_name || ''}`;
+  const inferredYear = Number(sourceText.match(/\b(19\d{2}|20\d{2})\b/)?.[1]) || null;
+  const inferredLevel = /\bnationals?\b/i.test(sourceText) ? 'Nationals' : /\bstate\b/i.test(sourceText) ? 'State' : /\bchapter\b/i.test(sourceText) ? 'Chapter' : /\bschool\b/i.test(sourceText) ? 'School' : '';
+  const inferredRound = sourceText.match(/\b(Sprint|Target|Team|Countdown|Warm-Up|Warm Up)\s+Round\b/i)?.[1] || '';
+  const year = problem.year ?? (demoMode && inferredYear == null ? 2018 + (Math.abs(Number(problem.id) || 0) % 8) : inferredYear);
+  const level = problem.level || inferredLevel;
+  const round = problem.round || inferredRound;
   return {
-    difficulty,
-    yearStart,
-    yearEnd,
-    yearLabel,
+    year: year == null ? '' : String(year),
+    level: level || '',
+    round: round || '',
+    elo: problem.elo == null ? '—' : String(problem.elo),
+    group: [year, level].filter(Boolean).join(' ') || 'Source details needed',
   };
 }
 
 function getCatalogOptions(problems, demoMode) {
   const metadata = problems.map(problem => getCatalogMetadata(problem, demoMode));
   return {
-    difficulties: [...new Set(metadata.map(item => item.difficulty))].sort((a, b) => a.localeCompare(b)),
-    years: [...new Set(metadata.flatMap(item => {
-      if (!Number.isInteger(item.yearStart) || !Number.isInteger(item.yearEnd)) return [];
-      const start = Math.max(1900, Math.min(item.yearStart, item.yearEnd));
-      const end = Math.min(2100, Math.max(item.yearStart, item.yearEnd));
-      return Array.from({ length: end - start + 1 }, (_, index) => start + index);
-    }))].sort((a, b) => a - b),
+    years: [...new Set(metadata.map(item => item.year).filter(Boolean))].sort((a, b) => Number(b) - Number(a)),
+    levels: [...new Set(metadata.map(item => item.level).filter(Boolean))].sort(),
+    rounds: [...new Set(metadata.map(item => item.round).filter(Boolean))].sort(),
   };
 }
 
 function filterCatalogProblems(problems, filters, demoMode) {
   const query = filters.search.trim().toLocaleLowerCase();
-  const from = filters.yearFrom ? Number(filters.yearFrom) : null;
-  const to = filters.yearTo ? Number(filters.yearTo) : null;
   return problems.filter(problem => {
     const metadata = getCatalogMetadata(problem, demoMode);
-    const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.folder_name || ''} ${metadata.difficulty} ${metadata.yearLabel}`.toLocaleLowerCase();
+    const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.folder_name || ''} ${metadata.year} ${metadata.level} ${metadata.round} ${metadata.elo}`.toLocaleLowerCase();
     if (query && !searchable.includes(query)) return false;
-    if (filters.difficulty && metadata.difficulty !== filters.difficulty) return false;
-    if (from && (!metadata.yearEnd || metadata.yearEnd < from)) return false;
-    if (to && (!metadata.yearStart || metadata.yearStart > to)) return false;
+    if (filters.year && metadata.year !== filters.year) return false;
+    if (filters.level && metadata.level !== filters.level) return false;
+    if (filters.round && metadata.round !== filters.round) return false;
     return true;
   });
 }
@@ -90,7 +73,6 @@ const App = () => {
   const [authBusy, setAuthBusy] = useState(false);
   
   const [problems, setProblems] = useState([]);
-  const [folders, setFolders] = useState([]);
   const [tests, setTests] = useState([]);
   const [attempts, setAttempts] = useState([]);
   const [students, setStudents] = useState([]);
@@ -106,9 +88,6 @@ const App = () => {
   
   const [editingProblem, setEditingProblem] = useState(null);
   const [problemToDelete, setProblemToDelete] = useState(null);
-  const [newFolderName, setNewFolderName] = useState('');
-  const [editingFolderId, setEditingFolderId] = useState(null);
-  const [editingFolderName, setEditingFolderName] = useState('');
   const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names (create-test)
   const [adminExpandedFolders, setAdminExpandedFolders] = useState(() => new Set()); // folder IDs expanded in admin (empty = all collapsed)
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
@@ -126,7 +105,6 @@ const App = () => {
   const [classElo, setClassElo] = useState(null);
   const [classEloStatus, setClassEloStatus] = useState('idle');
   const [classEloError, setClassEloError] = useState('');
-  const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [leaderboardSortBy, setLeaderboardSortBy] = useState('cumulative'); // 'cumulative' | 'elo'
@@ -146,7 +124,6 @@ const App = () => {
 
   const clearDashboardData = useCallback(() => {
     setProblems([]);
-    setFolders([]);
     setTests([]);
     setAttempts([]);
     setStudents([]);
@@ -328,25 +305,19 @@ const App = () => {
         setTests(testsRes.data);
         setAttempts(attemptsRes.data);
       } else if (userData.role === 'teacher') {
-        const [problemsRes, testsRes, studentsRes, foldersRes] = await Promise.all([
+        const [problemsRes, testsRes, studentsRes] = await Promise.all([
           api.get('/api/problems'),
           api.get('/api/tests'),
-          api.get('/api/students'),
-          api.get('/api/folders')
+          api.get('/api/students')
         ]);
         if (localStorage.getItem('token') !== requestToken) return;
         setProblems(problemsRes.data);
         setTests(testsRes.data);
         setStudents(studentsRes.data);
-        setFolders(foldersRes.data);
       } else if (userData.role === 'admin') {
-        const [problemsRes, foldersRes] = await Promise.all([
-          api.get('/api/problems'),
-          api.get('/api/folders')
-        ]);
+        const [problemsRes] = await Promise.all([api.get('/api/problems')]);
         if (localStorage.getItem('token') !== requestToken) return;
         setProblems(problemsRes.data);
-        setFolders(foldersRes.data);
       }
     } catch (error) {
       if (localStorage.getItem('token') !== requestToken) return;
@@ -640,7 +611,7 @@ const App = () => {
       if (!requestToken || localStorage.getItem('token') !== requestToken) return;
       const { data: testProbs } = await api.get(`/api/tests/${test.id}/problems`);
       if (!requestToken || localStorage.getItem('token') !== requestToken) return;
-      const folderIds = [...new Set(testProbs.map(p => p.folder_id ?? 'uncategorized'))];
+      const folderIds = [...new Set(testProbs.map(p => getCatalogMetadata(p, DEMO_MODE).group))];
       const allSameFolder = folderIds.length <= 1;
       const ordered = allSameFolder ? testProbs : [...testProbs].sort(() => Math.random() - 0.5);
       sessionStorage.setItem('testInProgress', JSON.stringify({
@@ -729,7 +700,10 @@ const App = () => {
       answer: answerStr,
       image_url: editingProblem.image_url || null,
       source: (editingProblem.source ?? '').trim() || null,
-      folder_id: editingProblem.folder_id || null,
+      folder_id: editingProblem.folder_id ?? null,
+      year: editingProblem.year || null,
+      level: (editingProblem.level ?? '').trim() || null,
+      round: (editingProblem.round ?? '').trim() || null,
     };
 
     try {
@@ -762,19 +736,6 @@ const App = () => {
     }
   };
 
-  const bulkMoveProblems = async () => {
-    if (selectedProblemIds.length === 0) return;
-    const folderId = bulkMoveFolderId === '' || bulkMoveFolderId === 'uncategorized' ? null : Number(bulkMoveFolderId);
-    try {
-      await api.put('/api/problems/bulk-move', { ids: selectedProblemIds, folder_id: folderId });
-      setSelectedProblemIds([]);
-      setBulkMoveFolderId('');
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error moving problems');
-    }
-  };
-
   const bulkDeleteProblems = async () => {
     if (selectedProblemIds.length === 0) return;
     const visibleIds = new Set(visibleCatalogProblems.map(problem => problem.id));
@@ -787,41 +748,6 @@ const App = () => {
       loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting problems');
-    }
-  };
-
-  const createFolder = async () => {
-    if (!newFolderName.trim()) return;
-    try {
-      await api.post('/api/folders', { name: newFolderName.trim() });
-      setNewFolderName('');
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error creating folder');
-    }
-  };
-
-  const deleteFolder = async (id) => {
-    if (!confirm('Delete this folder? Problems will move to Uncategorized.')) return;
-    try {
-      await api.delete(`/api/folders/${id}`);
-      setAdminExpandedFolders(prev => { const next = new Set(prev); next.delete(id); return next; });
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error deleting folder');
-    }
-  };
-
-  const updateFolder = async (id) => {
-    const name = editingFolderName.trim();
-    if (!name) return;
-    try {
-      await api.put(`/api/folders/${id}`, { name });
-      setEditingFolderId(null);
-      setEditingFolderName('');
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error updating folder');
     }
   };
 
@@ -1884,7 +1810,7 @@ if (view === 'create-test' && user) {
             {(() => {
               const byFolder = {};
               for (const p of visibleCatalogProblems) {
-                const fname = p.folder_name || 'Uncategorized';
+                const fname = getCatalogMetadata(p, DEMO_MODE).group;
                 if (!byFolder[fname]) byFolder[fname] = [];
                 byFolder[fname].push(p);
               }
@@ -1959,8 +1885,8 @@ if (view === 'create-test' && user) {
                             />
                             <span className="flex-1 min-w-0 text-gray-700">
                               <span className="font-medium">{p.source || `Problem #${p.id}`}</span>
-                              <span className="ml-2 text-gray-600">{metadata.difficulty}{metadata.yearLabel ? ` · ${metadata.yearLabel}` : ''}</span>
-                              <span className="text-[#2a61ba] font-medium ml-2">ELO {p.elo}</span>
+                              <span className="ml-2 text-gray-600">Year {metadata.year || '—'} · Level {metadata.level || '—'} · Round {metadata.round || '—'}</span>
+                              <span className="text-[#2a61ba] font-medium ml-2">Elo {metadata.elo}</span>
                             </span>
                           </label>
                         })}
@@ -2026,50 +1952,9 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
           </div>
         )}
 
-        <div className="mb-6 p-4 bg-white rounded-xl shadow">
-          <h3 className="font-semibold text-gray-800 mb-3">Folders</h3>
-          <div className="flex flex-wrap gap-2 mb-3">
-            {folders.map(f => (
-              <span key={f.id} className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-gray-100 text-sm">
-                {editingFolderId === f.id ? (
-                  <>
-                    <input
-                      type="text"
-                      value={editingFolderName}
-                      onChange={(e) => setEditingFolderName(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') updateFolder(f.id); if (e.key === 'Escape') { setEditingFolderId(null); setEditingFolderName(''); } }}
-                      className="w-32 px-1 py-0.5 border rounded text-sm"
-                      autoFocus
-                    />
-                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#2a61ba] hover:underline text-xs">✓</button>
-                    <button type="button" onClick={() => { setEditingFolderId(null); setEditingFolderName(''); }} className="text-gray-500 hover:underline text-xs">✗</button>
-                  </>
-                ) : (
-                  <>
-                    {f.name}
-                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#2a61ba] hover:underline text-xs">edit</button>
-                    <button type="button" onClick={() => deleteFolder(f.id)} className="text-red-600 hover:underline text-xs">×</button>
-                  </>
-                )}
-              </span>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={newFolderName}
-              onChange={(e) => setNewFolderName(e.target.value)}
-              placeholder="New folder name"
-              className="flex-1 px-3 py-2 border rounded-lg text-sm"
-            />
-            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#2a61ba] text-white rounded-lg text-sm">Add</button>
-          </div>
-        </div>
-
-
         {!isTeacherAdmin && (
           <button
-            onClick={() => setEditingProblem({ question: '', answer: '', image_url: '', source: '', folder_id: null })}
+            onClick={() => setEditingProblem({ question: '', answer: '', image_url: '', source: '', year: '', level: '', round: '', folder_id: null })}
             className="mb-6 bg-[#2a61ba] text-white px-6 py-3 rounded-lg"
           >
             Add Problem
@@ -2148,20 +2033,16 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     placeholder="e.g. 42, 3/4, √2, √2/2, 2√3"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Folder</label>
-                  <select
-                    value={editingProblem.folder_id ?? ''}
-                    onChange={(e) =>
-                      setEditingProblem({ ...editingProblem, folder_id: e.target.value ? Number(e.target.value) : null })
-                    }
-                    className="w-full px-4 py-2 border rounded-lg"
-                  >
-                    <option value="">Uncategorized</option>
-                    {folders.map(f => (
-                      <option key={f.id} value={f.id}>{f.name}</option>
-                    ))}
-                  </select>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <label className="block text-sm font-medium text-gray-700">Year
+                    <input type="number" min="1900" max="2100" value={editingProblem.year ?? ''} onChange={e => setEditingProblem({ ...editingProblem, year: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="2022" />
+                  </label>
+                  <label className="block text-sm font-medium text-gray-700">Level
+                    <input type="text" maxLength="50" value={editingProblem.level ?? ''} onChange={e => setEditingProblem({ ...editingProblem, level: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="Nationals" />
+                  </label>
+                  <label className="block text-sm font-medium text-gray-700">Round
+                    <input type="text" maxLength="50" value={editingProblem.round ?? ''} onChange={e => setEditingProblem({ ...editingProblem, round: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="Sprint" />
+                  </label>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Source (optional)</label>
@@ -2222,25 +2103,6 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
           <div className="mt-4 bg-[#2a61ba]/10 border border-[#2a61ba]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
             <span className="font-medium text-gray-800">{selectedProblemIds.length} selected</span>
             {hiddenSelectedCount > 0 && <span role="status" className="text-sm text-gray-700">{hiddenSelectedCount} selected problem{hiddenSelectedCount === 1 ? ' is' : 's are'} hidden by this search; bulk actions still include {hiddenSelectedCount} hidden item{hiddenSelectedCount === 1 ? '' : 's'}.</span>}
-            <select
-              value={bulkMoveFolderId}
-              onChange={(e) => setBulkMoveFolderId(e.target.value)}
-              className="px-3 py-1.5 border rounded-lg text-sm"
-            >
-              <option value="">Move to folder…</option>
-              <option value="uncategorized">Uncategorized</option>
-              {folders.map(f => (
-                <option key={f.id} value={f.id}>{f.name}</option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={bulkMoveProblems}
-              disabled={!bulkMoveFolderId}
-              className="px-3 py-1.5 bg-[#2a61ba] text-white rounded-lg text-sm hover:bg-[#20529f] disabled:opacity-50"
-            >
-              Move
-            </button>
             <button
               type="button"
               onClick={bulkDeleteProblems}
@@ -2260,148 +2122,71 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
 
         <div className="space-y-4">
           {(() => {
-            const UNCategorized = 'uncategorized';
-            const byFolder = {};
-            for (const f of folders) {
-              byFolder[f.id] = { name: f.name, problems: [] };
+            const byGroup = new Map();
+            for (const problem of visibleCatalogProblems) {
+              const metadata = getCatalogMetadata(problem, DEMO_MODE);
+              if (!byGroup.has(metadata.group)) byGroup.set(metadata.group, []);
+              byGroup.get(metadata.group).push(problem);
             }
-            byFolder[UNCategorized] = { name: 'Uncategorized', problems: [] };
-            for (const p of visibleCatalogProblems) {
-              const fid = p.folder_id ?? UNCategorized;
-              if (!byFolder[fid]) byFolder[fid] = { name: p.folder_name || 'Uncategorized', problems: [] };
-              byFolder[fid].problems.push(p);
-            }
-            const folderIds = [...folders].sort((a, b) => a.name.localeCompare(b.name)).map(f => f.id);
-            const orderedFolders = [
-              ...folderIds,
-              ...(byFolder[UNCategorized]?.problems?.length ? [UNCategorized] : [])
-            ].filter(id => !hasCatalogFilters || byFolder[id]?.problems?.length > 0);
-            if (orderedFolders.length === 0 && hasCatalogFilters) {
+            const groups = [...byGroup.entries()].sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+            if (groups.length === 0 && hasCatalogFilters) {
               return <div role="status" className="rounded-xl border border-gray-200 bg-white p-8 text-center text-gray-600">No problems match these catalog filters.</div>;
             }
-            if (orderedFolders.length === 0 && problems.length === 0) {
-              return (
-                <div className="bg-white rounded-xl shadow p-8 text-center text-gray-500">
-              No folders or problems yet. Add a folder above or add a problem to the bank.
-                </div>
-              );
+            if (groups.length === 0 && problems.length === 0) {
+              return <div className="bg-white rounded-xl shadow p-8 text-center text-gray-500">No problems are available in the bank yet.</div>;
             }
-            return orderedFolders.map(fid => {
-              const { name, problems: folderProbs } = byFolder[fid] || { name: 'Uncategorized', problems: [] };
-              const expandKey = fid === UNCategorized ? -1 : fid;
-              const folderPanelId = `problem-folder-panel-${expandKey}`;
-              const isExpanded = hasCatalogFilters ? folderProbs.length > 0 : adminExpandedFolders.has(expandKey);
-              const toggle = () => setAdminExpandedFolders(prev => {
-                const next = new Set(prev);
-                if (next.has(expandKey)) next.delete(expandKey);
-                else next.add(expandKey);
+            return groups.map(([name, groupProblems], groupIndex) => {
+              const groupKey = `${name}-${groupIndex}`;
+              const panelId = `problem-group-panel-${groupIndex}`;
+              const expanded = hasCatalogFilters || adminExpandedFolders.has(groupKey);
+              const toggle = () => setAdminExpandedFolders(previous => {
+                const next = new Set(previous);
+                if (next.has(groupKey)) next.delete(groupKey);
+                else next.add(groupKey);
                 return next;
               });
               return (
-                <div key={fid} className="bg-white rounded-xl shadow overflow-hidden">
-                  <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
-                    <button
-                      type="button"
-                      onClick={toggle}
-                      disabled={hasCatalogFilters}
-                      aria-expanded={isExpanded}
-                      aria-controls={folderPanelId}
-                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#2a61ba] disabled:cursor-default disabled:hover:text-gray-800"
-                    >
-                      <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
+                <section key={groupKey} className="bg-white rounded-xl shadow overflow-hidden">
+                  <div className="flex items-center px-4 py-3 bg-gray-50 border-b border-gray-200">
+                    <button type="button" onClick={toggle} aria-expanded={expanded} aria-controls={panelId} className="flex w-full items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#2a61ba]">
+                      <span className="text-gray-400" aria-hidden="true">{expanded ? '▼' : '▶'}</span>
                       <span>{name}</span>
-                      <span className="text-sm font-normal text-gray-500">({folderProbs.length} problems)</span>
+                      <span className="text-sm font-normal text-gray-500">({groupProblems.length} problems)</span>
                     </button>
-                    {fid !== UNCategorized && (
-                      <button
-                        type="button"
-                        onClick={() => deleteFolder(fid)}
-                        className="text-red-600 hover:underline text-sm font-medium"
-                      >
-                        Delete folder
-                      </button>
-                    )}
                   </div>
-                  <div id={folderPanelId} hidden={!isExpanded} className="overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead className="bg-gray-50 text-left">
-                          <tr>
-                            <th className="px-4 py-3 w-10">
-                              <input
-                                type="checkbox"
-                                checked={folderProbs.length > 0 && folderProbs.every(p => selectedProblemIds.includes(p.id))}
-                                ref={el => {
-                                  if (el) {
-                                    const some = folderProbs.some(p => selectedProblemIds.includes(p.id));
-                                    el.indeterminate = some && !folderProbs.every(p => selectedProblemIds.includes(p.id));
-                                  }
-                                }}
-                                onChange={(e) => {
-                                  const ids = folderProbs.map(p => p.id);
-                                  setSelectedProblemIds(prev =>
-                                    e.target.checked ? [...new Set([...prev, ...ids])] : prev.filter(id => !ids.includes(id))
-                                  );
-                                }}
-                                className="rounded"
-                                onClick={ev => ev.stopPropagation()}
-                              />
-                            </th>
-                            <th className="px-4 py-3">Question</th>
-                            <th className="px-4 py-3">Answer</th>
-                            <th className="px-4 py-3">Source</th>
-                            <th className="px-4 py-3">ELO</th>
-                            <th className="px-4 py-3">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {folderProbs.map(p => (
-                            <tr key={p.id} className="border-t">
-                              <td className="px-4 py-3">
-                                <input
-                                  type="checkbox"
-                                  checked={selectedProblemIds.includes(p.id)}
-                                  onChange={(e) =>
-                                    setSelectedProblemIds(prev =>
-                                      e.target.checked ? [...prev, p.id] : prev.filter(id => id !== p.id)
-                                    )
-                                  }
-                                  className="rounded"
-                                  onClick={ev => ev.stopPropagation()}
-                                />
-                              </td>
-                              <td className="px-4 py-3 max-w-md">
-                                <div>
-                                  <LatexRenderer text={p.question} />
-                                  {p.image_url && (
-                                    <ProblemImage url={p.image_url} token={token} />
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">{p.answer}</td>
-                              <td className="px-4 py-3">{p.source ?? '—'}</td>
-                              <td className="px-4 py-3">{p.elo}</td>
-                              <td className="px-4 py-3 space-x-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '', folder_id: p.folder_id ?? null })}
-                                  className="text-[#2a61ba] hover:underline font-medium"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setProblemToDelete(p.id)}
-                                  className="text-red-600 hover:underline font-medium"
-                                >
-                                  Delete
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                  <div id={panelId} hidden={!expanded} className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 text-left"><tr>
+                        <th className="px-4 py-3 w-10"><span className="sr-only">Select</span></th>
+                        <th className="px-4 py-3">Question</th>
+                        <th className="px-4 py-3">Answer</th>
+                        <th className="px-4 py-3">Source</th>
+                        <th className="px-4 py-3">Year</th>
+                        <th className="px-4 py-3">Level</th>
+                        <th className="px-4 py-3">Round</th>
+                        <th className="px-4 py-3">Elo</th>
+                        <th className="px-4 py-3">Actions</th>
+                      </tr></thead>
+                      <tbody>{groupProblems.map(problem => {
+                        const metadata = getCatalogMetadata(problem, DEMO_MODE);
+                        return <tr key={problem.id} className="border-t">
+                          <td className="px-4 py-3"><input type="checkbox" checked={selectedProblemIds.includes(problem.id)} onChange={event => setSelectedProblemIds(previous => event.target.checked ? [...new Set([...previous, problem.id])] : previous.filter(id => id !== problem.id))} aria-label={`Select problem ${problem.id}`} className="rounded" /></td>
+                          <td className="px-4 py-3 max-w-md"><LatexRenderer text={problem.question} />{problem.image_url && <ProblemImage url={problem.image_url} token={token} />}</td>
+                          <td className="px-4 py-3">{problem.answer}</td>
+                          <td className="px-4 py-3">{problem.source ?? '—'}</td>
+                          <td className="px-4 py-3">{metadata.year || '—'}</td>
+                          <td className="px-4 py-3">{metadata.level || '—'}</td>
+                          <td className="px-4 py-3">{metadata.round || '—'}</td>
+                          <td className="px-4 py-3">{metadata.elo}</td>
+                          <td className="px-4 py-3 space-x-2">
+                            <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>
+                            <button type="button" onClick={() => setProblemToDelete(problem.id)} className="text-red-600 hover:underline font-medium">Delete</button>
+                          </td>
+                        </tr>;
+                      })}</tbody>
+                    </table>
                   </div>
-                </div>
+                </section>
               );
             });
           })()}

@@ -13,6 +13,7 @@ import { PDFDocument, PDFName } from 'pdf-lib';
 import pool, { initDatabase, seedDatabase } from './db.js';
 import { cleanupStaleUnreferencedUploads, deleteUnreferencedImageUploads, insertImageUpload } from './storageLimits.js';
 import { parseAndValidateAnswer, parseAnswerToNumber, compareAnswers } from './answerUtils.js';
+import { inferCatalogMetadata } from './catalogMetadata.js';
 
 dotenv.config();
 
@@ -510,7 +511,7 @@ app.get('/api/class/elo', authenticateToken, async (req, res) => {
   }
 });
 
-// Folders: read = public+own; write = admin all, teacher own only
+// Folders are read-only catalog groupings for teachers; only administrators can edit them.
 function folderReadWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
   if (user.role === 'teacher') return { sql: DEMO_MODE ? 'created_by = $1' : '(created_by IS NULL OR created_by = $1)', params: [user.id] };
@@ -522,7 +523,7 @@ function folderWriteWhere(user) {
   return { sql: '1=0', params: [] };
 }
 
-// Folders (admin: all CRUD; teacher: read public + own, write own only)
+// Folder data remains available for legacy/import compatibility. Teacher views group by contest metadata.
 app.get('/api/folders', authenticateToken, async (req, res) => {
   try {
     const { sql, params } = folderReadWhere(req.user);
@@ -534,7 +535,7 @@ app.get('/api/folders', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/folders', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only administrators can create catalog folders' });
   const { name } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Folder name is required' });
@@ -552,7 +553,7 @@ app.post('/api/folders', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/folders/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only administrators can edit catalog folders' });
   const { name } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Folder name is required' });
@@ -574,7 +575,7 @@ app.put('/api/folders/:id', authenticateToken, async (req, res) => {
 });
 
 app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only administrators can delete catalog folders' });
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
   try {
@@ -1179,6 +1180,28 @@ async function validateProblemFolder(client, user, rawFolderId) {
   return folderId;
 }
 
+function problemCatalogMetadata(body, source) {
+  const inferred = inferCatalogMetadata(source);
+  const rawYear = body.year;
+  const year = rawYear == null || rawYear === '' ? inferred.year : Number(rawYear);
+  if (year != null && (!Number.isInteger(year) || year < 1900 || year > 2100)) {
+    throw validationError(400, 'Year must be between 1900 and 2100');
+  }
+  const readText = (key, fallback) => {
+    const value = body[key];
+    if (value == null || value === '') return fallback;
+    if (typeof value !== 'string' || value.trim().length > 50) {
+      throw validationError(400, `${key} must be a text value of at most 50 characters`);
+    }
+    return value.trim() || fallback;
+  };
+  return {
+    year,
+    level: readText('level', inferred.level),
+    round: readText('round', inferred.round),
+  };
+}
+
 // Get all available problems with their folder and source metadata
 app.get('/api/problems', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
@@ -1308,6 +1331,12 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
   const answerStored = typeof answer === 'string' && answer.trim() ? answer.trim() : (typeof answerVal === 'number' ? String(answerVal) : answerVal);
   const createdBy = null;
   const sourceStr = typeof source === 'string' ? source.trim() || null : null;
+  let catalogMetadata;
+  try {
+    catalogMetadata = problemCatalogMetadata(req.body, sourceStr);
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message });
+  }
   let problem;
   let client;
   try {
@@ -1315,8 +1344,8 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
     await client.query('BEGIN');
     const fid = await validateProblemFolder(client, req.user, folderId);
     const result = await client.query(
-      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy]
+      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by, year, level, round) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
+      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy, catalogMetadata.year, catalogMetadata.level, catalogMetadata.round]
     );
     problem = result.rows[0];
     const withMeta = await attachFolder(problem, client);
@@ -1430,11 +1459,12 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
     await client.query('BEGIN');
     const fid = await validateProblemFolder(client, req.user, folderId);
     const { sql, params } = problemWriteWhere(req.user);
-    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$8' : '$1');
+    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$11' : '$1');
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
+    const catalogMetadata = problemCatalogMetadata(req.body, sourceStr);
     const result = await client.query(
-      `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = $6 WHERE id = $7 AND ${problemCond} RETURNING *`,
-      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, req.params.id, ...params]
+      `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = COALESCE($6, folder_id), year = $7, level = $8, round = $9 WHERE id = $10 AND ${problemCond} RETURNING *`,
+      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, catalogMetadata.year, catalogMetadata.level, catalogMetadata.round, req.params.id, ...params]
     );
     if (result.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -2033,6 +2063,7 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     }
     
     // Get test and ensure student can take it (only their teacher's tests)
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('test-submit'), hashtext($1::text))", [testId]);
     const testResult = await client.query('SELECT * FROM tests WHERE id = $1', [testId]);
     const test = testResult.rows[0];
     if (!test) {
@@ -2066,7 +2097,7 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     }
     
     const problemsResult = await client.query(
-      'SELECT * FROM problems WHERE id = ANY($1)',
+      'SELECT * FROM problems WHERE id = ANY($1) ORDER BY id FOR UPDATE',
       [test.problem_ids]
     );
     const problems = problemsResult.rows;
@@ -2106,11 +2137,12 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
       if (isCorrect) score++;
       
       const problemElo = getProblemElo(problem);
+      const currentProblemElo = problem.elo;
       const outcome = isCorrect ? 1 : 0;
       const userK = getKFactor(32, userAttemptCount);
       const problemK = getKFactor(24, problem.times_used || 0);
       const tempNewUserElo = calculateELO(newUserElo, problemElo, outcome, userK);
-      const newProblemElo = calculateELO(problemElo, newUserElo, 1 - outcome, problemK);
+      const newProblemElo = calculateELO(currentProblemElo, newUserElo, 1 - outcome, problemK);
       userAttemptCount++;
       
       // Update problem in DB (global difficulty still evolves)
@@ -2128,7 +2160,7 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
         `INSERT INTO elo_history 
          (user_id, problem_id, old_user_elo, new_user_elo, old_problem_elo, new_problem_elo, was_correct) 
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [req.user.id, problem.id, newUserElo, tempNewUserElo, problemElo, newProblemElo, isCorrect]
+        [req.user.id, problem.id, newUserElo, tempNewUserElo, currentProblemElo, newProblemElo, isCorrect]
       );
 
       newUserElo = tempNewUserElo;
