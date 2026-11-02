@@ -13,6 +13,7 @@ import { PDFDocument, PDFName } from 'pdf-lib';
 import pool, { initDatabase, seedDatabase } from './db.js';
 import { cleanupStaleUnreferencedUploads, deleteUnreferencedImageUploads, insertImageUpload } from './storageLimits.js';
 import { parseAndValidateAnswer, parseAnswerToNumber, compareAnswers } from './answerUtils.js';
+import { inferCatalogMetadata } from './catalogMetadata.js';
 
 dotenv.config();
 
@@ -185,6 +186,17 @@ function demoFeatureDisabled(_req, res, next) {
 // The demo preview is intentionally a read-only catalog plus test-taking
 // sandbox. Disable all ingestion and catalog/roster mutations server-side.
 app.use(['/api/import-pdf', '/api/upload', '/api/uploads'], demoFeatureDisabled);
+// PDF imports and shared-PDF tests are retired. Keep legacy storage and
+// handlers below for existing database compatibility, but refuse new requests
+// before multipart bodies are parsed or private source files are delivered.
+app.use('/api/import-pdf', (_req, res) => res.status(410).json({ error: 'PDF imports are no longer available. Use the problem bank.' }));
+app.use('/api/tags', (_req, res) => res.status(410).json({ error: 'Problem tags are no longer available.' }));
+app.use('/api/tests', (req, res, next) => {
+  if (/^\/\d+\/pdf\/?$/.test(req.path)) {
+    return res.status(410).json({ error: 'Shared PDF tests are no longer available. Use the problem bank.' });
+  }
+  next();
+});
 app.use(['/api/problems', '/api/folders', '/api/tags'], (req, res, next) => {
   if (DEMO_MODE && req.method !== 'GET') {
     return res.status(403).json({ error: 'Catalog editing is disabled on the fictional demo preview.' });
@@ -264,20 +276,11 @@ function requireContentManager(req, res, next) {
   next();
 }
 
-async function attachFolderAndTags(problem, db = pool) {
-  const [folderRow, tagRows] = await Promise.all([
-    problem.folder_id ? db.query('SELECT name FROM folders WHERE id = $1', [problem.folder_id]) : Promise.resolve({ rows: [] }),
-    db.query('SELECT tag_id FROM problem_tags WHERE problem_id = $1', [problem.id])
-  ]);
-  const tagIds = tagRows.rows.map(r => r.tag_id);
-  const tagNames = tagIds.length ? (await db.query('SELECT id, name FROM tags WHERE id = ANY($1)', [tagIds])).rows : [];
-  const tagMap = Object.fromEntries(tagNames.map(t => [t.id, t.name]));
-  return {
-    ...problem,
-    folder_name: folderRow.rows[0]?.name || null,
-    tag_ids: tagIds,
-    tag_names: tagIds.map(tid => tagMap[tid]).filter(Boolean)
-  };
+async function attachFolder(problem, db = pool) {
+  const folderRow = problem.folder_id
+    ? await db.query('SELECT name FROM folders WHERE id = $1', [problem.folder_id])
+    : { rows: [] };
+  return { ...problem, folder_name: folderRow.rows[0]?.name || null };
 }
 
 // ELO calculation
@@ -412,13 +415,6 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     const user = result.rows[0];
     if (!user) return res.status(401).json({ error: 'Account no longer exists' });
     if (user.role === 'student') {
-      const tagElos = await pool.query(
-        `SELECT t.name, ste.elo FROM student_tag_elo ste
-         JOIN tags t ON t.id = ste.tag_id
-         WHERE ste.user_id = $1 ORDER BY t.name`,
-        [req.user.id]
-      );
-      user.tag_elos = tagElos.rows;
       const mathcounts = await pool.query(
         `SELECT t.test_type, ta.score FROM test_attempts ta
          JOIN tests t ON t.id = ta.test_id WHERE ta.student_id = $1`,
@@ -515,7 +511,7 @@ app.get('/api/class/elo', authenticateToken, async (req, res) => {
   }
 });
 
-// Folders: read = public+own; write = admin all, teacher own only
+// Folders are read-only catalog groupings for teachers; only administrators can edit them.
 function folderReadWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
   if (user.role === 'teacher') return { sql: DEMO_MODE ? 'created_by = $1' : '(created_by IS NULL OR created_by = $1)', params: [user.id] };
@@ -527,7 +523,7 @@ function folderWriteWhere(user) {
   return { sql: '1=0', params: [] };
 }
 
-// Folders (admin: all CRUD; teacher: read public + own, write own only)
+// Folder data remains available for legacy/import compatibility. Teacher views group by contest metadata.
 app.get('/api/folders', authenticateToken, async (req, res) => {
   try {
     const { sql, params } = folderReadWhere(req.user);
@@ -539,7 +535,7 @@ app.get('/api/folders', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/folders', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only administrators can create catalog folders' });
   const { name } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Folder name is required' });
@@ -557,7 +553,7 @@ app.post('/api/folders', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/folders/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only administrators can edit catalog folders' });
   const { name } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Folder name is required' });
@@ -579,7 +575,7 @@ app.put('/api/folders/:id', authenticateToken, async (req, res) => {
 });
 
 app.delete('/api/folders/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only administrators can delete catalog folders' });
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid folder id' });
   try {
@@ -1153,54 +1149,6 @@ app.post('/api/import-pdf/confirm', authenticateToken, async (req, res) => {
   }
 });
 
-// Tags: read = public+own; write (delete) = admin all, teacher own only
-function tagReadWhere(user) {
-  if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: '(created_by IS NULL OR created_by = $1)', params: [user.id] };
-  return { sql: '1=0', params: [] };
-}
-function tagWriteWhere(user) {
-  if (user.role === 'admin') return { sql: '1=1', params: [] };
-  if (user.role === 'teacher') return { sql: 'created_by = $1', params: [user.id] };
-  return { sql: '1=0', params: [] };
-}
-
-app.get('/api/tags', authenticateToken, async (req, res) => {
-  try {
-    const { sql, params } = tagReadWhere(req.user);
-    const result = await pool.query(`SELECT * FROM tags WHERE ${sql} ORDER BY name`, params);
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.post('/api/tags', authenticateToken, async (req, res) => {
-  return res.status(403).json({ error: 'Tag creation is disabled. Only the six system tags (Algebra, Arithmetic, Counting, Geometry, Number Theory, Probability) are available.' });
-});
-
-app.delete('/api/tags/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') return res.status(403).json({ error: 'Access denied' });
-  const id = parseInt(req.params.id, 10);
-  if (Number.isNaN(id)) return res.status(400).json({ error: 'Invalid tag id' });
-  try {
-    const tagRow = await pool.query('SELECT name, is_system FROM tags WHERE id = $1', [id]);
-    if (tagRow.rows.length === 0) return res.status(404).json({ error: 'Tag not found' });
-    const systemNames = ['Algebra', 'Arithmetic', 'Counting', 'Geometry', 'Number Theory', 'Probability'];
-    const isSystem = tagRow.rows[0].is_system === true || systemNames.includes(tagRow.rows[0].name);
-    if (isSystem) {
-      return res.status(403).json({ error: 'System tags cannot be deleted.' });
-    }
-    const { sql, params } = tagWriteWhere(req.user);
-    const sqlBump = params.length ? sql.replace(/\$1/g, '$2') : sql;
-    const del = await pool.query(`DELETE FROM tags WHERE id = $1 AND ${sqlBump} RETURNING id`, [id, ...params]);
-    if (del.rowCount === 0) return res.status(404).json({ error: 'Tag not found' });
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message || 'Server error' });
-  }
-});
-
 // Problems: read = admin all, teacher public+own; write = admin all, teacher own only
 function problemReadWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
@@ -1232,25 +1180,33 @@ async function validateProblemFolder(client, user, rawFolderId) {
   return folderId;
 }
 
-async function validateProblemTags(client, user, rawTagIds) {
-  if (rawTagIds == null) return [];
-  if (!Array.isArray(rawTagIds) || rawTagIds.length > 100) {
-    throw validationError(400, 'tag_ids must be an array containing at most 100 tag ids');
+function problemCatalogMetadata(body, source) {
+  const inferred = inferCatalogMetadata(source);
+  const rawYear = body.year;
+  const year = rawYear == null || rawYear === '' ? inferred.year : Number(rawYear);
+  if (year != null && (!Number.isInteger(year) || year < 1900 || year > 2100)) {
+    throw validationError(400, 'Year must be between 1900 and 2100');
   }
-  const tagIds = rawTagIds.map((id) => typeof id === 'number' ? id : (typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : NaN));
-  if (!tagIds.every((id) => Number.isSafeInteger(id) && id > 0 && id <= 2147483647) || new Set(tagIds).size !== tagIds.length) {
-    throw validationError(400, 'tag_ids must contain unique positive integer ids');
-  }
-  if (tagIds.length === 0) return [];
-  const { sql, params } = tagReadWhere(user);
-  const scopedSql = params.length ? sql.replace(/\$1/g, '$2') : sql;
-  const result = await client.query(`SELECT id FROM tags WHERE id = ANY($1::int[]) AND ${scopedSql}`, [tagIds, ...params]);
-  if (result.rowCount !== tagIds.length) throw validationError(400, 'One or more tags are unavailable');
-  return tagIds;
+  const readText = (key, fallback) => {
+    const value = body[key];
+    if (value == null || value === '') return fallback;
+    if (typeof value !== 'string' || value.trim().length > 50) {
+      throw validationError(400, `${key} must be a text value of at most 50 characters`);
+    }
+    return value.trim() || fallback;
+  };
+  return {
+    year,
+    level: readText('level', inferred.level),
+    round: readText('round', inferred.round),
+  };
 }
 
-// Get all problems (with folder and tags)
+// Get all available problems with their folder and source metadata
 app.get('/api/problems', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Problem bank access is limited to teachers and administrators.' });
+  }
   if (DEMO_MODE && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Catalog access is limited to the demo teacher account.' });
   }
@@ -1263,30 +1219,19 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
         WHERE ${sql}
         ORDER BY COALESCE(f.name, 'zzz'), p.id
       `, params);
-    const tagResult = await pool.query('SELECT problem_id, tag_id FROM problem_tags');
-    const tagsByProblem = {};
-    for (const row of tagResult.rows) {
-      if (!tagsByProblem[row.problem_id]) tagsByProblem[row.problem_id] = [];
-      tagsByProblem[row.problem_id].push(row.tag_id);
-    }
-    const tagNames = await pool.query('SELECT id, name FROM tags');
-    const tagMap = Object.fromEntries(tagNames.rows.map(r => [r.id, r.name]));
-    const problems = result.rows.map(p => ({
-      ...p,
-      tag_ids: tagsByProblem[p.id] || [],
-      tag_names: (tagsByProblem[p.id] || []).map(tid => tagMap[tid]).filter(Boolean)
-    }));
-    res.json(problems);
+    res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Upload image (admin + teacher)
-app.post('/api/upload', authenticateToken, requireContentManager, upload.single('image'), async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
-    return res.status(403).json({ error: 'Access denied' });
+// Only administrators can add images to the shared problem bank.
+app.post('/api/upload', authenticateToken, (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Administrator access required to upload problem images' });
   }
+  next();
+}, requireContentManager, upload.single('image'), async (req, res) => {
   if (!req.file || !req.file.buffer) {
     return res.status(400).json({ error: 'No image file provided' });
   }
@@ -1296,7 +1241,7 @@ app.post('/api/upload', authenticateToken, requireContentManager, upload.single(
   const dataBase64 = req.file.buffer.toString('base64');
   const contentType = req.file.mimetype || 'image/png';
   const filename = req.file.originalname || `problem-${Date.now()}.png`;
-  const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  const createdBy = null;
   let client;
   try {
     await cleanupStaleUnreferencedUploads(pool);
@@ -1370,12 +1315,12 @@ app.get('/api/uploads/:filename', authenticateToken, (req, res) => {
   res.sendFile(filepath);
 });
 
-// Create problem (admin + teacher)
+// Only administrators can add problems to the shared problem bank.
 app.post('/api/problems', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
-    return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Administrator access required to add problems' });
   }
-  const { question, answer, image_url: imageUrl, source, folder_id: folderId, tag_ids: tagIds } = req.body;
+  const { question, answer, image_url: imageUrl, source, folder_id: folderId } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
@@ -1384,24 +1329,26 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, or "Saturday", "(-1,-3)" for strings/ordered pairs)' });
   }
   const answerStored = typeof answer === 'string' && answer.trim() ? answer.trim() : (typeof answerVal === 'number' ? String(answerVal) : answerVal);
-  const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  const createdBy = null;
   const sourceStr = typeof source === 'string' ? source.trim() || null : null;
+  let catalogMetadata;
+  try {
+    catalogMetadata = problemCatalogMetadata(req.body, sourceStr);
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message });
+  }
   let problem;
   let client;
   try {
     client = await pool.connect();
     await client.query('BEGIN');
     const fid = await validateProblemFolder(client, req.user, folderId);
-    const validTagIds = await validateProblemTags(client, req.user, tagIds);
     const result = await client.query(
-      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy]
+      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by, year, level, round) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
+      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy, catalogMetadata.year, catalogMetadata.level, catalogMetadata.round]
     );
     problem = result.rows[0];
-    for (const tid of validTagIds) {
-      await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2)', [problem.id, tid]);
-    }
-    const withMeta = await attachFolderAndTags(problem, client);
+    const withMeta = await attachFolder(problem, client);
     await client.query('COMMIT');
     res.json(withMeta);
   } catch (error) {
@@ -1497,7 +1444,7 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Access denied' });
   }
-  const { question, answer, image_url: imageUrl, source, folder_id: folderId, tag_ids: tagIds } = req.body;
+  const { question, answer, image_url: imageUrl, source, folder_id: folderId } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Question is required' });
   }
@@ -1511,24 +1458,20 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     const fid = await validateProblemFolder(client, req.user, folderId);
-    const validTagIds = await validateProblemTags(client, req.user, tagIds);
     const { sql, params } = problemWriteWhere(req.user);
-    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$8' : '$1');
+    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$11' : '$1');
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
+    const catalogMetadata = problemCatalogMetadata(req.body, sourceStr);
     const result = await client.query(
-      `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = $6 WHERE id = $7 AND ${problemCond} RETURNING *`,
-      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, req.params.id, ...params]
+      `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = COALESCE($6, folder_id), year = $7, level = $8, round = $9 WHERE id = $10 AND ${problemCond} RETURNING *`,
+      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, catalogMetadata.year, catalogMetadata.level, catalogMetadata.round, req.params.id, ...params]
     );
     if (result.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Problem not found' });
     }
     const problem = result.rows[0];
-    await client.query('DELETE FROM problem_tags WHERE problem_id = $1', [problem.id]);
-    for (const tid of validTagIds) {
-      await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2)', [problem.id, tid]);
-    }
-    const withMeta = await attachFolderAndTags(problem, client);
+    const withMeta = await attachFolder(problem, client);
     await client.query('COMMIT');
     res.json(withMeta);
   } catch (error) {
@@ -1649,9 +1592,8 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'problemIds must contain between 1 and 200 problem ids' });
     }
     const type = testType === 'target' ? 'target' : 'sprint';
-    const expectedProblemCount = type === 'target' ? 8 : 30;
-    if (problemIds.length !== expectedProblemCount) {
-      return res.status(400).json({ error: `${type === 'target' ? 'Target' : 'Sprint'} tests require exactly ${expectedProblemCount} problems` });
+    if (type === 'target' && problemIds.length !== 8) {
+      return res.status(400).json({ error: 'Target tests require exactly 8 problems' });
     }
     if (!problemIds.every((id) => Number.isSafeInteger(id) && id > 0 && id <= 2147483647) || new Set(problemIds).size !== problemIds.length) {
       return res.status(400).json({ error: 'problemIds must be unique positive integer ids' });
@@ -1660,49 +1602,16 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
       ? 'created_by = $2 AND source = \'Fictional demo catalog\''
       : '(created_by IS NULL OR created_by = $2)';
     const accessible = await pool.query(
-      `SELECT id, created_by, pdf_document_id, source_page, student_pdf_page, source_pages, student_pdf_pages, catalog_formats
+      `SELECT id, created_by
        FROM problems WHERE id = ANY($1::int[]) AND ${problemVisibility}`,
       [problemIds, req.user.id]
     );
     if (accessible.rowCount !== problemIds.length) {
       return res.status(400).json({ error: 'Every problem must be public or owned by you' });
     }
-    if (DEMO_MODE && accessible.rows.some(problem => !problem.catalog_formats.includes(type === 'target' ? 'Target' : 'Sprint'))) {
-      return res.status(400).json({ error: `Every fictional demo problem in this test must be marked for the ${type === 'target' ? 'Target' : 'Sprint'} format.` });
-    }
-    const problemById = new Map(accessible.rows.map(problem => [problem.id, problem]));
-    const problemDocumentIds = [...new Set(accessible.rows.map(problem => problem.pdf_document_id).filter(Boolean))];
-    const hasSourceDocumentChoice = Object.prototype.hasOwnProperty.call(req.body, 'sourceDocumentId');
-    const rawDocumentChoice = req.body.sourceDocumentId;
-    const suppliedDocumentId = rawDocumentChoice == null || rawDocumentChoice === ''
-      ? null
-      : Number(rawDocumentChoice);
-    if (suppliedDocumentId != null && (!Number.isSafeInteger(suppliedDocumentId) || suppliedDocumentId < 1)) {
-      return res.status(400).json({ error: 'sourceDocumentId must be a positive integer.' });
-    }
-    // A null value means the teacher chose a regular test without a viewer.
-    // If older clients omit the field, infer only when every selected problem
-    // belongs to the same source PDF; mixed/legacy tests keep working as before.
-    const canInferSinglePdf = problemDocumentIds.length === 1 && accessible.rows.every(problem => problem.pdf_document_id === problemDocumentIds[0]);
-    const sourceDocumentId = hasSourceDocumentChoice
-      ? suppliedDocumentId
-      : (canInferSinglePdf ? problemDocumentIds[0] : null);
-    if (DEMO_MODE && sourceDocumentId != null) {
-      return res.status(400).json({ error: 'PDF-based tests are disabled on the fictional demo preview.' });
-    }
-    if (sourceDocumentId != null) {
-      if (problemDocumentIds.length !== 1 || problemDocumentIds[0] !== sourceDocumentId || accessible.rows.some(problem => problem.pdf_document_id !== sourceDocumentId)) {
-        return res.status(400).json({ error: 'All questions in a PDF-based test must come from the same PDF source.' });
-      }
-      const sourceDoc = await pool.query(
-        'SELECT id FROM source_documents WHERE id = $1 AND created_by = $2 AND rights_confirmed = true',
-        [sourceDocumentId, req.user.id]
-      );
-      if (!sourceDoc.rowCount) return res.status(403).json({ error: 'The PDF source is unavailable or has not been rights-approved.' });
-      if (accessible.rows.some(problem => !problem.source_page || !problem.student_pdf_page || !problem.source_pages?.length || !problem.student_pdf_pages?.length)) {
-        return res.status(400).json({ error: 'Every question must have a reviewed source page before it can be assigned with a PDF.' });
-      }
-    }
+    // Sprint tests may use any number of problems up to the request limit.
+    // Target tests remain fixed at eight to match the contest format. Problem
+    // source metadata is informational; it does not restrict test type.
 
     const client = await pool.connect();
     try {
@@ -1734,20 +1643,10 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
         }
       }
       const result = await client.query(
-        `INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type, source_document_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type, sourceDocumentId]
+        `INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type]
       );
-      if (sourceDocumentId != null) {
-        for (const problemId of problemIds) {
-          const problem = problemById.get(problemId);
-          await client.query(
-            `INSERT INTO test_problem_pdf_locations (test_id, problem_id, source_page, pdf_page, source_pages, pdf_pages)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [result.rows[0].id, problemId, problem.source_page, problem.student_pdf_page, problem.source_pages, problem.student_pdf_pages]
-          );
-        }
-      }
       await client.query('COMMIT');
       res.json(result.rows[0]);
     } catch (error) {
@@ -1910,45 +1809,17 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
     }
     if (problemIds.length === 0) return res.json([]);
     const visibility = req.user.role === 'admin' ? '' : ' AND (p.created_by IS NULL OR p.created_by = $3)';
+    const sourceColumn = req.user.role === 'student' ? '' : ', p.source';
     const result = await pool.query(
-      `SELECT p.id, p.question, p.topic, p.image_url, p.source, p.folder_id,
-              p.pdf_document_id, p.source_page, p.student_pdf_page,
-              f.name AS folder_name,
-              locations.source_page AS test_source_page,
-              locations.pdf_page AS test_pdf_page,
-              locations.source_pages AS test_source_pages,
-              locations.pdf_pages AS test_pdf_pages
+      `SELECT p.id, p.question, p.image_url${sourceColumn}, p.folder_id,
+              f.name AS folder_name
        FROM problems p LEFT JOIN folders f ON p.folder_id = f.id
-       LEFT JOIN test_problem_pdf_locations locations ON locations.test_id = $2 AND locations.problem_id = p.id
        WHERE p.id = ANY($1)${visibility}`,
       req.user.role === 'admin' ? [problemIds, testId] : [problemIds, testId, test.created_by]
     );
-    const visibleProblemIds = result.rows.map((problem) => problem.id);
-    const tagResult = visibleProblemIds.length
-      ? await pool.query('SELECT problem_id, tag_id FROM problem_tags WHERE problem_id = ANY($1)', [visibleProblemIds])
-      : { rows: [] };
-    const tagsByProblem = {};
-    for (const row of tagResult.rows) {
-      if (!tagsByProblem[row.problem_id]) tagsByProblem[row.problem_id] = [];
-      tagsByProblem[row.problem_id].push(row.tag_id);
-    }
-    const tagNames = await pool.query('SELECT id, name FROM tags WHERE id = ANY($1)', [
-      [...new Set(tagResult.rows.map(r => r.tag_id))]
-    ]);
-    const tagMap = Object.fromEntries(tagNames.rows.map(r => [r.id, r.name]));
     const problemMap = Object.fromEntries(result.rows.map(p => [p.id, p]));
     const ordered = problemIds.map(id => problemMap[id]).filter(Boolean);
-    const problems = ordered.map(p => ({
-      ...p,
-      sourceDocumentId: test.source_document_id ?? null,
-      sourcePage: p.test_source_page ?? p.source_page ?? null,
-      pdfPage: p.test_pdf_page ?? p.student_pdf_page ?? null,
-      sourcePages: p.test_source_pages ?? p.source_pages ?? [],
-      pdfPages: p.test_pdf_pages ?? p.student_pdf_pages ?? [],
-      tag_ids: tagsByProblem[p.id] || [],
-      tag_names: (tagsByProblem[p.id] || []).map(tid => tagMap[tid]).filter(Boolean)
-    }));
-    res.json(problems);
+    res.json(ordered);
   } catch (error) {
     console.error('Get test problems error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -2063,15 +1934,14 @@ app.get('/api/tests/:id/attempts', authenticateToken, async (req, res) => {
 });
 
 // Aggregate-only classroom insights. Cohort size is checked independently for
-// each topic and problem; suppressed groups disclose no small-cohort counts.
+// each problem; suppressed groups disclose no small-cohort counts.
 app.get('/api/insights/class', authenticateToken, async (req, res) => {
   if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Teacher access required' });
   const minimumCohort = 5;
   const outcomesCte = `
     WITH outcomes AS (
-      SELECT ta.student_id, p.id AS problem_id,
-             COALESCE(NULLIF(BTRIM(p.topic), ''), 'Untagged') AS topic,
-             p.difficulty, p.catalog_formats, p.year_block,
+      SELECT ta.student_id, p.id AS problem_id, p.source,
+             p.difficulty,
              (ta.results ->> p.id::text = 'true') AS correct
       FROM test_attempts ta
       JOIN tests t ON t.id = ta.test_id AND t.created_by = $1
@@ -2081,30 +1951,18 @@ app.get('/api/insights/class', authenticateToken, async (req, res) => {
       WHERE ta.results ? p.id::text
     )`;
   try {
-    const [topics, problems] = await Promise.all([
-      pool.query(
-        `${outcomesCte}
-         SELECT topic, COUNT(*)::int AS responses,
-                COUNT(DISTINCT student_id)::int AS learners,
-                ROUND(100.0 * COUNT(*) FILTER (WHERE correct) / NULLIF(COUNT(*), 0))::int AS accuracy_percent
-         FROM outcomes GROUP BY topic
-         HAVING COUNT(DISTINCT student_id) >= $2 ORDER BY topic`,
-        [req.user.id, minimumCohort]
-      ),
-      pool.query(
-        `${outcomesCte}
-         SELECT problem_id, topic, difficulty, catalog_formats AS formats, year_block,
-                COUNT(*)::int AS responses,
-                COUNT(DISTINCT student_id)::int AS learners,
-                ROUND(100.0 * COUNT(*) FILTER (WHERE correct) / NULLIF(COUNT(*), 0))::int AS accuracy_percent
-         FROM outcomes GROUP BY problem_id, topic, difficulty, catalog_formats, year_block
-         HAVING COUNT(DISTINCT student_id) >= $2 ORDER BY topic, problem_id`,
-        [req.user.id, minimumCohort]
-      )
-    ]);
+    const problems = await pool.query(
+      `${outcomesCte}
+       SELECT problem_id, source, difficulty,
+              COUNT(*)::int AS responses,
+              COUNT(DISTINCT student_id)::int AS learners,
+              ROUND(100.0 * COUNT(*) FILTER (WHERE correct) / NULLIF(COUNT(*), 0))::int AS accuracy_percent
+       FROM outcomes GROUP BY problem_id, source, difficulty
+       HAVING COUNT(DISTINCT student_id) >= $2 ORDER BY problem_id`,
+      [req.user.id, minimumCohort]
+    );
     res.json({
       minimumCohort,
-      topics: topics.rows,
       problems: problems.rows
     });
   } catch (error) {
@@ -2205,6 +2063,7 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     }
     
     // Get test and ensure student can take it (only their teacher's tests)
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('test-submit'), hashtext($1::text))", [testId]);
     const testResult = await client.query('SELECT * FROM tests WHERE id = $1', [testId]);
     const test = testResult.rows[0];
     if (!test) {
@@ -2238,21 +2097,10 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     }
     
     const problemsResult = await client.query(
-      'SELECT * FROM problems WHERE id = ANY($1)',
+      'SELECT * FROM problems WHERE id = ANY($1) ORDER BY id FOR UPDATE',
       [test.problem_ids]
     );
     const problems = problemsResult.rows;
-
-    // Get problem -> tags mapping for subject-specific ELO
-    const tagRows = await client.query(
-      'SELECT problem_id, tag_id FROM problem_tags WHERE problem_id = ANY($1)',
-      [test.problem_ids]
-    );
-    const tagsByProblem = {};
-    for (const r of tagRows.rows) {
-      if (!tagsByProblem[r.problem_id]) tagsByProblem[r.problem_id] = [];
-      tagsByProblem[r.problem_id].push(r.tag_id);
-    }
 
     // Batch ELO: use same problem ELOs for everyone on this test (snapshot on first submit)
     let snapshot = test.problem_elo_snapshot;
@@ -2289,11 +2137,12 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
       if (isCorrect) score++;
       
       const problemElo = getProblemElo(problem);
+      const currentProblemElo = problem.elo;
       const outcome = isCorrect ? 1 : 0;
       const userK = getKFactor(32, userAttemptCount);
       const problemK = getKFactor(24, problem.times_used || 0);
       const tempNewUserElo = calculateELO(newUserElo, problemElo, outcome, userK);
-      const newProblemElo = calculateELO(problemElo, newUserElo, 1 - outcome, problemK);
+      const newProblemElo = calculateELO(currentProblemElo, newUserElo, 1 - outcome, problemK);
       userAttemptCount++;
       
       // Update problem in DB (global difficulty still evolves)
@@ -2311,27 +2160,9 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
         `INSERT INTO elo_history 
          (user_id, problem_id, old_user_elo, new_user_elo, old_problem_elo, new_problem_elo, was_correct) 
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [req.user.id, problem.id, newUserElo, tempNewUserElo, problemElo, newProblemElo, isCorrect]
+        [req.user.id, problem.id, newUserElo, tempNewUserElo, currentProblemElo, newProblemElo, isCorrect]
       );
 
-      // Update subject-specific (tag) ELO for each tag on this problem
-      const problemTagIds = tagsByProblem[problem.id] || [];
-      for (const tagId of problemTagIds) {
-        const tagEloRows = await client.query(
-          'SELECT elo, COALESCE(attempt_count, 0) AS attempt_count FROM student_tag_elo WHERE user_id = $1 AND tag_id = $2',
-          [req.user.id, tagId]
-        );
-        let currentTagElo = tagEloRows.rows[0]?.elo ?? 1500;
-        const tagAttemptCount = tagEloRows.rows[0]?.attempt_count ?? 0;
-        const tagK = getKFactor(32, tagAttemptCount);
-        const newTagElo = calculateELO(currentTagElo, problemElo, outcome, tagK);
-        await client.query(
-          `INSERT INTO student_tag_elo (user_id, tag_id, elo, attempt_count) VALUES ($1, $2, $3, 1)
-           ON CONFLICT (user_id, tag_id) DO UPDATE SET elo = $3, attempt_count = student_tag_elo.attempt_count + 1`,
-          [req.user.id, tagId, newTagElo]
-        );
-      }
-      
       newUserElo = tempNewUserElo;
     }
     
@@ -2405,21 +2236,6 @@ app.get('/api/students', authenticateToken, async (req, res) => {
       const m = byStudent[s.id] || { sprint: 0, target: 0 };
       s.cumulative_score = m.sprint + 2 * m.target;
     }
-    const tagElos = await pool.query(
-      `SELECT ste.user_id, t.name, ste.elo FROM student_tag_elo ste
-       JOIN tags t ON t.id = ste.tag_id
-       JOIN users u ON u.id = ste.user_id AND u.role = 'student' AND u.teacher_id = $1
-       ORDER BY t.name`,
-      [req.user.id]
-    );
-    const byUser = {};
-    for (const r of tagElos.rows) {
-      if (!byUser[r.user_id]) byUser[r.user_id] = [];
-      byUser[r.user_id].push({ name: r.name, elo: r.elo });
-    }
-    for (const s of students) {
-      s.tag_elos = byUser[s.id] || [];
-    }
     students.sort((a, b) => (b.mathcounts_score ?? 0) - (a.mathcounts_score ?? 0));
     res.json(students);
   } catch (error) {
@@ -2444,13 +2260,6 @@ app.get('/api/students/:id', authenticateToken, async (req, res) => {
     );
     const student = studentResult.rows[0];
     if (!student) return res.status(404).json({ error: 'Student not found' });
-
-    const tagElos = await pool.query(
-      `SELECT t.name, ste.elo FROM student_tag_elo ste
-       JOIN tags t ON t.id = ste.tag_id WHERE ste.user_id = $1 ORDER BY t.name`,
-      [studentId]
-    );
-    student.tag_elos = tagElos.rows;
 
     const mathcounts = await pool.query(
       `SELECT t.test_type, ta.score FROM test_attempts ta

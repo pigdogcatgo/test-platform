@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import { createSecureContext } from 'node:tls';
 import { randomBytes } from 'crypto';
 import { DEMO_CATALOG } from './demoCatalog.js';
+import { inferCatalogMetadata } from './catalogMetadata.js';
 
 dotenv.config();
 
@@ -141,7 +142,6 @@ export async function initDatabase() {
         )
       `);
       await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES folders(id)');
-      await client.query(`INSERT INTO folders (name) SELECT 'Uncategorized' WHERE NOT EXISTS (SELECT 1 FROM folders LIMIT 1)`);
       console.log('Folders table and problems.folder_id ensured');
     } catch (migErr) {
       console.warn('Migration folders (non-fatal):', migErr.message);
@@ -247,9 +247,32 @@ export async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS folders (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(200) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES folders(id)');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS catalog_formats TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS difficulty SMALLINT');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS year_block VARCHAR(50)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS year INTEGER');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS level VARCHAR(50)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS round VARCHAR(50)');
+    const metadataRows = await client.query(`
+      SELECT p.id, p.source, f.name AS folder_name
+      FROM problems p LEFT JOIN folders f ON f.id = p.folder_id
+      WHERE p.year IS NULL OR p.level IS NULL OR p.round IS NULL
+    `);
+    for (const problem of metadataRows.rows) {
+      const inferred = inferCatalogMetadata(problem.source, problem.folder_name);
+      await client.query(
+        `UPDATE problems SET year = COALESCE(year, $1), level = COALESCE(level, $2), round = COALESCE(round, $3) WHERE id = $4`,
+        [inferred.year, inferred.level, inferred.round, problem.id]
+      );
+    }
     
     // Tests table (problem_elo_snapshot = frozen ELOs for this test so all students see same difficulties)
     await client.query(`
@@ -647,6 +670,56 @@ export async function seedDatabase() {
       return;
     }
 
+    // Rights attestation and source references are recorded in
+    // backend/PROBLEM_CONTENT_RIGHTS.md. Keep these samples out of the isolated demo DB.
+    const licensedNationalSprintSamples = [
+      {
+        number: 1,
+        question: 'No matter where Sasha is in the country, the pre-tax price of a cup of coffee at a particular coffee retailer is always $4.00. However, sales tax varies by region. In Atlanta there is a 7.5% sales tax, while in Chicago there is a 10.25% sales tax. How many cents more does Sasha pay when she buys the coffee in Chicago than when she buys it in Atlanta?',
+        answer: '11',
+      },
+      {
+        number: 2,
+        question: 'Hans is staying at a hotel that has five floors, numbered 1 through 5, and 10 rooms per floor, numbered 1 through 10. Hans forgets where his room is, but knows that it is on an even numbered floor and the room number is divisible by 4. If Hans randomly chooses a room he knows might be his room, what is the probability that Hans chooses the correct room? Express your answer as a common fraction.',
+        answer: '1/4',
+      },
+      {
+        number: 3,
+        question: 'If an inchworm travels 1 inch every 2 seconds, how many feet will it travel in 1 hour?',
+        answer: '150',
+      },
+      {
+        number: 4,
+        question: 'If the five-digit number 46A81 is divisible by 9, what digit does A represent?',
+        answer: '8',
+      },
+      {
+        number: 5,
+        question: 'Leonardo has a cylindrical box of height 10 cm and radius 15 cm. He paints the top and bottom circular faces of his box green, and the lateral surface red. What is the ratio of green-painted area to red-painted area on his box?',
+        answer: '3/2',
+      },
+    ];
+    await client.query('BEGIN');
+    try {
+      // Serialize this idempotent seed across service instances during deploys.
+      await client.query('SELECT pg_advisory_xact_lock(20221105)');
+      for (const sample of licensedNationalSprintSamples) {
+        const source = `2022 MATHCOUNTS National Competition, Sprint Round, Problem ${sample.number}`;
+        await client.query(
+          `INSERT INTO problems (question, answer, topic, source, created_by, year, level, round)
+           SELECT $1, $2, '', $3, NULL, 2022, 'Nationals', 'Sprint'
+           WHERE NOT EXISTS (
+             SELECT 1 FROM problems WHERE source = $3
+           )`,
+          [sample.question, sample.answer, source]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+
     // Never create the historical demo accounts in production. A fresh
     // production database can receive one explicitly configured administrator.
     const userCheck = await client.query('SELECT COUNT(*) FROM users');
@@ -714,11 +787,7 @@ export async function seedDatabase() {
       WHERE role = 'student'
     `);
     
-    // Create default folder and tags if empty
-    const folderCheck = await client.query('SELECT COUNT(*) FROM folders');
-    if (parseInt(folderCheck.rows[0].count) === 0) {
-      await client.query(`INSERT INTO folders (name) VALUES ('Uncategorized')`);
-    }
+    // Create default tags if empty
     const tagCheck = await client.query('SELECT COUNT(*) FROM tags');
     if (parseInt(tagCheck.rows[0].count) === 0) {
       await client.query(`

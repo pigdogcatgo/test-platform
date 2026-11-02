@@ -18,79 +18,43 @@ const DEMO_TEACHER_USERNAME = import.meta.env.VITE_DEMO_TEACHER_USERNAME || 'dem
 const DEMO_STUDENT_USERNAME = import.meta.env.VITE_DEMO_STUDENT_USERNAME || 'demo-student';
 const DEMO_TEACHER_PASSWORD = import.meta.env.VITE_DEMO_TEACHER_PASSWORD || 'teacher-preview-26';
 const DEMO_STUDENT_PASSWORD = import.meta.env.VITE_DEMO_STUDENT_PASSWORD || 'student-preview-26';
-const EMPTY_CATALOG_FILTERS = { search: '', topic: '', difficulty: '', roundType: '', yearFrom: '', yearTo: '' };
-const DEMO_ROUND_TYPES = ['Sprint', 'Target', 'Practice'];
-
+const EMPTY_CATALOG_FILTERS = { search: '', year: '', level: '', round: '' };
 function getCatalogMetadata(problem, demoMode) {
   const source = typeof problem.source === 'string' ? problem.source : '';
-  const yearFromSource = source.match(/\b(19\d{2}|20\d{2})\b/);
-  const rawYearBlock = problem.year_block ?? problem.yearBlock;
-  const yearBlock = typeof rawYearBlock === 'string' ? rawYearBlock : '';
-  const yearRange = yearBlock.match(/\b(19\d{2}|20\d{2})\s*(?:-|–|—|to)\s*(19\d{2}|20\d{2})\b/i);
-  const explicitYear = Number(problem.year ?? problem.source_year ?? problem.sourceYear ?? yearFromSource?.[0]);
-  const id = Number(problem.id) || 0;
-  const elo = Number(problem.elo);
-  const topicValues = [...new Set([
-    ...(Array.isArray(problem.tag_names) ? problem.tag_names : []),
-    problem.topic,
-  ].filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
-  const difficultyLabels = ['Foundational', 'Developing', 'Intermediate', 'Advanced', 'Challenge'];
-  const rawDifficulty = problem.difficulty;
-  const difficulty = Number.isInteger(Number(rawDifficulty)) && Number(rawDifficulty) >= 1 && Number(rawDifficulty) <= 5
-    ? difficultyLabels[Number(rawDifficulty) - 1]
-    : typeof rawDifficulty === 'string' && rawDifficulty.trim()
-      ? rawDifficulty.trim()
-      : Number.isFinite(elo)
-        ? elo < 1400 ? 'Foundational' : elo < 1600 ? 'Intermediate' : 'Advanced'
-        : 'Unrated';
-  const rawFormats = Array.isArray(problem.catalog_formats) ? problem.catalog_formats : [];
-  const explicitRoundType = problem.round_type || problem.roundType || source.match(/\b(Sprint|Target|Practice)\b/i)?.[0];
-  const roundTypes = [...new Set((rawFormats.length ? rawFormats : explicitRoundType ? [explicitRoundType] : [])
-    .filter(value => typeof value === 'string' && value.trim())
-    .map(value => value.trim().replace(/\b\w/g, letter => letter.toUpperCase())))];
-  if (roundTypes.length === 0) roundTypes.push(demoMode ? DEMO_ROUND_TYPES[id % DEMO_ROUND_TYPES.length] : 'Unspecified');
-  let yearStart = yearRange ? Number(yearRange[1]) : Number.isInteger(explicitYear) && explicitYear >= 1900 && explicitYear <= 2100 ? explicitYear : null;
-  let yearEnd = yearRange ? Number(yearRange[2]) : yearStart;
-  if (yearStart == null && demoMode) yearStart = yearEnd = 2018 + (Math.abs(id) % 8);
-  const yearLabel = yearBlock || (yearStart == null ? '' : yearStart === yearEnd ? String(yearStart) : `${yearStart}–${yearEnd}`);
+  const sourceText = `${source} ${problem.folder_name || ''}`;
+  const inferredYear = Number(sourceText.match(/\b(19\d{2}|20\d{2})\b/)?.[1]) || null;
+  const inferredLevel = /\bnationals?\b/i.test(sourceText) ? 'Nationals' : /\bstate\b/i.test(sourceText) ? 'State' : /\bchapter\b/i.test(sourceText) ? 'Chapter' : /\bschool\b/i.test(sourceText) ? 'School' : '';
+  const inferredRound = sourceText.match(/\b(Sprint|Target|Team|Countdown|Warm-Up|Warm Up)\s+Round\b/i)?.[1] || '';
+  const year = problem.year ?? (demoMode && inferredYear == null ? 2018 + (Math.abs(Number(problem.id) || 0) % 8) : inferredYear);
+  const level = problem.level || inferredLevel;
+  const round = problem.round || inferredRound;
   return {
-    topics: topicValues.length ? topicValues : ['Other'],
-    difficulty,
-    roundTypes,
-    yearStart,
-    yearEnd,
-    yearLabel,
+    year: year == null ? '' : String(year),
+    level: level || '',
+    round: round || '',
+    elo: problem.elo == null ? '—' : String(problem.elo),
+    group: [year, level].filter(Boolean).join(' ') || 'Source details needed',
   };
 }
 
 function getCatalogOptions(problems, demoMode) {
   const metadata = problems.map(problem => getCatalogMetadata(problem, demoMode));
   return {
-    topics: [...new Set(metadata.flatMap(item => item.topics))].sort((a, b) => a.localeCompare(b)),
-    difficulties: [...new Set(metadata.map(item => item.difficulty))].sort((a, b) => a.localeCompare(b)),
-    roundTypes: [...new Set(metadata.flatMap(item => item.roundTypes).filter(value => value !== 'Unspecified'))].sort((a, b) => a.localeCompare(b)),
-    years: [...new Set(metadata.flatMap(item => {
-      if (!Number.isInteger(item.yearStart) || !Number.isInteger(item.yearEnd)) return [];
-      const start = Math.max(1900, Math.min(item.yearStart, item.yearEnd));
-      const end = Math.min(2100, Math.max(item.yearStart, item.yearEnd));
-      return Array.from({ length: end - start + 1 }, (_, index) => start + index);
-    }))].sort((a, b) => a - b),
+    years: [...new Set(metadata.map(item => item.year).filter(Boolean))].sort((a, b) => Number(b) - Number(a)),
+    levels: [...new Set(metadata.map(item => item.level).filter(Boolean))].sort(),
+    rounds: [...new Set(metadata.map(item => item.round).filter(Boolean))].sort(),
   };
 }
 
 function filterCatalogProblems(problems, filters, demoMode) {
   const query = filters.search.trim().toLocaleLowerCase();
-  const from = filters.yearFrom ? Number(filters.yearFrom) : null;
-  const to = filters.yearTo ? Number(filters.yearTo) : null;
   return problems.filter(problem => {
     const metadata = getCatalogMetadata(problem, demoMode);
-    const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.topic || ''} ${(problem.tag_names || []).join(' ')} ${problem.folder_name || ''} ${metadata.difficulty} ${metadata.roundTypes.join(' ')} ${metadata.yearLabel}`.toLocaleLowerCase();
+    const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.folder_name || ''} ${metadata.year} ${metadata.level} ${metadata.round} ${metadata.elo}`.toLocaleLowerCase();
     if (query && !searchable.includes(query)) return false;
-    if (filters.topic && !metadata.topics.includes(filters.topic)) return false;
-    if (filters.difficulty && metadata.difficulty !== filters.difficulty) return false;
-    if (filters.roundType && !metadata.roundTypes.includes(filters.roundType)) return false;
-    if (from && (!metadata.yearEnd || metadata.yearEnd < from)) return false;
-    if (to && (!metadata.yearStart || metadata.yearStart > to)) return false;
+    if (filters.year && metadata.year !== filters.year) return false;
+    if (filters.level && metadata.level !== filters.level) return false;
+    if (filters.round && metadata.round !== filters.round) return false;
     return true;
   });
 }
@@ -109,15 +73,12 @@ const App = () => {
   const [authBusy, setAuthBusy] = useState(false);
   
   const [problems, setProblems] = useState([]);
-  const [folders, setFolders] = useState([]);
-  const [tags, setTags] = useState([]);
   const [tests, setTests] = useState([]);
   const [attempts, setAttempts] = useState([]);
   const [students, setStudents] = useState([]);
   
   const [activeTest, setActiveTest] = useState(null);
   const [testProblems, setTestProblems] = useState([]);
-  const [testPdfUrl, setTestPdfUrl] = useState(null);
   const [testAnswers, setTestAnswers] = useState({});
   const [timeRemaining, setTimeRemaining] = useState(null);
   const [testDeadlineAt, setTestDeadlineAt] = useState(null);
@@ -127,32 +88,9 @@ const App = () => {
   
   const [editingProblem, setEditingProblem] = useState(null);
   const [problemToDelete, setProblemToDelete] = useState(null);
-  const [newFolderName, setNewFolderName] = useState('');
-  const [editingFolderId, setEditingFolderId] = useState(null);
-  const [editingFolderName, setEditingFolderName] = useState('');
   const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names (create-test)
   const [adminExpandedFolders, setAdminExpandedFolders] = useState(() => new Set()); // folder IDs expanded in admin (empty = all collapsed)
-  const [pdfImportFile, setPdfImportFile] = useState(null);
-  const [pdfImportAnswerKey, setPdfImportAnswerKey] = useState('');
-  const [pdfImportLoading, setPdfImportLoading] = useState(false);
-  const [pdfImportResult, setPdfImportResult] = useState(null);
-  const [pdfImportPreviewUrl, setPdfImportPreviewUrl] = useState(null);
-  const [pdfImportPreviewError, setPdfImportPreviewError] = useState('');
-  const [pdfImportFinalPdfReviewed, setPdfImportFinalPdfReviewed] = useState(false);
-  const [pdfImportUseAI, setPdfImportUseAI] = useState(false);
-  const [pdfImportUseImageMode, setPdfImportUseImageMode] = useState(false);
-  const [pdfImportRunVerification, setPdfImportRunVerification] = useState(true);
-  const [pdfImportReview, setPdfImportReview] = useState(null);
-  const [pdfImportSourceTitle, setPdfImportSourceTitle] = useState('');
-  const [pdfImportSourceUrl, setPdfImportSourceUrl] = useState('');
-  const [pdfImportLicenseBasis, setPdfImportLicenseBasis] = useState('');
-  const [pdfImportLicenseName, setPdfImportLicenseName] = useState('');
-  const [pdfImportPermissionReference, setPdfImportPermissionReference] = useState('');
-  const [pdfImportRightsConfirmed, setPdfImportRightsConfirmed] = useState(false);
-  const [pdfImportStudentPagesConfirmed, setPdfImportStudentPagesConfirmed] = useState(false);
-  const [pdfImportGeminiConsent, setPdfImportGeminiConsent] = useState(false);
-  const [pdfImportAiRightsConfirmed, setPdfImportAiRightsConfirmed] = useState(false);
-  const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint', showSourcePdf: false });
+  const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
   const [createTestError, setCreateTestError] = useState('');
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -167,7 +105,6 @@ const App = () => {
   const [classElo, setClassElo] = useState(null);
   const [classEloStatus, setClassEloStatus] = useState('idle');
   const [classEloError, setClassEloError] = useState('');
-  const [bulkMoveFolderId, setBulkMoveFolderId] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [leaderboardSortBy, setLeaderboardSortBy] = useState('cumulative'); // 'cumulative' | 'elo'
@@ -185,23 +122,8 @@ const App = () => {
   );
   const hasCatalogFilters = Object.values(catalogFilters).some(Boolean);
 
-  const selectedProblemsForTest = newTest.problemIds
-    .map(problemId => problems.find(problem => problem.id === problemId))
-    .filter(Boolean);
-  const selectedPdfDocumentIds = [...new Set(selectedProblemsForTest
-    .map(problem => problem.pdf_document_id ?? problem.source_document_id ?? problem.pdfDocumentId ?? problem.sourceDocumentId)
-    .filter(id => id !== null && id !== undefined)
-    .map(String))];
-  const selectedPdfDocumentId = selectedPdfDocumentIds.length === 1 &&
-    selectedProblemsForTest.length === newTest.problemIds.length &&
-    selectedProblemsForTest.every(problem => String(problem.pdf_document_id ?? problem.source_document_id ?? problem.pdfDocumentId ?? problem.sourceDocumentId) === selectedPdfDocumentIds[0])
-    ? Number(selectedPdfDocumentIds[0])
-    : null;
-
   const clearDashboardData = useCallback(() => {
     setProblems([]);
-    setFolders([]);
-    setTags([]);
     setTests([]);
     setAttempts([]);
     setStudents([]);
@@ -223,7 +145,6 @@ const App = () => {
     setAuthBusy(false);
     setAuthError(typeof message === 'string' ? message : '');
     setSubmissionError('');
-    setTestPdfUrl(null);
     setStudentClassEloVisible(true);
     setTeacherSettingsLoading(true);
     setTeacherSettingsSaving(false);
@@ -335,23 +256,6 @@ const App = () => {
     if (user?.role === 'student') loadClassElo();
   }, [loadClassElo, user?.role]);
 
-  const loadTestPdf = useCallback(async (testId, problemList) => {
-    const hasSourcePdf = problemList.some(problem =>
-      problem.sourceDocumentId || problem.source_document_id || problem.pdfDocumentId || problem.pdf_document_id
-    );
-    if (!hasSourcePdf) return null;
-    const { data } = await api.get(`/api/tests/${testId}/pdf`, { responseType: 'blob' });
-    return URL.createObjectURL(new Blob([data], { type: 'application/pdf' }));
-  }, [api]);
-
-  useEffect(() => () => {
-    if (testPdfUrl) URL.revokeObjectURL(testPdfUrl);
-  }, [testPdfUrl]);
-
-  useEffect(() => () => {
-    if (pdfImportPreviewUrl) URL.revokeObjectURL(pdfImportPreviewUrl);
-  }, [pdfImportPreviewUrl]);
-
   const loadUserData = useCallback(async (opts = {}) => {
     const preserveView = opts.preserveView ?? false;
     const requestToken = token;
@@ -401,29 +305,19 @@ const App = () => {
         setTests(testsRes.data);
         setAttempts(attemptsRes.data);
       } else if (userData.role === 'teacher') {
-        const [problemsRes, testsRes, studentsRes, foldersRes, tagsRes] = await Promise.all([
+        const [problemsRes, testsRes, studentsRes] = await Promise.all([
           api.get('/api/problems'),
           api.get('/api/tests'),
-          api.get('/api/students'),
-          api.get('/api/folders'),
-          api.get('/api/tags')
+          api.get('/api/students')
         ]);
         if (localStorage.getItem('token') !== requestToken) return;
         setProblems(problemsRes.data);
         setTests(testsRes.data);
         setStudents(studentsRes.data);
-        setFolders(foldersRes.data);
-        setTags(tagsRes.data);
       } else if (userData.role === 'admin') {
-        const [problemsRes, foldersRes, tagsRes] = await Promise.all([
-          api.get('/api/problems'),
-          api.get('/api/folders'),
-          api.get('/api/tags')
-        ]);
+        const [problemsRes] = await Promise.all([api.get('/api/problems')]);
         if (localStorage.getItem('token') !== requestToken) return;
         setProblems(problemsRes.data);
-        setFolders(foldersRes.data);
-        setTags(tagsRes.data);
       }
     } catch (error) {
       if (localStorage.getItem('token') !== requestToken) return;
@@ -442,7 +336,6 @@ const App = () => {
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
     setActiveTest(null);
     setTestProblems([]);
-    setTestPdfUrl(null);
     setTestAnswers({});
     setTimeRemaining(null);
     setTestDeadlineAt(null);
@@ -469,7 +362,6 @@ const App = () => {
       sessionStorage.removeItem('testAnswers_' + testId);
       setActiveTest(null);
       setTestProblems([]);
-      setTestPdfUrl(null);
       setTestAnswers({});
       setTimeRemaining(null);
       setTestDeadlineAt(null);
@@ -542,16 +434,10 @@ const App = () => {
         const { data: probs } = await api.get(`/api/tests/${testId}/problems`);
         if (cancelled || !requestToken || localStorage.getItem('token') !== requestToken) return;
         const ordered = problemIds.map(id => probs.find(p => p.id === id)).filter(Boolean);
-        const pdfObjectUrl = await loadTestPdf(testId, probs);
-        if (cancelled || !requestToken || localStorage.getItem('token') !== requestToken) {
-          if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl);
-          return;
-        }
         const savedAnswers = sessionStorage.getItem('testAnswers_' + testId);
         const answers = savedAnswers ? JSON.parse(savedAnswers) : {};
         setActiveTest(test);
         setTestProblems(ordered.length ? ordered : probs);
-        setTestPdfUrl(pdfObjectUrl);
         setTestAnswers(answers);
         const remainingMs = Math.max(0, Number(session.remainingMs) || 0);
         setTestDeadlineAt(performance.now() + remainingMs);
@@ -567,7 +453,7 @@ const App = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [user?.role, tests, api, view, activeTest, token, handleLogout, loadUserData, handleExpiredTest, loadTestPdf]);
+  }, [user?.role, tests, api, view, activeTest, token, handleLogout, loadUserData, handleExpiredTest]);
 
   // Keep ref updated so beforeunload can submit with latest answers
   useEffect(() => {
@@ -725,12 +611,7 @@ const App = () => {
       if (!requestToken || localStorage.getItem('token') !== requestToken) return;
       const { data: testProbs } = await api.get(`/api/tests/${test.id}/problems`);
       if (!requestToken || localStorage.getItem('token') !== requestToken) return;
-      const pdfObjectUrl = await loadTestPdf(test.id, testProbs);
-      if (!requestToken || localStorage.getItem('token') !== requestToken) {
-        if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl);
-        return;
-      }
-      const folderIds = [...new Set(testProbs.map(p => p.folder_id ?? 'uncategorized'))];
+      const folderIds = [...new Set(testProbs.map(p => getCatalogMetadata(p, DEMO_MODE).group))];
       const allSameFolder = folderIds.length <= 1;
       const ordered = allSameFolder ? testProbs : [...testProbs].sort(() => Math.random() - 0.5);
       sessionStorage.setItem('testInProgress', JSON.stringify({
@@ -741,7 +622,6 @@ const App = () => {
       
       setActiveTest(test);
       setTestProblems(ordered);
-      setTestPdfUrl(pdfObjectUrl);
       const remainingMs = Math.max(0, Number(session.remainingMs) || 0);
       setTestDeadlineAt(performance.now() + remainingMs);
       setTimeRemaining(Math.ceil(remainingMs / 1000));
@@ -769,17 +649,16 @@ const App = () => {
   };
 
   const createTest = async () => {
-    const expectedProblemCount = newTest.testType === 'target' ? 8 : 30;
     if (!newTest.name.trim() || !newTest.dueDate) {
       setCreateTestError('Add a test name and due date to continue.');
       return;
     }
-    if (newTest.problemIds.length !== expectedProblemCount) {
-      setCreateTestError(`${newTest.testType === 'target' ? 'Target' : 'Sprint'} tests need exactly ${expectedProblemCount} problems. Select ${expectedProblemCount - newTest.problemIds.length} more.`);
+    if (newTest.problemIds.length === 0) {
+      setCreateTestError(`Select at least one problem to create a ${newTest.testType === 'target' ? 'Target' : 'Sprint'} test.`);
       return;
     }
-    if (newTest.showSourcePdf && !selectedPdfDocumentId) {
-      setCreateTestError('A shared PDF test must use questions from one reviewed PDF source.');
+    if (newTest.testType === 'target' && newTest.problemIds.length !== 8) {
+      setCreateTestError('Target tests need exactly 8 problems.');
       return;
     }
 
@@ -790,10 +669,9 @@ const App = () => {
         problemIds: newTest.problemIds,
         dueDate: newTest.dueDate,
         timeLimit: newTest.timeLimit,
-        testType: newTest.testType,
-        sourceDocumentId: newTest.showSourcePdf ? selectedPdfDocumentId : null
+        testType: newTest.testType
       });
-      setNewTest({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint', showSourcePdf: false });
+      setNewTest({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
       loadUserData();
       setView('teacher-dashboard');
     } catch (error) {
@@ -820,11 +698,12 @@ const App = () => {
     const payload = {
       question,
       answer: answerStr,
-      topic: (editingProblem.topic ?? '').trim(),
       image_url: editingProblem.image_url || null,
       source: (editingProblem.source ?? '').trim() || null,
-      folder_id: editingProblem.folder_id || null,
-      tag_ids: editingProblem.tag_ids || []
+      folder_id: editingProblem.folder_id ?? null,
+      year: editingProblem.year || null,
+      level: (editingProblem.level ?? '').trim() || null,
+      round: (editingProblem.round ?? '').trim() || null,
     };
 
     try {
@@ -857,19 +736,6 @@ const App = () => {
     }
   };
 
-  const bulkMoveProblems = async () => {
-    if (selectedProblemIds.length === 0) return;
-    const folderId = bulkMoveFolderId === '' || bulkMoveFolderId === 'uncategorized' ? null : Number(bulkMoveFolderId);
-    try {
-      await api.put('/api/problems/bulk-move', { ids: selectedProblemIds, folder_id: folderId });
-      setSelectedProblemIds([]);
-      setBulkMoveFolderId('');
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error moving problems');
-    }
-  };
-
   const bulkDeleteProblems = async () => {
     if (selectedProblemIds.length === 0) return;
     const visibleIds = new Set(visibleCatalogProblems.map(problem => problem.id));
@@ -882,194 +748,6 @@ const App = () => {
       loadUserData({ preserveView: true });
     } catch (error) {
       alert(error.response?.data?.error || 'Error deleting problems');
-    }
-  };
-
-  const createFolder = async () => {
-    if (!newFolderName.trim()) return;
-    try {
-      await api.post('/api/folders', { name: newFolderName.trim() });
-      setNewFolderName('');
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error creating folder');
-    }
-  };
-
-  const deleteFolder = async (id) => {
-    if (!confirm('Delete this folder? Problems will move to Uncategorized.')) return;
-    try {
-      await api.delete(`/api/folders/${id}`);
-      setAdminExpandedFolders(prev => { const next = new Set(prev); next.delete(id); return next; });
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error deleting folder');
-    }
-  };
-
-  const updateFolder = async (id) => {
-    const name = editingFolderName.trim();
-    if (!name) return;
-    try {
-      await api.put(`/api/folders/${id}`, { name });
-      setEditingFolderId(null);
-      setEditingFolderName('');
-      loadUserData({ preserveView: true });
-    } catch (error) {
-      alert(error.response?.data?.error || 'Error updating folder');
-    }
-  };
-
-  const handlePdfImport = async () => {
-    if (!pdfImportFile) {
-      alert('Select a PDF file first');
-      return;
-    }
-    if (!pdfImportAnswerKey.trim()) {
-      alert('Answer key is required. Paste answers (one per line): 1. 42, 2. 3/4, etc.');
-      return;
-    }
-    if (!pdfImportSourceTitle.trim() || !pdfImportLicenseBasis) {
-      alert('Enter the source title and select the license or permission basis for this PDF.');
-      return;
-    }
-    if (pdfImportLicenseBasis === 'open_license' && !pdfImportLicenseName.trim()) {
-      alert('Enter the name of the open license that permits this use.');
-      return;
-    }
-    if (pdfImportLicenseBasis === 'written_permission' && !pdfImportPermissionReference.trim()) {
-      alert('Add a reference or note for the written permission.');
-      return;
-    }
-    if (!pdfImportRightsConfirmed || !pdfImportStudentPagesConfirmed) {
-      alert('Confirm that you may use this PDF with your students and that the question pages contain no answer key or solutions.');
-      return;
-    }
-    if (pdfImportUseAI && (!pdfImportGeminiConsent || !pdfImportAiRightsConfirmed)) {
-      alert('Confirm Gemini processing and that the source rights permit sending this PDF and answer key to Google.');
-      return;
-    }
-    setPdfImportLoading(true);
-    setPdfImportResult(null);
-    setPdfImportReview(null);
-    setPdfImportPreviewUrl(null);
-    try {
-      const formData = new FormData();
-      formData.append('pdf', pdfImportFile);
-      formData.append('answerKey', pdfImportAnswerKey.trim());
-      formData.append('useAI', pdfImportUseAI ? 'true' : 'false');
-      formData.append('allowGeminiProcessing', pdfImportGeminiConsent ? 'true' : 'false');
-      formData.append('useImageMode', pdfImportUseImageMode ? 'true' : 'false');
-      formData.append('runVerification', pdfImportRunVerification ? 'true' : 'false');
-      formData.append('sourceTitle', pdfImportSourceTitle.trim());
-      formData.append('sourceUrl', pdfImportSourceUrl.trim());
-      formData.append('licenseBasis', pdfImportLicenseBasis);
-      formData.append('licenseName', pdfImportLicenseName.trim());
-      formData.append('permissionReference', pdfImportPermissionReference.trim());
-      formData.append('rightsConfirmed', pdfImportRightsConfirmed ? 'true' : 'false');
-      formData.append('studentSafePagesConfirmed', pdfImportStudentPagesConfirmed ? 'true' : 'false');
-      formData.append('aiRightsConfirmed', pdfImportAiRightsConfirmed ? 'true' : 'false');
-      const { data } = await api.post('/api/import-pdf/start', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 300000,
-      });
-      setPdfImportReview(data);
-      setPdfImportFile(null);
-      setPdfImportAnswerKey('');
-      setPdfImportGeminiConsent(false);
-      setPdfImportAiRightsConfirmed(false);
-      setPdfImportRightsConfirmed(false);
-      setPdfImportStudentPagesConfirmed(false);
-      const input = document.getElementById('pdf-import-input');
-      if (input) input.value = '';
-    } catch (error) {
-      setPdfImportResult({ error: error.response?.data?.error || error.message || 'Import failed' });
-    } finally {
-      setPdfImportLoading(false);
-    }
-  };
-
-  const handlePdfImportConfirm = async (accepted, direction = null) => {
-    if (!pdfImportReview?.importId) return;
-    setPdfImportLoading(true);
-    try {
-      const body = { importId: pdfImportReview.importId, accepted };
-      if (!accepted && direction) body.direction = direction;
-      if (accepted) {
-        body.question = pdfImportReview.question;
-        body.answer = pdfImportReview.answer;
-        body.sourcePage = pdfImportReview.sourcePage;
-      }
-      const { data } = await api.post('/api/import-pdf/confirm', body);
-      if (data.done) {
-        setPdfImportResult(data);
-        setPdfImportReview(null);
-        setPdfImportPreviewUrl(null);
-        setPdfImportPreviewError('');
-        loadUserData({ preserveView: true });
-      } else {
-        if (data.awaitingStudentPdfApproval && data.importId) {
-          setPdfImportReview(previous => ({ ...previous, ...data }));
-          setPdfImportFinalPdfReviewed(false);
-          setPdfImportPreviewError('');
-          try {
-            const { data: preview } = await api.get(`/api/import-pdf/${data.importId}/preview`, { responseType: 'blob' });
-            setPdfImportPreviewUrl(URL.createObjectURL(new Blob([preview], { type: 'application/pdf' })));
-          } catch (previewError) {
-            setPdfImportPreviewError(previewError.response?.data?.error || 'Could not load the final PDF preview. Retry before approving it.');
-          }
-        } else {
-          setPdfImportReview((prev) => ({ ...prev, ...data }));
-        }
-      }
-    } catch (error) {
-      setPdfImportResult({ error: error.response?.data?.error || error.message || 'Confirm failed' });
-    } finally {
-      setPdfImportLoading(false);
-    }
-  };
-
-  const retryPdfImportPreview = async () => {
-    if (!pdfImportReview?.importId) return;
-    setPdfImportLoading(true);
-    setPdfImportPreviewError('');
-    try {
-      const { data } = await api.get(`/api/import-pdf/${pdfImportReview.importId}/preview`, { responseType: 'blob' });
-      setPdfImportPreviewUrl(URL.createObjectURL(new Blob([data], { type: 'application/pdf' })));
-    } catch (error) {
-      setPdfImportPreviewError(error.response?.data?.error || 'Could not load the final PDF preview. Retry before approving it.');
-    } finally {
-      setPdfImportLoading(false);
-    }
-  };
-
-  const handlePdfImportFinalApproval = async (approved) => {
-    if (!pdfImportReview?.importId) return;
-    setPdfImportLoading(true);
-    try {
-      const { data } = await api.post('/api/import-pdf/confirm', {
-        importId: pdfImportReview.importId,
-        finalPdfApproved: approved,
-      });
-      setPdfImportPreviewUrl(null);
-      setPdfImportPreviewError('');
-      setPdfImportPreviewError('');
-      if (!approved) {
-        setPdfImportReview(null);
-        setPdfImportFinalPdfReviewed(false);
-        setPdfImportResult({ error: 'The PDF import was discarded. No questions or source PDF were saved.' });
-      } else if (data.done) {
-        setPdfImportResult(data);
-        setPdfImportReview(null);
-        setPdfImportFinalPdfReviewed(false);
-        loadUserData({ preserveView: true });
-      } else {
-        setPdfImportReview(previous => ({ ...previous, ...data }));
-      }
-    } catch (error) {
-      setPdfImportResult({ error: error.response?.data?.error || error.message || 'Final PDF review failed' });
-    } finally {
-      setPdfImportLoading(false);
     }
   };
 
@@ -1203,7 +881,6 @@ if (view === 'taking-test' && activeTest) {
         testAnswers={testAnswers}
         setTestAnswers={setTestAnswers}
         token={token}
-        pdfUrl={testPdfUrl}
         onSubmit={handleSubmitTest}
         submitting={submittingTest}
         submissionError={submissionError}
@@ -1369,18 +1046,6 @@ if (view === 'student-dashboard' && user) {
                 <span className="text-4xl font-bold text-[#2a61ba]">
                   {user.cumulative_score}
                 </span>
-              </div>
-            )}
-            {user.tag_elos?.length > 0 && (
-              <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
-                <span className="text-xs text-gray-600 mb-2">By Subject</span>
-                <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                  {user.tag_elos.map(t => (
-                    <span key={t.name} className="text-gray-800">
-                      {t.name}: <span className="font-semibold text-[#2a61ba]">{t.elo}</span>
-                    </span>
-                  ))}
-                </div>
               </div>
             )}
           </div>
@@ -1670,19 +1335,6 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
     }
   }
 
-  // Group by topic (tag) - a problem can have multiple tags
-  const byTopic = {};
-  for (const pid of problemIds) {
-    const p = problems.find(pr => pr.id === pid);
-    const tags = (p?.tag_names?.length) ? p.tag_names : ['Untagged'];
-    for (const tag of tags) {
-      if (!byTopic[tag]) byTopic[tag] = [];
-      byTopic[tag].push({ ...p, id: pid, missCount: missCount[pid] || 0 });
-    }
-  }
-  for (const tag of Object.keys(byTopic)) {
-    byTopic[tag].sort((a, b) => (b.missCount || 0) - (a.missCount || 0));
-  }
 
   return (
     <div className="min-h-screen bg-[#f1f6fd] flex justify-center">
@@ -1843,28 +1495,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
             </AccessibleDialog>
           )}
 
-          <div className="bg-white rounded-xl shadow p-6">
-            <h2 className="text-base font-semibold text-gray-800 mb-4">Most Missed Problems by Topic</h2>
-            {Object.keys(byTopic).length === 0 ? (
-              <p className="text-gray-500 text-sm">No problems in this test</p>
-            ) : (
-              <div className="space-y-4">
-                {Object.entries(byTopic).sort(([a], [b]) => a.localeCompare(b)).map(([topic, probs]) => (
-                  <div key={topic}>
-                    <h3 className="font-medium text-gray-700 mb-2 text-sm">{topic}</h3>
-                    <div className="space-y-1.5 pl-3 border-l-2 border-gray-200">
-                      {probs.map(p => (
-                        <div key={p.id} className="flex justify-between text-sm">
-                          <span className="text-gray-800">{p.source || `Problem #${p.id}`}</span>
-                          <span className="text-red-600 font-medium">{p.missCount} missed</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+
         </div>
       </div>
     </div>
@@ -2027,16 +1658,6 @@ if (view === 'student-profile' && user) {
               <span className="text-xs text-gray-600 mb-1">Cumulative Score</span>
               <span className="text-2xl font-bold text-[#2a61ba]">{selectedStudent.cumulative_score ?? 0}</span>
             </div>
-            {selectedStudent.tag_elos?.length > 0 && (
-              <div className="inline-flex flex-col items-start bg-white border border-gray-200 px-4 py-3 rounded-xl">
-                <span className="text-xs text-gray-600 mb-2">By Subject</span>
-                <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                  {selectedStudent.tag_elos.map(t => (
-                    <span key={t.name}>{t.name}: <span className="font-semibold text-[#2a61ba]">{t.elo}</span></span>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
@@ -2080,13 +1701,7 @@ if (view === 'student-profile' && user) {
 }
 
 if (view === 'create-test' && user) {
-  const changeTestType = (type) => setNewTest(current => ({
-    ...current,
-    testType: type,
-    problemIds: DEMO_MODE
-      ? current.problemIds.filter(id => getCatalogMetadata(problems.find(problem => problem.id === id) || {}, true).roundTypes.includes(type === 'target' ? 'Target' : 'Sprint'))
-      : current.problemIds,
-  }));
+  const changeTestType = (type) => setNewTest(current => ({ ...current, testType: type }));
   const hiddenSelectedProblemCount = newTest.problemIds.filter(
     id => !visibleCatalogProblems.some(problem => problem.id === id)
   ).length;
@@ -2162,7 +1777,7 @@ if (view === 'create-test' && user) {
                 />
                 <div>
                   <span className="font-medium text-gray-800">Sprint</span>
-                  <p className="text-sm text-gray-500 mt-0.5">30 problems, 1 point each. {DEMO_MODE ? 'Fictional demo scoring: 1× correct answers.' : 'Counts toward MATHCOUNTS score as 1× correct answers.'}</p>
+                  <p className="text-sm text-gray-500 mt-0.5">Choose any number of problems. Each correct answer is worth 1 point.</p>
                 </div>
               </label>
               <label className="flex flex-1 items-start gap-3 rounded-lg border border-gray-200 p-4 cursor-pointer">
@@ -2185,36 +1800,17 @@ if (view === 'create-test' && user) {
 
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="text-base font-semibold text-gray-800">Choose problems</h2>
-            <p className="text-sm text-gray-600" role="status" aria-live="polite">{newTest.problemIds.length} selected · {newTest.testType === 'target' ? '8' : '30'} required</p>
+            <p className="text-sm text-gray-600" role="status" aria-live="polite">{newTest.problemIds.length} selected{newTest.testType === 'target' ? ' · 8 required' : ' · 200 maximum'}</p>
           </div>
           <p className="-mt-4 text-xs text-gray-600">
-            Catalog filters change which items are shown; selected problem IDs remain in this test.
+            Sprint can include 1–200 problems. Target must include exactly 8. Source identifies where a problem came from and does not limit which test type can use it. Filters only change which items are shown; selected problem IDs remain in this test.
             {hiddenSelectedProblemCount > 0 && ` ${hiddenSelectedProblemCount} selected problem${hiddenSelectedProblemCount === 1 ? ' is' : 's are'} currently hidden by the filters.`}
           </p>
-          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-            <label className={`flex items-start gap-3 text-sm ${selectedPdfDocumentId ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
-              <input
-                type="checkbox"
-                checked={newTest.showSourcePdf}
-                disabled={!selectedPdfDocumentId}
-                onChange={event => setNewTest({ ...newTest, showSourcePdf: event.target.checked })}
-                className="mt-1"
-              />
-              <span>
-                <span className="block font-medium text-gray-800">Show one shared source PDF to students</span>
-                <span className="mt-0.5 block text-gray-600">
-                  {selectedPdfDocumentId
-                    ? 'Students will see the reviewed question pages beside numbered answer fields. Each answer still updates its own problem ELO.'
-                    : 'Select reviewed questions from the same imported PDF to enable the shared viewer.'}
-                </span>
-              </span>
-            </label>
-          </div>
           <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-1" role="region" aria-label="Problem selection">
             {(() => {
               const byFolder = {};
               for (const p of visibleCatalogProblems) {
-                const fname = p.folder_name || 'Uncategorized';
+                const fname = getCatalogMetadata(p, DEMO_MODE).group;
                 if (!byFolder[fname]) byFolder[fname] = [];
                 byFolder[fname].push(p);
               }
@@ -2229,10 +1825,7 @@ if (view === 'create-test' && user) {
                   return next;
                 });
                 const folderProbs = byFolder[fname];
-                const requiredFormat = newTest.testType === 'target' ? 'Target' : 'Sprint';
-                const folderIds = folderProbs
-                  .filter(problem => !DEMO_MODE || getCatalogMetadata(problem, true).roundTypes.includes(requiredFormat))
-                  .map(p => p.id);
+                const folderIds = folderProbs.map(p => p.id);
                 const allSelected = folderIds.length > 0 && folderIds.every(id => newTest.problemIds.includes(id));
                 const someSelected = folderIds.some(id => newTest.problemIds.includes(id));
                 const toggleFolderSelection = (e) => {
@@ -2240,7 +1833,13 @@ if (view === 'create-test' && user) {
                   if (allSelected) {
                     setNewTest({ ...newTest, problemIds: newTest.problemIds.filter(id => !folderIds.includes(id)) });
                   } else {
-                    setNewTest({ ...newTest, problemIds: [...new Set([...newTest.problemIds, ...folderIds])] });
+                    const nextIds = [...new Set([...newTest.problemIds, ...folderIds])];
+                    if (nextIds.length > 200) {
+                      setCreateTestError('Sprint tests can include at most 200 problems. Deselect some items or choose a smaller folder selection.');
+                      return;
+                    }
+                    setNewTest({ ...newTest, problemIds: nextIds });
+                    setCreateTestError('');
                   }
                 };
                 return (
@@ -2269,13 +1868,11 @@ if (view === 'create-test' && user) {
                     <div id={folderPanelId} hidden={!isExpanded} className="border-t border-gray-200 p-3 space-y-2">
                         {folderProbs.map(p => {
                     const metadata = getCatalogMetadata(p, DEMO_MODE);
-                    const requiredFormat = newTest.testType === 'target' ? 'Target' : 'Sprint';
-                    const formatCompatible = !DEMO_MODE || metadata.roundTypes.includes(requiredFormat);
                           return <label key={p.id} className="flex gap-3 text-sm items-center cursor-pointer hover:bg-gray-50 -mx-1 px-2 py-1.5 rounded">
                             <input
                               type="checkbox"
                               checked={newTest.problemIds.includes(p.id)}
-                              disabled={!formatCompatible}
+                              disabled={!newTest.problemIds.includes(p.id) && newTest.problemIds.length >= 200}
                               onChange={(e) =>
                                 setNewTest({
                                   ...newTest,
@@ -2288,12 +1885,8 @@ if (view === 'create-test' && user) {
                             />
                             <span className="flex-1 min-w-0 text-gray-700">
                               <span className="font-medium">{p.source || `Problem #${p.id}`}</span>
-                              {p.tag_names?.length > 0 && (
-                                <span className="text-gray-500 ml-1">[{p.tag_names.join(', ')}]</span>
-                              )}
-                              <span className="ml-2 text-gray-600">{metadata.difficulty} · {metadata.roundTypes.join(', ')}{metadata.yearLabel ? ` · ${metadata.yearLabel}` : ''}</span>
-                              <span className="text-[#2a61ba] font-medium ml-2">ELO {p.elo}</span>
-                              {!formatCompatible && <span className="ml-2 text-xs text-gray-500">Not available for {requiredFormat}</span>}
+                              <span className="ml-2 text-gray-600">Year {metadata.year || '—'} · Level {metadata.level || '—'} · Round {metadata.round || '—'}</span>
+                              <span className="text-[#2a61ba] font-medium ml-2">Elo {metadata.elo}</span>
                             </span>
                           </label>
                         })}
@@ -2311,7 +1904,7 @@ if (view === 'create-test' && user) {
           {createTestError && <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">{createTestError}</p>}
           <button
             type="submit"
-            disabled={newTest.problemIds.length !== (newTest.testType === 'target' ? 8 : 30) || !newTest.name.trim() || !newTest.dueDate || !Number.isInteger(Number(newTest.timeLimit)) || Number(newTest.timeLimit) < 1 || Number(newTest.timeLimit) > 240 || (newTest.showSourcePdf && !selectedPdfDocumentId)}
+            disabled={newTest.problemIds.length === 0 || (newTest.testType === 'target' && newTest.problemIds.length !== 8) || !newTest.name.trim() || !newTest.dueDate || !Number.isInteger(Number(newTest.timeLimit)) || Number(newTest.timeLimit) < 1 || Number(newTest.timeLimit) > 240}
             className="w-full bg-[#2a61ba] hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-50 text-white py-3 rounded-lg font-medium"
           >
             Create Test
@@ -2359,328 +1952,14 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
           </div>
         )}
 
-        <div className="mb-6 p-4 bg-white rounded-xl shadow">
-          <h3 className="font-semibold text-gray-800 mb-3">Folders</h3>
-          <div className="flex flex-wrap gap-2 mb-3">
-            {folders.map(f => (
-              <span key={f.id} className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-gray-100 text-sm">
-                {editingFolderId === f.id ? (
-                  <>
-                    <input
-                      type="text"
-                      value={editingFolderName}
-                      onChange={(e) => setEditingFolderName(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') updateFolder(f.id); if (e.key === 'Escape') { setEditingFolderId(null); setEditingFolderName(''); } }}
-                      className="w-32 px-1 py-0.5 border rounded text-sm"
-                      autoFocus
-                    />
-                    <button type="button" onClick={() => updateFolder(f.id)} className="text-[#2a61ba] hover:underline text-xs">✓</button>
-                    <button type="button" onClick={() => { setEditingFolderId(null); setEditingFolderName(''); }} className="text-gray-500 hover:underline text-xs">✗</button>
-                  </>
-                ) : (
-                  <>
-                    {f.name}
-                    <button type="button" onClick={() => { setEditingFolderId(f.id); setEditingFolderName(f.name); }} className="text-[#2a61ba] hover:underline text-xs">edit</button>
-                    <button type="button" onClick={() => deleteFolder(f.id)} className="text-red-600 hover:underline text-xs">×</button>
-                  </>
-                )}
-              </span>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={newFolderName}
-              onChange={(e) => setNewFolderName(e.target.value)}
-              placeholder="New folder name"
-              className="flex-1 px-3 py-2 border rounded-lg text-sm"
-            />
-            <button type="button" onClick={createFolder} className="px-4 py-2 bg-[#2a61ba] text-white rounded-lg text-sm">Add</button>
-          </div>
-        </div>
-
-        <div className="mb-6 p-4 bg-white rounded-xl shadow">
-          <h3 className="font-semibold text-gray-800 mb-3">Tags</h3>
-          <p className="text-sm text-gray-500 mb-2">Algebra, Arithmetic, Counting, Geometry, Number Theory, Probability (system tags — cannot be edited)</p>
-          <div className="flex flex-wrap gap-2">
-            {tags.map(t => (
-              <span key={t.id} className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-gray-100 text-sm">
-                {t.name}
-              </span>
-            ))}
-          </div>
-        </div>
-
-        <div className="mb-6 p-4 bg-white rounded-xl shadow">
-          <h3 className="font-semibold text-gray-800 mb-3">Import from PDF</h3>
-          {isTeacherAdmin && (
-            <p className="text-sm text-amber-700 bg-amber-50 px-3 py-2 rounded mb-3">
-              Problems you import are for your team only. Public problems (from Admin) are available to all teachers.
-            </p>
-          )}
-          <p className="text-sm text-gray-600 mb-3">
-            Import only material you are authorized to store, process, and share with your students. Every extracted question and answer will be reviewed before it is saved. Pages containing embedded images require platform-admin approval for that exact PDF before processing, even when the rest of the file contains searchable text.
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-            <div>
-              <label htmlFor="pdf-source-title" className="mb-1 block text-xs font-medium text-gray-600">Source or publication title</label>
-              <input id="pdf-source-title" maxLength={200} value={pdfImportSourceTitle} onChange={event => setPdfImportSourceTitle(event.target.value)} placeholder="Publication or material name" className="w-full rounded-lg border px-3 py-2 text-sm" />
-            </div>
-            <div>
-              <label htmlFor="pdf-source-url" className="mb-1 block text-xs font-medium text-gray-600">Source link (optional)</label>
-              <input id="pdf-source-url" type="url" maxLength={1000} value={pdfImportSourceUrl} onChange={event => setPdfImportSourceUrl(event.target.value)} placeholder="https://…" className="w-full rounded-lg border px-3 py-2 text-sm" />
-            </div>
-            <div className="sm:col-span-2">
-              <label htmlFor="pdf-license-basis" className="mb-1 block text-xs font-medium text-gray-600">License or permission basis</label>
-              <select id="pdf-license-basis" value={pdfImportLicenseBasis} onChange={event => setPdfImportLicenseBasis(event.target.value)} className="w-full rounded-lg border bg-white px-3 py-2 text-sm">
-                <option value="">Select the applicable basis</option>
-                <option value="teacher_created">I created this material</option>
-                <option value="open_license">The material has a license that permits this use</option>
-                <option value="written_permission">I have written permission</option>
-              </select>
-            </div>
-            {pdfImportLicenseBasis === 'open_license' && (
-              <div className="sm:col-span-2">
-                <label htmlFor="pdf-license-name" className="mb-1 block text-xs font-medium text-gray-600">Open license name</label>
-                <input id="pdf-license-name" maxLength={200} value={pdfImportLicenseName} onChange={event => setPdfImportLicenseName(event.target.value)} placeholder="For example, Creative Commons license and version" className="w-full rounded-lg border px-3 py-2 text-sm" />
-              </div>
-            )}
-            {pdfImportLicenseBasis === 'written_permission' && (
-              <div className="sm:col-span-2">
-                <label htmlFor="pdf-permission-reference" className="mb-1 block text-xs font-medium text-gray-600">Permission reference</label>
-                <input id="pdf-permission-reference" maxLength={500} value={pdfImportPermissionReference} onChange={event => setPdfImportPermissionReference(event.target.value)} placeholder="Permission record, contact, or date" className="w-full rounded-lg border px-3 py-2 text-sm" />
-              </div>
-            )}
-          </div>
-          <label className="mb-3 flex items-start gap-2 text-sm cursor-pointer">
-            <input type="checkbox" checked={pdfImportRightsConfirmed} onChange={event => setPdfImportRightsConfirmed(event.target.checked)} className="mt-1" />
-            <span>I have permission to upload and store this material, create individual question records from it, and show the approved question pages to my students.</span>
-          </label>
-          <label className="mb-3 flex items-start gap-2 text-sm cursor-pointer">
-            <input type="checkbox" checked={pdfImportStudentPagesConfirmed} onChange={event => setPdfImportStudentPagesConfirmed(event.target.checked)} className="mt-1" />
-            <span>I have checked the question pages: they contain no answer key or solutions. Only pages with approved questions will be included in the student PDF.</span>
-          </label>
-          <label className="mb-3 flex items-start gap-2 text-sm cursor-pointer">
-            <input type="checkbox" checked={pdfImportUseAI} onChange={event => {
-              setPdfImportUseAI(event.target.checked);
-              if (!event.target.checked) {
-                setPdfImportGeminiConsent(false);
-                setPdfImportAiRightsConfirmed(false);
-                setPdfImportUseImageMode(false);
-              }
-            }} className="mt-1" />
-            <span>Use Gemini to extract and format questions. The PDF and answer key will be sent to Google for processing; this requires source permission and server AI configuration.</span>
-          </label>
-          {pdfImportUseAI && (
-            <div className="mb-3 space-y-2 text-sm text-gray-700">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input type="checkbox" checked={pdfImportGeminiConsent} onChange={event => setPdfImportGeminiConsent(event.target.checked)} className="mt-1" />
-                <span>I consent to Gemini processing this PDF and answer key for this import.</span>
-              </label>
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input type="checkbox" checked={pdfImportAiRightsConfirmed} onChange={event => setPdfImportAiRightsConfirmed(event.target.checked)} className="mt-1" />
-                <span>The source license or permission allows sharing this material with Google for processing.</span>
-              </label>
-            </div>
-          )}
-          <label className={`flex items-center gap-2 mb-3 text-sm cursor-pointer ${!pdfImportUseAI ? 'opacity-60' : ''}`}>
-            <input
-              type="checkbox"
-              checked={pdfImportUseImageMode}
-              onChange={(e) => setPdfImportUseImageMode(e.target.checked)}
-              disabled={!pdfImportUseAI}
-            />
-            Review problem crops from the PDF (preserves exact diagrams and layout)
-          </label>
-          <label className={`flex items-center gap-2 mb-3 text-sm cursor-pointer ${pdfImportUseImageMode || !pdfImportUseAI ? 'opacity-60' : ''}`}>
-            <input
-              type="checkbox"
-              checked={pdfImportRunVerification}
-              onChange={(e) => setPdfImportRunVerification(e.target.checked)}
-              disabled={pdfImportUseImageMode || !pdfImportUseAI}
-            />
-            Run a second AI pass to check transcription
-            {pdfImportUseImageMode && <span className="text-gray-500">— skipped in image mode</span>}
-          </label>
-          <div className="flex flex-wrap gap-3 items-end mb-3">
-            <div className="flex-1 min-w-[200px]">
-              <label className="block text-xs text-gray-500 mb-1">PDF file</label>
-              <input
-                id="pdf-import-input"
-                type="file"
-                accept="application/pdf"
-                onChange={(e) => setPdfImportFile(e.target.files?.[0] || null)}
-                className="w-full text-sm text-gray-600"
-              />
-            </div>
-            <button
-              type="button"
-              onClick={handlePdfImport}
-              disabled={pdfImportLoading || !pdfImportFile}
-              className="px-4 py-2 bg-[#2a61ba] text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {pdfImportLoading ? 'Importing…' : 'Import'}
-            </button>
-          </div>
-          <div className="mb-2">
-            <label className="block text-xs text-gray-500 mb-1">Answer key (required — one per line). Use quotes for strings/ordered pairs: 1. 42, 2. 3/4, 3. &quot;Saturday&quot;, 4. &quot;(-1,-3)&quot;</label>
-            <textarea
-              value={pdfImportAnswerKey}
-              onChange={(e) => setPdfImportAnswerKey(e.target.value)}
-              placeholder={'1. 101\n2. 90000\n3. 18'}
-              className="w-full px-3 py-2 border rounded-lg text-sm font-mono min-h-[60px]"
-              rows={3}
-            />
-          </div>
-          {pdfImportResult && (
-            <div className={`mt-3 p-3 rounded-lg text-sm ${pdfImportResult.error ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-800'}`}>
-              {pdfImportResult.error ? (
-                pdfImportResult.error
-              ) : (
-                <>
-                  Imported {pdfImportResult.imported} problems into folder &quot;{pdfImportResult.folderName}&quot;.
-                  {pdfImportResult.sourceDocumentId && <span className="block mt-1">A private, question-pages-only PDF is ready. Select these problems when creating a test and turn on the shared PDF viewer.</span>}
-                  {pdfImportResult.errors?.length > 0 && (
-                    <div className="mt-2 text-amber-700">
-                      {pdfImportResult.errors.length} problem(s) failed: {pdfImportResult.errors.slice(0, 3).join('; ')}
-                      {pdfImportResult.errors.length > 3 && ` …`}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-          {pdfImportReview && (
-            <AccessibleDialog ariaLabel={pdfImportReview.awaitingStudentPdfApproval ? 'Review student PDF' : `Review problem ${pdfImportReview.problemNumber}`} panelClassName="max-w-3xl p-6" closeOnBackdrop={false} closeOnEscape={false}>
-              {pdfImportReview.awaitingStudentPdfApproval ? (
-                <>
-                  <h4 className="mb-2 text-lg font-bold">Review the student PDF</h4>
-                  <p className="mb-2 text-sm text-gray-600">This is the exact question-pages-only PDF students will see. Check every page for answer keys or solutions before saving the import.</p>
-                  {pdfImportReview.studentPageCount && <p className="mb-3 text-xs font-medium text-gray-600">{pdfImportReview.studentPageCount} student PDF page(s) · {pdfImportReview.reviewedQuestionCount} reviewed question(s)</p>}
-                  {pdfImportPreviewUrl ? (
-                    <iframe src={`${pdfImportPreviewUrl}#page=1&zoom=100`} title="Final student-safe PDF preview" className="mb-4 h-[65vh] min-h-[24rem] w-full rounded-lg border border-gray-300 bg-white" />
-                  ) : pdfImportPreviewError ? (
-                    <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800" role="alert">
-                      <p>{pdfImportPreviewError}</p>
-                      <button type="button" onClick={retryPdfImportPreview} disabled={pdfImportLoading} className="mt-3 rounded-lg border border-red-300 bg-white px-3 py-2 font-semibold disabled:opacity-50">{pdfImportLoading ? 'Loading…' : 'Retry preview'}</button>
-                    </div>
-                  ) : (
-                    <div className="mb-4 flex h-64 items-center justify-center rounded-lg border bg-gray-50 text-sm text-gray-600" role="status">Loading the student PDF preview…</div>
-                  )}
-                  <label className="mb-4 flex items-start gap-2 text-sm text-gray-700">
-                    <input type="checkbox" checked={pdfImportFinalPdfReviewed} onChange={event => setPdfImportFinalPdfReviewed(event.target.checked)} className="mt-1" />
-                    <span>I reviewed the exact student PDF and confirmed it contains no answer key or solutions.</span>
-                  </label>
-                  <div className="flex flex-wrap gap-3">
-                    <button type="button" onClick={() => handlePdfImportFinalApproval(true)} disabled={pdfImportLoading || !pdfImportPreviewUrl || !pdfImportFinalPdfReviewed} className="rounded-lg bg-green-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
-                      {pdfImportLoading ? 'Saving…' : 'Approve PDF and save questions'}
-                    </button>
-                    <button type="button" onClick={() => handlePdfImportFinalApproval(false)} disabled={pdfImportLoading} className="rounded-lg border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-50">
-                      Discard this import
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <>
-                <h4 className="text-lg font-bold mb-2">
-                  Problem {pdfImportReview.problemNumber} of {pdfImportReview.total}
-                </h4>
-                <p className="text-sm text-gray-600 mb-4">
-                  Check the question, page, and answer. Fix any extraction errors before approving this problem.
-                </p>
-                {pdfImportReview.sourcePage && <p className="mb-2 text-xs font-medium text-gray-600">Source PDF page {pdfImportReview.sourcePage}</p>}
-                {pdfImportReview.pageChanged && <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">Page updated. Review the new preview before approving this question.</p>}
-                <label className="mb-3 block text-sm font-medium text-gray-700">
-                  Question page in the PDF
-                  <input
-                    type="number"
-                    min="1"
-                    max="60"
-                    step="1"
-                    value={pdfImportReview.sourcePage || ''}
-                    onChange={event => setPdfImportReview(previous => ({ ...previous, sourcePage: event.target.value === '' ? '' : Number(event.target.value) }))}
-                    className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-normal"
-                    aria-label="Source PDF page for this problem"
-                  />
-                </label>
-                {pdfImportReview.screenshot ? (
-                  <img
-                    key={`${pdfImportReview.problemIndex}-${pdfImportReview.reviewVersion ?? 0}`}
-                    src={pdfImportReview.screenshot}
-                    alt={`Source PDF crop for problem ${pdfImportReview.problemNumber}`}
-                    className="w-full border rounded-lg mb-4 max-h-[50vh] object-contain bg-gray-50"
-                  />
-                ) : pdfImportReview.sourcePage ? (
-                  <div className="w-full h-48 border rounded-lg mb-4 bg-gray-100 flex items-center justify-center text-gray-500">
-                    Review the source PDF page and the extracted question below.
-                  </div>
-                ) : null}
-                <label className="mb-3 block text-sm font-medium text-gray-700">
-                  Extracted question
-                  <textarea
-                    value={pdfImportReview.question || ''}
-                    onChange={event => setPdfImportReview(previous => ({ ...previous, question: event.target.value }))}
-                    rows={4}
-                    className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-normal"
-                    aria-label="Edit extracted question"
-                  />
-                </label>
-                <label className="mb-4 block text-sm font-medium text-gray-700">
-                  Answer key for this problem
-                  <input
-                    type="text"
-                    value={pdfImportReview.answer || ''}
-                    onChange={event => setPdfImportReview(previous => ({ ...previous, answer: event.target.value }))}
-                    className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-normal"
-                    aria-label="Edit answer key for this problem"
-                    autoComplete="off"
-                  />
-                </label>
-                <div className="flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={() => handlePdfImportConfirm(true)}
-                    disabled={pdfImportLoading || !pdfImportReview.question?.trim() || !pdfImportReview.answer?.trim() || !Number.isInteger(Number(pdfImportReview.sourcePage)) || Number(pdfImportReview.sourcePage) < 1 || Number(pdfImportReview.sourcePage) > 60}
-                    className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
-                  >
-                    {pdfImportLoading ? 'Saving…' : 'Approve question and answer'}
-                  </button>
-                  {pdfImportUseAI && pdfImportUseImageMode && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => handlePdfImportConfirm(false, 'up')}
-                        disabled={pdfImportLoading || !pdfImportReview.screenshot}
-                        className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
-                        title="Region should move up (include more from above)"
-                      >
-                        {pdfImportLoading ? '…' : 'No — move up'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handlePdfImportConfirm(false, 'down')}
-                        disabled={pdfImportLoading || !pdfImportReview.screenshot}
-                        className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
-                        title="Region should move down (include more from below)"
-                      >
-                        {pdfImportLoading ? '…' : 'No — move down'}
-                      </button>
-                    </>
-                  )}
-                </div>
-                </>
-              )}
-            </AccessibleDialog>
-          )}
-        </div>
-
-        <button
-          onClick={() => setEditingProblem({ question: '', answer: '', topic: '', image_url: '', source: '', folder_id: null, tag_ids: [] })}
-          className="mb-6 bg-[#2a61ba] text-white px-6 py-3 rounded-lg"
-        >
-          Add Problem
-        </button>
+        {!isTeacherAdmin && (
+          <button
+            onClick={() => setEditingProblem({ question: '', answer: '', image_url: '', source: '', year: '', level: '', round: '', folder_id: null })}
+            className="mb-6 bg-[#2a61ba] text-white px-6 py-3 rounded-lg"
+          >
+            Add Problem
+          </button>
+        )}
 
         {editingProblem && (
           <AccessibleDialog ariaLabel={editingProblem.id ? 'Edit problem' : 'Add problem'} onClose={() => setEditingProblem(null)} panelClassName="max-w-lg p-6">
@@ -2717,7 +1996,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                         Remove
                       </button>
                     </div>
-                  ) : (
+                  ) : user.role === 'admin' ? (
                     <input
                       type="file"
                       accept="image/jpeg,image/png,image/gif,image/webp"
@@ -2738,6 +2017,8 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                       }}
                       className="w-full text-sm text-gray-600"
                     />
+                  ) : (
+                    <p className="text-sm text-gray-500">Only administrators can add problem images.</p>
                   )}
                 </div>
                 <div>
@@ -2752,43 +2033,16 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     placeholder="e.g. 42, 3/4, √2, √2/2, 2√3"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Folder</label>
-                  <select
-                    value={editingProblem.folder_id ?? ''}
-                    onChange={(e) =>
-                      setEditingProblem({ ...editingProblem, folder_id: e.target.value ? Number(e.target.value) : null })
-                    }
-                    className="w-full px-4 py-2 border rounded-lg"
-                  >
-                    <option value="">Uncategorized</option>
-                    {folders.map(f => (
-                      <option key={f.id} value={f.id}>{f.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tags</label>
-                  <div className="flex flex-wrap gap-2 mb-2">
-                    {tags.map(t => (
-                      <label key={t.id} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 bg-gray-50 text-sm cursor-pointer hover:bg-gray-100">
-                        <input
-                          type="checkbox"
-                          checked={(editingProblem.tag_ids ?? []).includes(t.id)}
-                          onChange={(e) => {
-                            const ids = editingProblem.tag_ids ?? [];
-                            setEditingProblem({
-                              ...editingProblem,
-                              tag_ids: e.target.checked
-                                ? [...ids, t.id]
-                                : ids.filter(id => id !== t.id)
-                            });
-                          }}
-                        />
-                        {t.name}
-                      </label>
-                    ))}
-                  </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <label className="block text-sm font-medium text-gray-700">Year
+                    <input type="number" min="1900" max="2100" value={editingProblem.year ?? ''} onChange={e => setEditingProblem({ ...editingProblem, year: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="2022" />
+                  </label>
+                  <label className="block text-sm font-medium text-gray-700">Level
+                    <input type="text" maxLength="50" value={editingProblem.level ?? ''} onChange={e => setEditingProblem({ ...editingProblem, level: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="Nationals" />
+                  </label>
+                  <label className="block text-sm font-medium text-gray-700">Round
+                    <input type="text" maxLength="50" value={editingProblem.round ?? ''} onChange={e => setEditingProblem({ ...editingProblem, round: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="Sprint" />
+                  </label>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Source (optional)</label>
@@ -2849,25 +2103,6 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
           <div className="mt-4 bg-[#2a61ba]/10 border border-[#2a61ba]/30 rounded-xl p-4 mb-4 flex flex-wrap items-center gap-3">
             <span className="font-medium text-gray-800">{selectedProblemIds.length} selected</span>
             {hiddenSelectedCount > 0 && <span role="status" className="text-sm text-gray-700">{hiddenSelectedCount} selected problem{hiddenSelectedCount === 1 ? ' is' : 's are'} hidden by this search; bulk actions still include {hiddenSelectedCount} hidden item{hiddenSelectedCount === 1 ? '' : 's'}.</span>}
-            <select
-              value={bulkMoveFolderId}
-              onChange={(e) => setBulkMoveFolderId(e.target.value)}
-              className="px-3 py-1.5 border rounded-lg text-sm"
-            >
-              <option value="">Move to folder…</option>
-              <option value="uncategorized">Uncategorized</option>
-              {folders.map(f => (
-                <option key={f.id} value={f.id}>{f.name}</option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={bulkMoveProblems}
-              disabled={!bulkMoveFolderId}
-              className="px-3 py-1.5 bg-[#2a61ba] text-white rounded-lg text-sm hover:bg-[#20529f] disabled:opacity-50"
-            >
-              Move
-            </button>
             <button
               type="button"
               onClick={bulkDeleteProblems}
@@ -2887,150 +2122,71 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
 
         <div className="space-y-4">
           {(() => {
-            const UNCategorized = 'uncategorized';
-            const byFolder = {};
-            for (const f of folders) {
-              byFolder[f.id] = { name: f.name, problems: [] };
+            const byGroup = new Map();
+            for (const problem of visibleCatalogProblems) {
+              const metadata = getCatalogMetadata(problem, DEMO_MODE);
+              if (!byGroup.has(metadata.group)) byGroup.set(metadata.group, []);
+              byGroup.get(metadata.group).push(problem);
             }
-            byFolder[UNCategorized] = { name: 'Uncategorized', problems: [] };
-            for (const p of visibleCatalogProblems) {
-              const fid = p.folder_id ?? UNCategorized;
-              if (!byFolder[fid]) byFolder[fid] = { name: p.folder_name || 'Uncategorized', problems: [] };
-              byFolder[fid].problems.push(p);
-            }
-            const folderIds = [...folders].sort((a, b) => a.name.localeCompare(b.name)).map(f => f.id);
-            const orderedFolders = [
-              ...folderIds,
-              ...(byFolder[UNCategorized]?.problems?.length ? [UNCategorized] : [])
-            ].filter(id => !hasCatalogFilters || byFolder[id]?.problems?.length > 0);
-            if (orderedFolders.length === 0 && hasCatalogFilters) {
+            const groups = [...byGroup.entries()].sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+            if (groups.length === 0 && hasCatalogFilters) {
               return <div role="status" className="rounded-xl border border-gray-200 bg-white p-8 text-center text-gray-600">No problems match these catalog filters.</div>;
             }
-            if (orderedFolders.length === 0 && problems.length === 0) {
-              return (
-                <div className="bg-white rounded-xl shadow p-8 text-center text-gray-500">
-                  No folders or problems yet. Add a folder above or import from PDF.
-                </div>
-              );
+            if (groups.length === 0 && problems.length === 0) {
+              return <div className="bg-white rounded-xl shadow p-8 text-center text-gray-500">No problems are available in the bank yet.</div>;
             }
-            return orderedFolders.map(fid => {
-              const { name, problems: folderProbs } = byFolder[fid] || { name: 'Uncategorized', problems: [] };
-              const expandKey = fid === UNCategorized ? -1 : fid;
-              const folderPanelId = `problem-folder-panel-${expandKey}`;
-              const isExpanded = hasCatalogFilters ? folderProbs.length > 0 : adminExpandedFolders.has(expandKey);
-              const toggle = () => setAdminExpandedFolders(prev => {
-                const next = new Set(prev);
-                if (next.has(expandKey)) next.delete(expandKey);
-                else next.add(expandKey);
+            return groups.map(([name, groupProblems], groupIndex) => {
+              const groupKey = `${name}-${groupIndex}`;
+              const panelId = `problem-group-panel-${groupIndex}`;
+              const expanded = hasCatalogFilters || adminExpandedFolders.has(groupKey);
+              const toggle = () => setAdminExpandedFolders(previous => {
+                const next = new Set(previous);
+                if (next.has(groupKey)) next.delete(groupKey);
+                else next.add(groupKey);
                 return next;
               });
               return (
-                <div key={fid} className="bg-white rounded-xl shadow overflow-hidden">
-                  <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
-                    <button
-                      type="button"
-                      onClick={toggle}
-                      disabled={hasCatalogFilters}
-                      aria-expanded={isExpanded}
-                      aria-controls={folderPanelId}
-                      className="flex items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#2a61ba] disabled:cursor-default disabled:hover:text-gray-800"
-                    >
-                      <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
+                <section key={groupKey} className="bg-white rounded-xl shadow overflow-hidden">
+                  <div className="flex items-center px-4 py-3 bg-gray-50 border-b border-gray-200">
+                    <button type="button" onClick={toggle} aria-expanded={expanded} aria-controls={panelId} className="flex w-full items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#2a61ba]">
+                      <span className="text-gray-400" aria-hidden="true">{expanded ? '▼' : '▶'}</span>
                       <span>{name}</span>
-                      <span className="text-sm font-normal text-gray-500">({folderProbs.length} problems)</span>
+                      <span className="text-sm font-normal text-gray-500">({groupProblems.length} problems)</span>
                     </button>
-                    {fid !== UNCategorized && (
-                      <button
-                        type="button"
-                        onClick={() => deleteFolder(fid)}
-                        className="text-red-600 hover:underline text-sm font-medium"
-                      >
-                        Delete folder
-                      </button>
-                    )}
                   </div>
-                  <div id={folderPanelId} hidden={!isExpanded} className="overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead className="bg-gray-50 text-left">
-                          <tr>
-                            <th className="px-4 py-3 w-10">
-                              <input
-                                type="checkbox"
-                                checked={folderProbs.length > 0 && folderProbs.every(p => selectedProblemIds.includes(p.id))}
-                                ref={el => {
-                                  if (el) {
-                                    const some = folderProbs.some(p => selectedProblemIds.includes(p.id));
-                                    el.indeterminate = some && !folderProbs.every(p => selectedProblemIds.includes(p.id));
-                                  }
-                                }}
-                                onChange={(e) => {
-                                  const ids = folderProbs.map(p => p.id);
-                                  setSelectedProblemIds(prev =>
-                                    e.target.checked ? [...new Set([...prev, ...ids])] : prev.filter(id => !ids.includes(id))
-                                  );
-                                }}
-                                className="rounded"
-                                onClick={ev => ev.stopPropagation()}
-                              />
-                            </th>
-                            <th className="px-4 py-3">Question</th>
-                            <th className="px-4 py-3">Answer</th>
-                            <th className="px-4 py-3">Tags</th>
-                            <th className="px-4 py-3">Source</th>
-                            <th className="px-4 py-3">ELO</th>
-                            <th className="px-4 py-3">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {folderProbs.map(p => (
-                            <tr key={p.id} className="border-t">
-                              <td className="px-4 py-3">
-                                <input
-                                  type="checkbox"
-                                  checked={selectedProblemIds.includes(p.id)}
-                                  onChange={(e) =>
-                                    setSelectedProblemIds(prev =>
-                                      e.target.checked ? [...prev, p.id] : prev.filter(id => id !== p.id)
-                                    )
-                                  }
-                                  className="rounded"
-                                  onClick={ev => ev.stopPropagation()}
-                                />
-                              </td>
-                              <td className="px-4 py-3 max-w-md">
-                                <div>
-                                  <LatexRenderer text={p.question} />
-                                  {p.image_url && (
-                                    <ProblemImage url={p.image_url} token={token} />
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">{p.answer}</td>
-                              <td className="px-4 py-3">{p.tag_names?.length ? p.tag_names.join(', ') : '—'}</td>
-                              <td className="px-4 py-3">{p.source ?? '—'}</td>
-                              <td className="px-4 py-3">{p.elo}</td>
-                              <td className="px-4 py-3 space-x-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingProblem({ ...p, image_url: p.image_url ?? '', source: p.source ?? '', folder_id: p.folder_id ?? null, tag_ids: p.tag_ids ?? [] })}
-                                  className="text-[#2a61ba] hover:underline font-medium"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setProblemToDelete(p.id)}
-                                  className="text-red-600 hover:underline font-medium"
-                                >
-                                  Delete
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                  <div id={panelId} hidden={!expanded} className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 text-left"><tr>
+                        <th className="px-4 py-3 w-10"><span className="sr-only">Select</span></th>
+                        <th className="px-4 py-3">Question</th>
+                        <th className="px-4 py-3">Answer</th>
+                        <th className="px-4 py-3">Source</th>
+                        <th className="px-4 py-3">Year</th>
+                        <th className="px-4 py-3">Level</th>
+                        <th className="px-4 py-3">Round</th>
+                        <th className="px-4 py-3">Elo</th>
+                        <th className="px-4 py-3">Actions</th>
+                      </tr></thead>
+                      <tbody>{groupProblems.map(problem => {
+                        const metadata = getCatalogMetadata(problem, DEMO_MODE);
+                        return <tr key={problem.id} className="border-t">
+                          <td className="px-4 py-3"><input type="checkbox" checked={selectedProblemIds.includes(problem.id)} onChange={event => setSelectedProblemIds(previous => event.target.checked ? [...new Set([...previous, problem.id])] : previous.filter(id => id !== problem.id))} aria-label={`Select problem ${problem.id}`} className="rounded" /></td>
+                          <td className="px-4 py-3 max-w-md"><LatexRenderer text={problem.question} />{problem.image_url && <ProblemImage url={problem.image_url} token={token} />}</td>
+                          <td className="px-4 py-3">{problem.answer}</td>
+                          <td className="px-4 py-3">{problem.source ?? '—'}</td>
+                          <td className="px-4 py-3">{metadata.year || '—'}</td>
+                          <td className="px-4 py-3">{metadata.level || '—'}</td>
+                          <td className="px-4 py-3">{metadata.round || '—'}</td>
+                          <td className="px-4 py-3">{metadata.elo}</td>
+                          <td className="px-4 py-3 space-x-2">
+                            <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>
+                            <button type="button" onClick={() => setProblemToDelete(problem.id)} className="text-red-600 hover:underline font-medium">Delete</button>
+                          </td>
+                        </tr>;
+                      })}</tbody>
+                    </table>
                   </div>
-                </div>
+                </section>
               );
             });
           })()}
