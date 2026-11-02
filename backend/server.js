@@ -1181,6 +1181,9 @@ async function validateProblemFolder(client, user, rawFolderId) {
 
 // Get all available problems with their folder and source metadata
 app.get('/api/problems', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Problem bank access is limited to teachers and administrators.' });
+  }
   if (DEMO_MODE && req.user.role !== 'teacher') {
     return res.status(403).json({ error: 'Catalog access is limited to the demo teacher account.' });
   }
@@ -1199,11 +1202,13 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
   }
 });
 
-// Upload image (admin + teacher)
-app.post('/api/upload', authenticateToken, requireContentManager, upload.single('image'), async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
-    return res.status(403).json({ error: 'Access denied' });
+// Only administrators can add images to the shared problem bank.
+app.post('/api/upload', authenticateToken, (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Administrator access required to upload problem images' });
   }
+  next();
+}, requireContentManager, upload.single('image'), async (req, res) => {
   if (!req.file || !req.file.buffer) {
     return res.status(400).json({ error: 'No image file provided' });
   }
@@ -1213,7 +1218,7 @@ app.post('/api/upload', authenticateToken, requireContentManager, upload.single(
   const dataBase64 = req.file.buffer.toString('base64');
   const contentType = req.file.mimetype || 'image/png';
   const filename = req.file.originalname || `problem-${Date.now()}.png`;
-  const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  const createdBy = null;
   let client;
   try {
     await cleanupStaleUnreferencedUploads(pool);
@@ -1287,10 +1292,10 @@ app.get('/api/uploads/:filename', authenticateToken, (req, res) => {
   res.sendFile(filepath);
 });
 
-// Create problem (admin + teacher)
+// Only administrators can add problems to the shared problem bank.
 app.post('/api/problems', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
-    return res.status(403).json({ error: 'Access denied' });
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Administrator access required to add problems' });
   }
   const { question, answer, image_url: imageUrl, source, folder_id: folderId } = req.body;
   if (!question || typeof question !== 'string' || !question.trim()) {
@@ -1301,7 +1306,7 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'A valid answer is required (e.g. 42, 3/4, √2, or "Saturday", "(-1,-3)" for strings/ordered pairs)' });
   }
   const answerStored = typeof answer === 'string' && answer.trim() ? answer.trim() : (typeof answerVal === 'number' ? String(answerVal) : answerVal);
-  const createdBy = req.user.role === 'admin' ? null : req.user.id;
+  const createdBy = null;
   const sourceStr = typeof source === 'string' ? source.trim() || null : null;
   let problem;
   let client;
@@ -1774,8 +1779,9 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
     }
     if (problemIds.length === 0) return res.json([]);
     const visibility = req.user.role === 'admin' ? '' : ' AND (p.created_by IS NULL OR p.created_by = $3)';
+    const sourceColumn = req.user.role === 'student' ? '' : ', p.source';
     const result = await pool.query(
-      `SELECT p.id, p.question, p.image_url, p.source, p.folder_id,
+      `SELECT p.id, p.question, p.image_url${sourceColumn}, p.folder_id,
               f.name AS folder_name
        FROM problems p LEFT JOIN folders f ON p.folder_id = f.id
        WHERE p.id = ANY($1)${visibility}`,

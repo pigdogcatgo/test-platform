@@ -647,6 +647,56 @@ export async function seedDatabase() {
       return;
     }
 
+    // Rights attestation and source references are recorded in
+    // backend/PROBLEM_CONTENT_RIGHTS.md. Keep these samples out of the isolated demo DB.
+    const licensedNationalSprintSamples = [
+      {
+        number: 1,
+        question: 'No matter where Sasha is in the country, the pre-tax price of a cup of coffee at a particular coffee retailer is always $4.00. However, sales tax varies by region. In Atlanta there is a 7.5% sales tax, while in Chicago there is a 10.25% sales tax. How many cents more does Sasha pay when she buys the coffee in Chicago than when she buys it in Atlanta?',
+        answer: '11',
+      },
+      {
+        number: 2,
+        question: 'Hans is staying at a hotel that has five floors, numbered 1 through 5, and 10 rooms per floor, numbered 1 through 10. Hans forgets where his room is, but knows that it is on an even numbered floor and the room number is divisible by 4. If Hans randomly chooses a room he knows might be his room, what is the probability that Hans chooses the correct room? Express your answer as a common fraction.',
+        answer: '1/4',
+      },
+      {
+        number: 3,
+        question: 'If an inchworm travels 1 inch every 2 seconds, how many feet will it travel in 1 hour?',
+        answer: '150',
+      },
+      {
+        number: 4,
+        question: 'If the five-digit number 46A81 is divisible by 9, what digit does A represent?',
+        answer: '8',
+      },
+      {
+        number: 5,
+        question: 'Leonardo has a cylindrical box of height 10 cm and radius 15 cm. He paints the top and bottom circular faces of his box green, and the lateral surface red. What is the ratio of green-painted area to red-painted area on his box?',
+        answer: '3/2',
+      },
+    ];
+    await client.query('BEGIN');
+    try {
+      // Serialize this idempotent seed across service instances during deploys.
+      await client.query('SELECT pg_advisory_xact_lock(20221105)');
+      for (const sample of licensedNationalSprintSamples) {
+        const source = `2022 MATHCOUNTS National Competition, Sprint Round, Problem ${sample.number}`;
+        await client.query(
+          `INSERT INTO problems (question, answer, topic, source, created_by)
+           SELECT $1, $2, '', $3, NULL
+           WHERE NOT EXISTS (
+             SELECT 1 FROM problems WHERE source = $3
+           )`,
+          [sample.question, sample.answer, source]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+
     // Never create the historical demo accounts in production. A fresh
     // production database can receive one explicitly configured administrator.
     const userCheck = await client.query('SELECT COUNT(*) FROM users');

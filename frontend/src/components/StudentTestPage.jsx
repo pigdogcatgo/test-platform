@@ -176,7 +176,6 @@ export default function StudentTestPage({
                 <div className="mb-4">
                   <div className="question-index"><span aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><p>Question {index + 1} of {testProblems.length}</p></div>
                   {pdfBacked && <h2 id={`question-heading-${problem.id}`} className="sr-only">Question {index + 1}</h2>}
-                  {!pdfBacked && problem.source && <p className="text-xs text-gray-500 mt-0.5">Source: {problem.source}</p>}
                   {!pdfBacked && <h2 id={`question-heading-${problem.id}`} className="text-base font-semibold text-gray-800 mt-1"><LatexRenderer text={problem.question} /></h2>}
                   {!pdfBacked && problem.image_url && <ProblemImage url={problem.image_url} token={token} />}
                   {pdfBacked && Number(problem.pdfPage ?? problem.source_page ?? problem.sourcePage) > 0 && <p className="text-xs text-gray-500 mt-1">Source PDF page {problem.pdfPage ?? problem.source_page ?? problem.sourcePage}</p>}

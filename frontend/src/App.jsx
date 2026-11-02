@@ -2067,12 +2067,14 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
         </div>
 
 
-        <button
-          onClick={() => setEditingProblem({ question: '', answer: '', image_url: '', source: '', folder_id: null })}
-          className="mb-6 bg-[#2a61ba] text-white px-6 py-3 rounded-lg"
-        >
-          Add Problem
-        </button>
+        {!isTeacherAdmin && (
+          <button
+            onClick={() => setEditingProblem({ question: '', answer: '', image_url: '', source: '', folder_id: null })}
+            className="mb-6 bg-[#2a61ba] text-white px-6 py-3 rounded-lg"
+          >
+            Add Problem
+          </button>
+        )}
 
         {editingProblem && (
           <AccessibleDialog ariaLabel={editingProblem.id ? 'Edit problem' : 'Add problem'} onClose={() => setEditingProblem(null)} panelClassName="max-w-lg p-6">
@@ -2109,7 +2111,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                         Remove
                       </button>
                     </div>
-                  ) : (
+                  ) : user.role === 'admin' ? (
                     <input
                       type="file"
                       accept="image/jpeg,image/png,image/gif,image/webp"
@@ -2130,6 +2132,8 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                       }}
                       className="w-full text-sm text-gray-600"
                     />
+                  ) : (
+                    <p className="text-sm text-gray-500">Only administrators can add problem images.</p>
                   )}
                 </div>
                 <div>
