@@ -32,6 +32,7 @@ export default function StudentTestPage({
   });
   const [mobilePanel, setMobilePanel] = useState('answers');
   const pdfBacked = Boolean(pdfUrl);
+  const questionCount = testProblems.length;
   const activeProblem = useMemo(
     () => testProblems.find(problem => String(problem.id) === String(activeProblemId)) || testProblems[0],
     [testProblems, activeProblemId]
@@ -66,7 +67,7 @@ export default function StudentTestPage({
             <div className="flex-1 min-w-0">
               <h1 className="text-base sm:text-xl font-semibold text-gray-800 break-words">{activeTest.name}</h1>
               <p className="mt-1 text-xs text-gray-600">
-                {demoMode ? 'Demo scoring · ' : ''}{activeTest.test_type === 'target' ? 'Target · 8 questions · 2 points per correct answer' : 'Sprint · 30 questions · 1 point per correct answer'}
+                {demoMode ? 'Demo scoring · ' : ''}{activeTest.test_type === 'target' ? `Target · ${questionCount} questions · 2 points per correct answer` : `Sprint · ${questionCount} questions · 1 point per correct answer`}
               </p>
             </div>
             <div className="flex justify-end shrink-0">

@@ -23,19 +23,18 @@ export default function PrototypeInsights({ api, onBack }) {
     return () => { active = false; };
   }, [api, retryCount]);
 
-  const topics = useMemo(() => Array.isArray(data?.topics) ? data.topics : [], [data]);
   const problems = useMemo(() => Array.isArray(data?.problems) ? data.problems : [], [data]);
   const aggregate = useMemo(() => {
-    const responses = topics.reduce((sum, topic) => sum + (Number(topic.responses) || 0), 0);
-    const weightedCorrect = topics.reduce(
-      (sum, topic) => sum + (Number(topic.responses) || 0) * (Number(topic.accuracy_percent) || 0),
+    const responses = problems.reduce((sum, problem) => sum + (Number(problem.responses) || 0), 0);
+    const weightedCorrect = problems.reduce(
+      (sum, problem) => sum + (Number(problem.responses) || 0) * (Number(problem.accuracy_percent) || 0),
       0
     );
     return {
       responses,
       averageAccuracy: responses > 0 ? Math.round(weightedCorrect / responses) : null,
     };
-  }, [topics]);
+  }, [problems]);
 
   return (
     <main className="min-h-screen bg-[#f1f6fd]">
@@ -67,39 +66,11 @@ export default function PrototypeInsights({ api, onBack }) {
 
         {!loading && !error && (
           <>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-              <Metric label="Aggregate responses" value={aggregate.responses.toLocaleString()} detail="Across reportable topic groups" />
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <Metric label="Aggregate responses" value={aggregate.responses.toLocaleString()} detail="Across reportable problems" />
               <Metric label="Average accuracy" value={aggregate.averageAccuracy == null ? '—' : `${aggregate.averageAccuracy}%`} detail="Weighted across reportable responses" />
-              <Metric label="Reportable topics" value={topics.length} detail={`Minimum group size: ${data?.minimumCohort ?? 'server policy'}`} />
-              <Metric label="Reportable problems" value={problems.length} detail="Question-level groups meeting the privacy threshold" />
+              <Metric label="Reportable problems" value={problems.length} detail={`Minimum group size: ${data?.minimumCohort ?? 'server policy'}`} />
             </div>
-
-            <section className="mt-6 rounded-xl bg-white p-5 shadow-sm" aria-labelledby="topic-trends-title">
-              <div className="mb-4">
-                <h2 id="topic-trends-title" className="text-base font-semibold text-gray-900">Accuracy by topic</h2>
-                <p className="mt-1 text-sm text-gray-600">Only server-approved aggregate groups are included.</p>
-              </div>
-              {topics.length === 0 ? (
-                <p className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600" role="status">No topic groups meet the minimum privacy threshold yet.</p>
-              ) : (
-                <div className="space-y-5">
-                  {topics.map(topic => {
-                    const accuracy = Math.max(0, Math.min(100, Number(topic.accuracy_percent) || 0));
-                    return (
-                      <div key={topic.topic}>
-                        <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-sm">
-                          <span className="font-medium text-gray-800">{topic.topic}</span>
-                          <span className="text-gray-600">{accuracy}% correct · {topic.responses} responses</span>
-                        </div>
-                        <div className="h-2.5 overflow-hidden rounded-full bg-gray-100" role="progressbar" aria-label={`${topic.topic} aggregate accuracy`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={accuracy}>
-                          <div className="h-full rounded-full bg-[#2a61ba]" style={{ width: `${accuracy}%` }} />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
 
             <section className="mt-6 rounded-xl bg-white p-5 shadow-sm" aria-labelledby="problem-trends-title">
               <div className="mb-4">
@@ -113,7 +84,7 @@ export default function PrototypeInsights({ api, onBack }) {
                   <table className="w-full min-w-[34rem] border-collapse text-left text-sm">
                     <thead>
                       <tr className="border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
-                        <th scope="col" className="py-3 pr-4">Topic</th>
+                        <th scope="col" className="py-3 pr-4">Source</th>
                         <th scope="col" className="py-3 pr-4">Catalog difficulty</th>
                         <th scope="col" className="py-3 pr-4">Class accuracy</th>
                         <th scope="col" className="py-3">Responses</th>
@@ -122,7 +93,7 @@ export default function PrototypeInsights({ api, onBack }) {
                     <tbody>
                       {problems.map(problem => (
                         <tr key={problem.problem_id} className="border-b border-gray-100 last:border-0">
-                          <th scope="row" className="py-3 pr-4 font-medium text-gray-800">{problem.topic}</th>
+                          <th scope="row" className="py-3 pr-4 font-medium text-gray-800">{problem.source || `Problem ${problem.problem_id}`}</th>
                           <td className="py-3 pr-4 text-gray-700">Level {problem.difficulty ?? 'Unrated'}</td>
                           <td className="py-3 pr-4 text-gray-700">{problem.accuracy_percent}%</td>
                           <td className="py-3 text-gray-700">{problem.responses}</td>
