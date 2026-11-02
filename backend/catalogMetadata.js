@@ -9,7 +9,9 @@ export function inferCatalogMetadata(source, folderName = '') {
           : null;
   const roundMatch = text.match(/\b(Sprint|Target|Team|Countdown|Warm-Up|Warm Up)\s+Round\b/i);
   const round = roundMatch ? roundMatch[1].replace(/\s+/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase()) : null;
-  return { year, level, round };
+  const numberMatch = text.match(/\bproblem\s*#?\s*([1-9]\d{0,2})\b/i);
+  const problemNumber = numberMatch ? Number(numberMatch[1]) : null;
+  return { year, level, round, problemNumber };
 }
 
 export function catalogGroupName(year, level) {

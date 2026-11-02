@@ -261,16 +261,17 @@ export async function initDatabase() {
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS year INTEGER');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS level VARCHAR(50)');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS round VARCHAR(50)');
+    await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS problem_number INTEGER');
     const metadataRows = await client.query(`
       SELECT p.id, p.source, f.name AS folder_name
       FROM problems p LEFT JOIN folders f ON f.id = p.folder_id
-      WHERE p.year IS NULL OR p.level IS NULL OR p.round IS NULL
+      WHERE p.year IS NULL OR p.level IS NULL OR p.round IS NULL OR p.problem_number IS NULL
     `);
     for (const problem of metadataRows.rows) {
       const inferred = inferCatalogMetadata(problem.source, problem.folder_name);
       await client.query(
-        `UPDATE problems SET year = COALESCE(year, $1), level = COALESCE(level, $2), round = COALESCE(round, $3) WHERE id = $4`,
-        [inferred.year, inferred.level, inferred.round, problem.id]
+        `UPDATE problems SET year = COALESCE(year, $1), level = COALESCE(level, $2), round = COALESCE(round, $3), problem_number = COALESCE(problem_number, $4) WHERE id = $5`,
+        [inferred.year, inferred.level, inferred.round, inferred.problemNumber, problem.id]
       );
     }
     
@@ -706,12 +707,12 @@ export async function seedDatabase() {
       for (const sample of licensedNationalSprintSamples) {
         const source = `2022 MATHCOUNTS National Competition, Sprint Round, Problem ${sample.number}`;
         await client.query(
-          `INSERT INTO problems (question, answer, topic, source, created_by, year, level, round)
-           SELECT $1, $2, '', $3, NULL, 2022, 'Nationals', 'Sprint'
+          `INSERT INTO problems (question, answer, topic, source, created_by, year, level, round, problem_number)
+           SELECT $1, $2, '', $3, NULL, 2022, 'Nationals', 'Sprint', $4
            WHERE NOT EXISTS (
              SELECT 1 FROM problems WHERE source = $3
            )`,
-          [sample.question, sample.answer, source]
+          [sample.question, sample.answer, source, sample.number]
         );
       }
       await client.query('COMMIT');

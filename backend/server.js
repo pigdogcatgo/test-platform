@@ -800,10 +800,10 @@ async function persistReviewedPdfImport(importId, session) {
       }
       const ins = await client.query(
         `INSERT INTO problems
-           (question, answer, topic, image_url, source, folder_id, created_by, pdf_document_id,
+           (question, answer, topic, image_url, source, folder_id, created_by, problem_number, pdf_document_id,
             source_page, student_pdf_page, source_pages, student_pdf_pages)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
-        [problem.question, String(problem.answer), validTag, imageUrl, problem.source, folderId, createdBy, sourceDocumentId,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
+        [problem.question, String(problem.answer), validTag, imageUrl, problem.source, folderId, createdBy, problem.number, sourceDocumentId,
           problem.problemPage, studentPageBySourcePage[problem.problemPage], sourceProblemPages, studentProblemPages]
       );
       const tagId = tagMap[validTag];
@@ -1199,6 +1199,19 @@ function problemCatalogMetadata(body, source) {
     year,
     level: readText('level', inferred.level),
     round: readText('round', inferred.round),
+    problemNumber: (() => {
+      const rawNumber = body.problem_number;
+      const hasNumberValue = typeof rawNumber === 'number'
+        || (typeof rawNumber === 'string' && /^\d+$/.test(rawNumber));
+      if (rawNumber != null && rawNumber !== '' && !hasNumberValue) {
+        throw validationError(400, 'Problem number must be a whole number between 1 and 999');
+      }
+      const problemNumber = rawNumber == null || rawNumber === '' ? inferred.problemNumber : Number(rawNumber);
+      if (problemNumber != null && (!Number.isInteger(problemNumber) || problemNumber < 1 || problemNumber > 999)) {
+        throw validationError(400, 'Problem number must be a whole number between 1 and 999');
+      }
+      return problemNumber;
+    })(),
   };
 }
 
@@ -1344,8 +1357,8 @@ app.post('/api/problems', authenticateToken, async (req, res) => {
     await client.query('BEGIN');
     const fid = await validateProblemFolder(client, req.user, folderId);
     const result = await client.query(
-      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by, year, level, round) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
-      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy, catalogMetadata.year, catalogMetadata.level, catalogMetadata.round]
+      'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by, year, level, round, problem_number) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *',
+      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, createdBy, catalogMetadata.year, catalogMetadata.level, catalogMetadata.round, catalogMetadata.problemNumber]
     );
     problem = result.rows[0];
     const withMeta = await attachFolder(problem, client);
@@ -1459,12 +1472,12 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
     await client.query('BEGIN');
     const fid = await validateProblemFolder(client, req.user, folderId);
     const { sql, params } = problemWriteWhere(req.user);
-    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$11' : '$1');
+    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$12' : '$1');
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const catalogMetadata = problemCatalogMetadata(req.body, sourceStr);
     const result = await client.query(
-      `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = COALESCE($6, folder_id), year = $7, level = $8, round = $9 WHERE id = $10 AND ${problemCond} RETURNING *`,
-      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, catalogMetadata.year, catalogMetadata.level, catalogMetadata.round, req.params.id, ...params]
+      `UPDATE problems SET question = $1, answer = $2, topic = $3, image_url = $4, source = $5, folder_id = COALESCE($6, folder_id), year = $7, level = $8, round = $9, problem_number = COALESCE($10, problem_number) WHERE id = $11 AND ${problemCond} RETURNING *`,
+      [question.trim(), answerStored, '', imageUrl || null, sourceStr, fid, catalogMetadata.year, catalogMetadata.level, catalogMetadata.round, catalogMetadata.problemNumber, req.params.id, ...params]
     );
     if (result.rows.length === 0) {
       await client.query('ROLLBACK');

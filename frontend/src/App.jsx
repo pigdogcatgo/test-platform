@@ -25,6 +25,7 @@ function getCatalogMetadata(problem, demoMode) {
   const inferredYear = Number(sourceText.match(/\b(19\d{2}|20\d{2})\b/)?.[1]) || null;
   const inferredLevel = /\bnationals?\b/i.test(sourceText) ? 'Nationals' : /\bstate\b/i.test(sourceText) ? 'State' : /\bchapter\b/i.test(sourceText) ? 'Chapter' : /\bschool\b/i.test(sourceText) ? 'School' : '';
   const inferredRound = sourceText.match(/\b(Sprint|Target|Team|Countdown|Warm-Up|Warm Up)\s+Round\b/i)?.[1] || '';
+  const inferredNumber = sourceText.match(/\bproblem\s*#?\s*(\d+)\b/i)?.[1] || '';
   const year = problem.year ?? (demoMode && inferredYear == null ? 2018 + (Math.abs(Number(problem.id) || 0) % 8) : inferredYear);
   const level = problem.level || inferredLevel;
   const round = problem.round || inferredRound;
@@ -32,6 +33,7 @@ function getCatalogMetadata(problem, demoMode) {
     year: year == null ? '' : String(year),
     level: level || '',
     round: round || '',
+    number: problem.problem_number ?? inferredNumber,
     elo: problem.elo == null ? '—' : String(problem.elo),
     group: [year, level].filter(Boolean).join(' ') || 'Source details needed',
   };
@@ -50,7 +52,7 @@ function filterCatalogProblems(problems, filters, demoMode) {
   const query = filters.search.trim().toLocaleLowerCase();
   return problems.filter(problem => {
     const metadata = getCatalogMetadata(problem, demoMode);
-    const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.folder_name || ''} ${metadata.year} ${metadata.level} ${metadata.round} ${metadata.elo}`.toLocaleLowerCase();
+    const searchable = `${problem.question || ''} ${problem.source || ''} ${problem.folder_name || ''} ${metadata.year} ${metadata.level} ${metadata.round} ${metadata.number} ${metadata.elo}`.toLocaleLowerCase();
     if (query && !searchable.includes(query)) return false;
     if (filters.year && metadata.year !== filters.year) return false;
     if (filters.level && metadata.level !== filters.level) return false;
@@ -704,6 +706,7 @@ const App = () => {
       year: editingProblem.year || null,
       level: (editingProblem.level ?? '').trim() || null,
       round: (editingProblem.round ?? '').trim() || null,
+      problem_number: editingProblem.problem_number || null,
     };
 
     try {
@@ -1954,7 +1957,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
 
         {!isTeacherAdmin && (
           <button
-            onClick={() => setEditingProblem({ question: '', answer: '', image_url: '', source: '', year: '', level: '', round: '', folder_id: null })}
+            onClick={() => setEditingProblem({ question: '', answer: '', image_url: '', source: '', year: '', level: '', round: '', problem_number: '', folder_id: null })}
             className="mb-6 bg-[#2a61ba] text-white px-6 py-3 rounded-lg"
           >
             Add Problem
@@ -2033,7 +2036,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     placeholder="e.g. 42, 3/4, √2, √2/2, 2√3"
                   />
                 </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <label className="block text-sm font-medium text-gray-700">Year
                     <input type="number" min="1900" max="2100" value={editingProblem.year ?? ''} onChange={e => setEditingProblem({ ...editingProblem, year: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="2022" />
                   </label>
@@ -2042,6 +2045,9 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                   </label>
                   <label className="block text-sm font-medium text-gray-700">Round
                     <input type="text" maxLength="50" value={editingProblem.round ?? ''} onChange={e => setEditingProblem({ ...editingProblem, round: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="Sprint" />
+                  </label>
+                  <label className="block text-sm font-medium text-gray-700">Problem number
+                    <input type="number" min="1" max="999" step="1" value={editingProblem.problem_number ?? ''} onChange={e => setEditingProblem({ ...editingProblem, problem_number: e.target.value })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="1" />
                   </label>
                 </div>
                 <div>
@@ -2120,7 +2126,11 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
           </div>
         )}
 
-        <div className="space-y-4">
+        <section className="mt-8" aria-labelledby="catalog-groups-heading">
+          <div className="mb-4">
+            <h2 id="catalog-groups-heading" className="text-lg font-semibold text-gray-900">Browse by contest</h2>
+          </div>
+          <div className="space-y-4">
           {(() => {
             const byGroup = new Map();
             for (const problem of visibleCatalogProblems) {
@@ -2151,37 +2161,39 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                     <button type="button" onClick={toggle} aria-expanded={expanded} aria-controls={panelId} className="flex w-full items-center gap-2 text-left font-semibold text-gray-800 hover:text-[#2a61ba]">
                       <span className="text-gray-400" aria-hidden="true">{expanded ? '▼' : '▶'}</span>
                       <span>{name}</span>
-                      <span className="text-sm font-normal text-gray-500">({groupProblems.length} problems)</span>
+                      {!isTeacherAdmin && <span className="text-sm font-normal text-gray-500">({groupProblems.length} problems)</span>}
                     </button>
                   </div>
                   <div id={panelId} hidden={!expanded} className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead className="bg-gray-50 text-left"><tr>
-                        <th className="px-4 py-3 w-10"><span className="sr-only">Select</span></th>
-                        <th className="px-4 py-3">Question</th>
-                        <th className="px-4 py-3">Answer</th>
-                        <th className="px-4 py-3">Source</th>
+                        {!isTeacherAdmin && <th className="px-4 py-3 w-10"><span className="sr-only">Select</span></th>}
+                        {!isTeacherAdmin && <th className="px-4 py-3">Question</th>}
+                        {!isTeacherAdmin && <th className="px-4 py-3">Answer</th>}
+                        {!isTeacherAdmin && <th className="px-4 py-3">Source</th>}
                         <th className="px-4 py-3">Year</th>
                         <th className="px-4 py-3">Level</th>
                         <th className="px-4 py-3">Round</th>
+                        <th className="px-4 py-3">Number</th>
                         <th className="px-4 py-3">Elo</th>
-                        <th className="px-4 py-3">Actions</th>
+                        {!isTeacherAdmin && <th className="px-4 py-3">Actions</th>}
                       </tr></thead>
                       <tbody>{groupProblems.map(problem => {
                         const metadata = getCatalogMetadata(problem, DEMO_MODE);
                         return <tr key={problem.id} className="border-t">
-                          <td className="px-4 py-3"><input type="checkbox" checked={selectedProblemIds.includes(problem.id)} onChange={event => setSelectedProblemIds(previous => event.target.checked ? [...new Set([...previous, problem.id])] : previous.filter(id => id !== problem.id))} aria-label={`Select problem ${problem.id}`} className="rounded" /></td>
-                          <td className="px-4 py-3 max-w-md"><LatexRenderer text={problem.question} />{problem.image_url && <ProblemImage url={problem.image_url} token={token} />}</td>
-                          <td className="px-4 py-3">{problem.answer}</td>
-                          <td className="px-4 py-3">{problem.source ?? '—'}</td>
+                          {!isTeacherAdmin && <td className="px-4 py-3"><input type="checkbox" checked={selectedProblemIds.includes(problem.id)} onChange={event => setSelectedProblemIds(previous => event.target.checked ? [...new Set([...previous, problem.id])] : previous.filter(id => id !== problem.id))} aria-label={`Select problem ${problem.id}`} className="rounded" /></td>}
+                          {!isTeacherAdmin && <td className="px-4 py-3 max-w-md"><LatexRenderer text={problem.question} />{problem.image_url && <ProblemImage url={problem.image_url} token={token} />}</td>}
+                          {!isTeacherAdmin && <td className="px-4 py-3">{problem.answer}</td>}
+                          {!isTeacherAdmin && <td className="px-4 py-3">{problem.source ?? '—'}</td>}
                           <td className="px-4 py-3">{metadata.year || '—'}</td>
                           <td className="px-4 py-3">{metadata.level || '—'}</td>
                           <td className="px-4 py-3">{metadata.round || '—'}</td>
+                          <td className="px-4 py-3">{metadata.number || '—'}</td>
                           <td className="px-4 py-3">{metadata.elo}</td>
-                          <td className="px-4 py-3 space-x-2">
-                            <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>
+                          {!isTeacherAdmin && <td className="px-4 py-3 space-x-2">
+                            <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', problem_number: problem.problem_number ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>
                             <button type="button" onClick={() => setProblemToDelete(problem.id)} className="text-red-600 hover:underline font-medium">Delete</button>
-                          </td>
+                          </td>}
                         </tr>;
                       })}</tbody>
                     </table>
@@ -2190,7 +2202,8 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
               );
             });
           })()}
-        </div>
+          </div>
+        </section>
       </div>
     </div>
   );

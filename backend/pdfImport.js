@@ -947,8 +947,8 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
           }
         }
         const ins = await client.query(
-          'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-          [processed.question, String(processed.answer), validTag, imageUrl, processed.source, folderId, createdBy]
+          'INSERT INTO problems (question, answer, topic, image_url, source, folder_id, created_by, problem_number) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+          [processed.question, String(processed.answer), validTag, imageUrl, processed.source, folderId, createdBy, processed.number]
         );
         const tagId = tagMap[validTag];
         if (tagId) await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.rows[0].id, tagId]);
@@ -971,8 +971,8 @@ export async function importPdfToDatabase(pdfBuffer, answerKeyText = '', useAI =
         try {
           const processed = processProblemNoAI(prob, answerMap[prob.number]);
           const ins = await client.query(
-            'INSERT INTO problems (question, answer, topic, source, folder_id, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-            [processed.question, String(processed.answer), 'Arithmetic', processed.source, folderId, createdBy]
+            'INSERT INTO problems (question, answer, topic, source, folder_id, created_by, problem_number) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+            [processed.question, String(processed.answer), 'Arithmetic', processed.source, folderId, createdBy, prob.number]
           );
           const tagId = tagMap[defaultTag];
           if (tagId) await client.query('INSERT INTO problem_tags (problem_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.rows[0].id, tagId]);

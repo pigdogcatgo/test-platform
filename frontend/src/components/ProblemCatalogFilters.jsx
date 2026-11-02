@@ -12,12 +12,12 @@ export default function ProblemCatalogFilters({
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 id="catalog-heading" className="text-base font-semibold text-gray-900">
-            {demoMode ? 'Fictional OPLET-style practice catalog' : 'Problem bank'}
+            {demoMode ? 'Fictional OPLET-style practice catalog' : 'Search problems'}
           </h2>
           <p className="mt-1 max-w-3xl text-sm leading-5 text-gray-600">
             {demoMode
               ? 'Synthetic sample questions and metadata for this prototype. Not affiliated with MATHCOUNTS, OPLET, or any question source.'
-              : 'Search by question, source, year, level, round, or Elo.'}
+              : 'Search by problem text, year, level, round, or Elo.'}
           </p>
         </div>
         {hasFilters && (
@@ -39,7 +39,7 @@ export default function ProblemCatalogFilters({
             type="search"
             value={filters.search}
             onChange={event => set('search', event.target.value)}
-            placeholder="Question, source, year, level, round, or Elo"
+            placeholder="Problem text, year, level, round, or Elo"
             className="min-h-11 w-full rounded-lg border border-gray-300 px-3 text-sm focus:border-[#2a61ba] focus:outline-none"
           />
         </div>
