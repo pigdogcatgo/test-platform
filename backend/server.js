@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { isIP } from 'net';
 import { createHash, randomBytes } from 'crypto';
 import bcrypt from 'bcrypt';
@@ -21,6 +22,13 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 const frontendDistDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../frontend/dist');
+const requireFrontendDependency = createRequire(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../frontend/package.json'));
+let katex = null;
+try {
+  katex = requireFrontendDependency('katex');
+} catch {
+  // The app can still show plain problem text if frontend dependencies are not installed.
+}
 if (process.env.TRUST_PROXY != null && process.env.TRUST_PROXY.trim() !== '') {
   const proxyHops = Number(process.env.TRUST_PROXY);
   if (!Number.isSafeInteger(proxyHops) || proxyHops < 0 || proxyHops > 10) {
@@ -1218,6 +1226,9 @@ function problemReadWhere(user) {
   if (user.role === 'teacher') return { sql: DEMO_MODE ? 'p.created_by = $1' : '(p.created_by IS NULL OR p.created_by = $1)', params: [user.id] };
   return { sql: '1=0', params: [] };
 }
+function shiftSqlParameters(sql, offset) {
+  return sql.replace(/\$(\d+)/g, (_match, index) => `$${Number(index) + offset}`);
+}
 function problemWriteWhere(user) {
   if (user.role === 'admin') return { sql: '1=1', params: [] };
   if (user.role === 'teacher') return { sql: 'created_by = $1', params: [user.id] };
@@ -1241,6 +1252,33 @@ function publicProblemName(problem) {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+}
+
+function renderProblemMath(value) {
+  const text = String(value ?? '');
+  if (!katex || !text.includes('$')) return escapeHtml(text);
+  const parts = [];
+  const regex = /\$\$(.+?)\$\$|\$(.+?)\$/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) parts.push(escapeHtml(text.slice(lastIndex, match.index)));
+    const math = (match[1] || match[2] || '').replace(/\\neq\b/g, '\\ne');
+    try {
+      parts.push(katex.renderToString(math, {
+        displayMode: Boolean(match[1]),
+        throwOnError: false,
+        macros: { '\\usepackage': '' },
+        strict: false,
+        trust: false,
+      }));
+    } catch {
+      parts.push(escapeHtml(match[0]));
+    }
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) parts.push(escapeHtml(text.slice(lastIndex)));
+  return parts.join('');
 }
 
 function validationError(status, message) {
@@ -1320,6 +1358,38 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
   }
 });
 
+// Full problem statements are available only to authenticated teachers and administrators.
+app.get('/api/problems/:id/view', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Problem access is limited to teachers and administrators.' });
+  }
+  if (DEMO_MODE && req.user.role !== 'teacher') {
+    return res.status(403).json({ error: 'Catalog access is limited to the demo teacher account.' });
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'Invalid problem id' });
+
+  const { sql, params: accessParams } = problemReadWhere(req.user);
+  const accessSql = shiftSqlParameters(sql, 1);
+  const params = [id, ...accessParams];
+
+  try {
+    const result = await pool.query(
+      `SELECT p.id, p.question, p.image_url, p.year, p.level, p.round, p.problem_number, p.elo
+       FROM problems p
+       WHERE p.id = $1 AND ${accessSql}`,
+      params
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Problem not found' });
+    res.setHeader('Cache-Control', 'private, no-store');
+    // questionHtml escapes catalog text and inserts only KaTeX-generated markup for math.
+    return res.json({ ...result.rows[0], questionHtml: renderProblemMath(result.rows[0].question) });
+  } catch (error) {
+    console.error('Authorized problem view error:', error);
+    return res.status(500).json({ error: 'Could not load problem' });
+  }
+});
+
 // Public problem pages intentionally contain only a problem name and catalog
 // metadata. Question statements, answers, source labels, and images stay out.
 app.get('/api/public/problems/:id', async (req, res) => {
@@ -1387,17 +1457,29 @@ app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!Number.isInteger(id) || id < 1) return res.status(400).send('Bad request');
   try {
-    const result = await pool.query('SELECT data, content_type, created_by FROM uploads WHERE id = $1', [id]);
+    const result = await pool.query('SELECT data, content_type FROM uploads WHERE id = $1', [id]);
     if (result.rows.length === 0) return res.status(404).send('Not found');
     const row = result.rows[0];
     if (req.user.role === 'admin') {
-      // Admin can see all
+      if (DEMO_MODE) return res.status(403).send('Administrator access is disabled on the fictional demo preview');
+      const { sql, params } = problemReadWhere(req.user);
+      const accessSql = shiftSqlParameters(sql, 1);
+      const linkedProblem = await pool.query(
+        `SELECT 1 FROM problems p WHERE p.image_url = $1 AND ${accessSql} LIMIT 1`,
+        ['/uploads/db/' + id, ...params]
+      );
+      if (!linkedProblem.rowCount) return res.status(403).send('This image is not part of a problem you can access');
     } else if (req.user.role === 'teacher') {
-      if (row.created_by != null && row.created_by !== req.user.id) return res.status(403).send('Forbidden');
+      const { sql, params } = problemReadWhere(req.user);
+      const accessSql = shiftSqlParameters(sql, 1);
+      const linkedProblem = await pool.query(
+        `SELECT 1 FROM problems p WHERE p.image_url = $1 AND ${accessSql} LIMIT 1`,
+        ['/uploads/db/' + id, ...params]
+      );
+      if (!linkedProblem.rowCount) return res.status(403).send('This image is not part of a problem you can access');
     } else if (req.user.role === 'student') {
       const studentRow = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
       const teacherId = studentRow.rows[0]?.teacher_id;
-      if (row.created_by != null && row.created_by !== teacherId) return res.status(403).send('Forbidden');
       const assignedProblemImage = await pool.query(
         `SELECT 1
          FROM problems p
@@ -1416,6 +1498,7 @@ app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
     }
     const buf = Buffer.from(row.data, 'base64');
     if (!hasValidImageSignature(buf, row.content_type)) return res.status(415).send('Unsupported media type');
+    res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Type', row.content_type);
     res.send(buf);
   } catch (err) {
@@ -1425,7 +1508,7 @@ app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
 });
 
 // Serve file on disk (legacy / local)
-app.get('/api/uploads/:filename', authenticateToken, (req, res) => {
+app.get('/api/uploads/:filename', authenticateToken, async (req, res) => {
   const filename = path.basename(req.params.filename);
   if (!filename || filename !== req.params.filename || filename.includes('..')) {
     return res.status(400).send('Bad request');
@@ -1434,7 +1517,47 @@ app.get('/api/uploads/:filename', authenticateToken, (req, res) => {
   if (!fs.existsSync(filepath)) {
     return res.status(404).send('Not found');
   }
-  res.sendFile(filepath);
+
+  try {
+    const imageUrl = '/uploads/' + filename;
+    let accessibleImage = false;
+    if (req.user.role === 'admin') {
+      accessibleImage = true;
+    } else if (req.user.role === 'teacher') {
+      const { sql, params } = problemReadWhere(req.user);
+      const accessSql = shiftSqlParameters(sql, 1);
+      const result = await pool.query(
+        `SELECT 1 FROM problems p WHERE p.image_url = $1 AND ${accessSql} LIMIT 1`,
+        [imageUrl, ...params]
+      );
+      accessibleImage = result.rowCount > 0;
+    } else if (req.user.role === 'student') {
+      const studentRow = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
+      const teacherId = studentRow.rows[0]?.teacher_id;
+      if (teacherId) {
+        const result = await pool.query(
+          `SELECT 1
+           FROM problems p
+           JOIN tests t ON p.id = ANY(t.problem_ids)
+           LEFT JOIN test_sessions ts ON ts.test_id = t.id AND ts.student_id = $3
+           LEFT JOIN test_attempts ta ON ta.test_id = t.id AND ta.student_id = $3
+           WHERE p.image_url = $1 AND t.created_by = $2
+             AND ((ts.submitted_at IS NULL AND ts.expires_at + INTERVAL '30 seconds' >= CURRENT_TIMESTAMP)
+               OR ta.id IS NOT NULL)
+           LIMIT 1`,
+          [imageUrl, teacherId, req.user.id]
+        );
+        accessibleImage = result.rowCount > 0;
+      }
+    }
+
+    if (!accessibleImage) return res.status(403).send('This image is not part of content you can access');
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.sendFile(filepath);
+  } catch (error) {
+    console.error('Legacy upload access check failed:', error);
+    return res.status(500).send('Could not load image');
+  }
 });
 
 // Only administrators can add problems to the shared problem bank.
@@ -2616,6 +2739,14 @@ app.get('/problems/:id(\\d+)', async (req, res) => {
       `Round ${problem.round || 'not listed'}`,
       `Problem ${problem.problem_number ?? problem.id}`,
     ].join(' · ');
+    let mathStylesheetLink = '';
+    try {
+      const assetsDir = path.join(frontendDistDir, 'assets');
+      const mathStylesheet = fs.readdirSync(assetsDir).find(filename => /^math-rendering-[\w-]+\.css$/.test(filename));
+      if (mathStylesheet) mathStylesheetLink = `<link rel="stylesheet" href="/assets/${mathStylesheet}">`;
+    } catch {
+      // Math remains readable as source notation if the frontend bundle is unavailable.
+    }
     const page = `<!doctype html>
 <html lang="en">
 <head>
@@ -2625,6 +2756,7 @@ app.get('/problems/:id(\\d+)', async (req, res) => {
   <title>${escapeHtml(title)}</title>
   <meta name="description" content="${escapeHtml(description)}">
   <link rel="canonical" href="${escapeHtml(publicSiteUrl)}/problems/${problem.id}">
+  ${mathStylesheetLink}
   <meta property="og:type" content="article">
   <meta property="og:title" content="${escapeHtml(title)}">
   <meta property="og:description" content="${escapeHtml(description)}">
@@ -2639,6 +2771,8 @@ app.get('/problems/:id(\\d+)', async (req, res) => {
     dl div{border:1px solid #e2e8f0;border-radius:12px;padding:14px}
     dt{font-size:.8rem;color:#65748a;margin-bottom:5px}
     dd{margin:0;font-weight:650}
+    .problem-statement{white-space:pre-wrap;line-height:1.7;font-size:1.05rem;color:#26364b}
+    .problem-image{display:block;max-width:100%;max-height:520px;object-fit:contain;margin-top:20px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc}
     footer{margin-top:24px;font-size:.9rem}
     a{color:#2456a6;font-weight:600}
   </style>
@@ -2646,7 +2780,7 @@ app.get('/problems/:id(\\d+)', async (req, res) => {
 <body>
   <main>
     <h1>${escapeHtml(name)}</h1>
-    <p>Catalog record ${problem.id}. The problem statement is available only through authorized practice access.</p>
+    <p>Catalog record ${problem.id}. Sign in with a teacher account to view the problem statement.</p>
     <dl>
       <div><dt>Problem ID</dt><dd>${problem.id}</dd></div>
       <div><dt>Year</dt><dd>${escapeHtml(problem.year ?? '—')}</dd></div>
@@ -2655,8 +2789,66 @@ app.get('/problems/:id(\\d+)', async (req, res) => {
       <div><dt>Number</dt><dd>${escapeHtml(problem.problem_number ?? '—')}</dd></div>
       <div><dt>Elo</dt><dd>${escapeHtml(problem.elo ?? '—')}</dd></div>
     </dl>
+    <p id="problem-access-status" role="status" aria-live="polite" style="margin-top:24px">Sign in with your teacher account to view the problem statement.</p>
+    <section id="authorized-problem" hidden aria-label="Problem statement">
+      <h2 style="font-size:1.15rem;font-weight:700;color:#183b70;margin:24px 0 12px">Problem</h2>
+      <div id="problem-statement" class="problem-statement"></div>
+      <div id="problem-image-container"></div>
+    </section>
     <footer><a href="/">Open MATHCOUNTS Test Admin</a></footer>
   </main>
+  <script>
+    (() => {
+      const problemId = ${problem.id};
+      const status = document.getElementById('problem-access-status');
+      const section = document.getElementById('authorized-problem');
+      const statement = document.getElementById('problem-statement');
+      const imageContainer = document.getElementById('problem-image-container');
+      let token = null;
+      try { token = window.localStorage.getItem('token'); } catch {}
+      if (!token) return;
+
+      status.textContent = 'Loading problem…';
+      fetch('/api/problems/' + problemId + '/view', {
+        headers: { Authorization: 'Bearer ' + token }
+      }).then(async response => {
+        if (!response.ok) throw new Error(response.status === 401 ? 'Your session has expired. Sign in again to view this problem.' : 'This problem is available only to an authorized teacher account.');
+        return response.json();
+      }).then(problemData => {
+        statement.innerHTML = problemData.questionHtml;
+        section.hidden = false;
+        status.textContent = '';
+        if (!problemData.image_url) return;
+
+        const image = document.createElement('img');
+        image.className = 'problem-image';
+        image.alt = 'Problem diagram';
+        image.loading = 'lazy';
+        imageContainer.appendChild(image);
+        const imageUrl = problemData.image_url;
+        if (imageUrl.startsWith('/uploads/')) {
+          const apiUrl = imageUrl.replace(/^\/uploads\//, '/api/uploads/');
+          fetch(apiUrl, { headers: { Authorization: 'Bearer ' + token } })
+            .then(response => {
+              if (!response.ok) throw new Error('image unavailable');
+              return response.blob();
+            })
+            .then(blob => { image.src = URL.createObjectURL(blob); })
+            .catch(() => { imageContainer.textContent = 'The problem image could not be loaded.'; });
+        } else {
+          try {
+            const parsedUrl = new URL(imageUrl, window.location.origin);
+            if (parsedUrl.protocol === 'https:' || parsedUrl.origin === window.location.origin) image.src = parsedUrl.href;
+            else imageContainer.textContent = 'The problem image could not be loaded.';
+          } catch {
+            imageContainer.textContent = 'The problem image could not be loaded.';
+          }
+        }
+      }).catch(error => {
+        status.textContent = error.message || 'Could not load this problem. Sign in with a teacher account and try again.';
+      });
+    })();
+  </script>
 </body>
 </html>`;
     res.setHeader('Cache-Control', 'public, max-age=3600');
