@@ -9,6 +9,7 @@ import ConfirmationDialog from './components/ConfirmationDialog';
 import LatexRenderer from './components/LatexRenderer';
 import DemoBanner from './components/DemoBanner';
 import ProblemCatalogFilters from './components/ProblemCatalogFilters';
+import ProblemDetailPage from './components/ProblemDetailPage';
 import PrototypeInsights from './components/PrototypeInsights';
 import { PracticeHeader, FolioIntro } from './components/PracticeLayout';
 import './index.css';
@@ -64,6 +65,7 @@ function filterCatalogProblems(problems, filters, demoMode) {
 const App = () => {
   const [token, setToken] = useState(() => localStorage.getItem('token'));
   const [user, setUser] = useState(null);
+  const [activeProblemId, setActiveProblemId] = useState(null);
   const [view, setView] = useState(() => localStorage.getItem('token') ? 'loading' : 'login');
   const [sessionError, setSessionError] = useState(null);
   const [dashboardLoadError, setDashboardLoadError] = useState(null);
@@ -186,6 +188,24 @@ const App = () => {
       headers: token ? { Authorization: `Bearer ${token}` } : {}
     });
   }, [token]);
+
+  useEffect(() => {
+    const syncProblemRoute = () => {
+      const match = window.location.pathname.match(/^\/problems\/(\d+)$/);
+      setActiveProblemId(match ? Number(match[1]) : null);
+    };
+    window.addEventListener('popstate', syncProblemRoute);
+    return () => window.removeEventListener('popstate', syncProblemRoute);
+  }, []);
+
+  const openProblemView = (problemId) => {
+    const id = Number(problemId);
+    if (!Number.isSafeInteger(id) || id < 1) return;
+    window.history.pushState({ problemBankView: true }, '', `/problems/${id}`);
+    setActiveProblemId(id);
+  };
+
+  const closeProblemView = () => window.history.back();
 
   const loadTeacherSettings = useCallback(async () => {
     if (user?.role !== 'teacher') return;
@@ -2120,6 +2140,10 @@ if (view === 'create-test' && user) {
   );
 }
 
+if (activeProblemId && user && (user.role === 'teacher' || user.role === 'admin')) {
+  return <ProblemDetailPage problemId={activeProblemId} api={api} token={token} onBack={closeProblemView} />;
+}
+
 if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
   const isTeacherAdmin = user.role === 'teacher';
   const visibleProblemIds = new Set(visibleCatalogProblems.map(problem => problem.id));
@@ -2391,10 +2415,10 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                           <td className="px-4 py-3">{metadata.year || '—'}</td>
                           <td className="px-4 py-3">{metadata.level || '—'}</td>
                           <td className="px-4 py-3">{metadata.round || '—'}</td>
-                          <td className="px-4 py-3">{metadata.number || '—'}{isTeacherAdmin && <a href={`/problems/${problem.id}`} className="ml-3 text-[#2a61ba] hover:underline font-medium">See problem</a>}</td>
+                          <td className="px-4 py-3">{metadata.number || '—'}{isTeacherAdmin && <a href={`/problems/${problem.id}`} onClick={event => { event.preventDefault(); openProblemView(problem.id); }} className="ml-3 text-[#2a61ba] hover:underline font-medium">See problem</a>}</td>
                           <td className="px-4 py-3">{metadata.elo}</td>
                           {!isTeacherAdmin && <td className="px-4 py-3 space-x-2 whitespace-nowrap">
-                            <a href={`/problems/${problem.id}`} className="text-[#2a61ba] hover:underline font-medium">See problem</a>
+                            <a href={`/problems/${problem.id}`} onClick={event => { event.preventDefault(); openProblemView(problem.id); }} className="text-[#2a61ba] hover:underline font-medium">See problem</a>
                             <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', problem_number: problem.problem_number ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>
                             <button type="button" onClick={() => setProblemToDelete(problem.id)} className="text-red-600 hover:underline font-medium">Delete</button>
                           </td>}
