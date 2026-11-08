@@ -252,11 +252,15 @@ const authenticateToken = (req, res, next) => {
     if (err) return res.status(401).json({ error: 'Invalid or expired token' });
     try {
       const result = await pool.query(
-        'SELECT id, username, role, teacher_id FROM users WHERE id = $1',
+        'SELECT id, username, role, teacher_id, is_active, token_version FROM users WHERE id = $1',
         [claims.id]
       );
       const currentUser = result.rows[0];
       if (!currentUser) return res.status(401).json({ error: 'Account no longer exists' });
+      if (!currentUser.is_active) return res.status(401).json({ error: 'Account is no longer active' });
+      if ((claims.tokenVersion ?? 0) !== currentUser.token_version) {
+        return res.status(401).json({ error: 'Session expired. Sign in again.' });
+      }
       if (DEMO_MODE && !['teacher', 'student'].includes(currentUser.role)) {
         return res.status(403).json({ error: 'Administrator access is disabled on the fictional demo preview.' });
       }
@@ -330,12 +334,12 @@ app.post('/api/signup', signupLimiter, async (req, res) => {
     }
     const passwordHash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, elo',
+      'INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, elo, token_version',
       [normalizedUsername, passwordHash, 'teacher']
     );
     const user = result.rows[0];
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
+      { id: user.id, username: user.username, role: user.role, tokenVersion: user.token_version },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -384,8 +388,9 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
+    if (!user.is_active) return res.status(401).json({ error: 'Invalid credentials' });
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
+      { id: user.id, username: user.username, role: user.role, tokenVersion: user.token_version ?? 0 },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -430,6 +435,64 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     res.json(user);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+const accountUpdateLimiter = fixedWindowRateLimit({
+  limit: 8,
+  windowMs: 60 * 60 * 1000,
+  keyForRequest: (req) => `account:${req.user.id}`,
+});
+
+app.put('/api/me', authenticateToken, accountUpdateLimiter, async (req, res) => {
+  if (DEMO_MODE) return res.status(403).json({ error: 'Account changes are disabled for shared demo accounts.' });
+  const { currentPassword, newPassword, username } = req.body || {};
+  if (typeof currentPassword !== 'string' || !currentPassword || Buffer.byteLength(currentPassword, 'utf8') > 72) {
+    return res.status(400).json({ error: 'Enter your current password to update account settings.' });
+  }
+  const normalizedUsername = username == null || username === '' ? null : (typeof username === 'string' ? username.trim() : null);
+  if (username != null && username !== '' && (!normalizedUsername || normalizedUsername.length < 3 || normalizedUsername.length > 50)) {
+    return res.status(400).json({ error: 'Username must be between 3 and 50 characters.' });
+  }
+  const passwordRequested = newPassword != null && newPassword !== '';
+  if (newPassword != null && typeof newPassword !== 'string') {
+    return res.status(400).json({ error: 'New password must be text.' });
+  }
+  if (passwordRequested && Array.from(newPassword).length < 12) {
+    return res.status(400).json({ error: 'New password must be at least 12 characters.' });
+  }
+  if (passwordRequested && Buffer.byteLength(newPassword, 'utf8') > 72) {
+    return res.status(400).json({ error: 'New password must be at most 72 UTF-8 bytes.' });
+  }
+  if (!passwordRequested && (!normalizedUsername || normalizedUsername === req.user.username)) {
+    return res.status(400).json({ error: 'Enter a new username or a new password.' });
+  }
+  try {
+    const current = await pool.query('SELECT password_hash FROM users WHERE id = $1 AND is_active = true', [req.user.id]);
+    if (!current.rows[0] || !(await bcrypt.compare(currentPassword, current.rows[0].password_hash))) {
+      return res.status(401).json({ error: 'Current password is incorrect.' });
+    }
+    const passwordHash = passwordRequested ? await bcrypt.hash(newPassword, 10) : null;
+    const updated = await pool.query(
+      `UPDATE users
+       SET username = COALESCE($1, username),
+           password_hash = COALESCE($2, password_hash),
+           token_version = token_version + 1
+       WHERE id = $3 AND is_active = true
+       RETURNING id, username, role, elo, token_version`,
+      [normalizedUsername, passwordHash, req.user.id]
+    );
+    const account = updated.rows[0];
+    const token = jwt.sign(
+      { id: account.id, username: account.username, role: account.role, tokenVersion: account.token_version },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    res.json({ token, user: { id: account.id, username: account.username, role: account.role, elo: account.elo } });
+  } catch (error) {
+    if (error.code === '23505') return res.status(400).json({ error: 'That username is already in use.' });
+    console.error('Account settings update error:', error);
+    res.status(500).json({ error: 'Could not update account settings.' });
   }
 });
 
@@ -494,7 +557,7 @@ app.get('/api/class/elo', authenticateToken, async (req, res) => {
     }
     const aggregate = await pool.query(
       `SELECT COUNT(*)::int AS cohort_size, ROUND(AVG(elo))::int AS class_elo
-       FROM users WHERE role = 'student' AND teacher_id = $1`,
+       FROM users WHERE role = 'student' AND teacher_id = $1 AND is_active = true`,
       [teacherId]
     );
     if (aggregate.rows[0].cohort_size < 5) {
@@ -1161,6 +1224,25 @@ function problemWriteWhere(user) {
   return { sql: '1=0', params: [] };
 }
 
+async function getPublicProblemMetadata(id) {
+  const result = await pool.query(
+    `SELECT id, year, level, round, problem_number, elo, created_by, source
+     FROM problems WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
+function publicProblemName(problem) {
+  const contest = [problem.year, problem.level].filter(Boolean).join(' ');
+  const parts = [contest, problem.round && `${problem.round} Round`, problem.problem_number && `Problem ${problem.problem_number}`].filter(Boolean);
+  return parts.length ? `MATHCOUNTS ${parts.join(' · ')}` : `MATHCOUNTS Problem ${problem.id}`;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+}
+
 function validationError(status, message) {
   const error = new Error(message);
   error.status = status;
@@ -1235,6 +1317,33 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Public problem pages intentionally contain only a problem name and catalog
+// metadata. Question statements, answers, source labels, and images stay out.
+app.get('/api/public/problems/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'Invalid problem id' });
+  try {
+    const problem = await getPublicProblemMetadata(id);
+    if (!problem) return res.status(404).json({ error: 'Problem not found' });
+    if (problem.created_by != null && !(DEMO_MODE && problem.source === 'Fictional demo catalog')) {
+      res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    }
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.json({
+      id: problem.id,
+      name: publicProblemName(problem),
+      year: problem.year,
+      level: problem.level,
+      round: problem.round,
+      number: problem.problem_number,
+      elo: problem.elo,
+    });
+  } catch (error) {
+    console.error('Public problem metadata error:', error);
+    res.status(500).json({ error: 'Could not load problem metadata' });
   }
 });
 
@@ -1580,7 +1689,7 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
   }
   
   try {
-    const { name, problemIds, dueDate, timeLimit, testType } = req.body;
+    const { name, problemIds: requestedProblemIds, dueDate, timeLimit, testType, randomCriteria } = req.body;
     if (typeof name !== 'string' || !name.trim() || name.trim().length > 200) {
       return res.status(400).json({ error: 'Test name is required and must be at most 200 characters' });
     }
@@ -1601,10 +1710,77 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
     if (!Number.isInteger(timeLimitMinutes) || timeLimitMinutes < 1 || timeLimitMinutes > 240) {
       return res.status(400).json({ error: 'timeLimit must be an integer between 1 and 240 minutes' });
     }
-    if (!Array.isArray(problemIds) || problemIds.length === 0 || problemIds.length > 200) {
-      return res.status(400).json({ error: 'problemIds must contain between 1 and 200 problem ids' });
+    const randomMode = randomCriteria != null;
+    if (randomMode && (typeof randomCriteria !== 'object' || Array.isArray(randomCriteria))) {
+      return res.status(400).json({ error: 'randomCriteria must be an object' });
     }
+    let problemIds = requestedProblemIds;
     const type = testType === 'target' ? 'target' : 'sprint';
+    let selectedProblemElos = null;
+    if (randomMode) {
+      const asWholeNumber = (value) => {
+        if (typeof value === 'number') return Number.isInteger(value) ? value : NaN;
+        if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value);
+        return NaN;
+      };
+      const count = asWholeNumber(randomCriteria.count);
+      if (!Number.isInteger(count) || count < 1 || count > 200 || (type === 'target' && count !== 8)) {
+        return res.status(400).json({ error: type === 'target' ? 'Target tests require exactly 8 problems' : 'Random Sprint tests require 1 to 200 problems' });
+      }
+      const criteria = [];
+      const params = [req.user.id];
+      const addNumber = (field, column, minimum, maximum) => {
+        const raw = randomCriteria[field];
+        if (raw == null || raw === '') return;
+        const value = asWholeNumber(raw);
+        if (!Number.isInteger(value) || value < minimum || value > maximum) {
+          throw validationError(400, `${field} must be a whole number from ${minimum} to ${maximum}`);
+        }
+        params.push(value);
+        criteria.push(`${column} = $${params.length}`);
+      };
+      const addText = (field, column) => {
+        const raw = randomCriteria[field];
+        if (raw == null || raw === '') return;
+        if (typeof raw !== 'string' || !raw.trim() || raw.trim().length > 50) {
+          throw validationError(400, `${field} must be text of at most 50 characters`);
+        }
+        params.push(raw.trim());
+        criteria.push(`${column} = $${params.length}`);
+      };
+      addNumber('year', 'year', 1900, 2100);
+      addText('level', 'level');
+      addText('round', 'round');
+      if (randomCriteria.minElo != null && randomCriteria.minElo !== '') {
+        const value = asWholeNumber(randomCriteria.minElo);
+        if (!Number.isInteger(value) || value < 0 || value > 3000) throw validationError(400, 'minElo must be a whole number from 0 to 3000');
+        params.push(value); criteria.push(`elo >= $${params.length}`);
+      }
+      if (randomCriteria.maxElo != null && randomCriteria.maxElo !== '') {
+        const value = asWholeNumber(randomCriteria.maxElo);
+        if (!Number.isInteger(value) || value < 0 || value > 3000) throw validationError(400, 'maxElo must be a whole number from 0 to 3000');
+        params.push(value); criteria.push(`elo <= $${params.length}`);
+      }
+      if (randomCriteria.minElo != null && randomCriteria.minElo !== '' && randomCriteria.maxElo != null && randomCriteria.maxElo !== '' && Number(randomCriteria.minElo) > Number(randomCriteria.maxElo)) {
+        return res.status(400).json({ error: 'Minimum Elo must be less than or equal to maximum Elo' });
+      }
+      const problemVisibility = DEMO_MODE
+        ? 'created_by = $1 AND source = \'Fictional demo catalog\''
+        : '(created_by IS NULL OR created_by = $1)';
+      const candidates = await pool.query(
+        `SELECT id, elo FROM problems WHERE ${problemVisibility}${criteria.length ? ` AND ${criteria.join(' AND ')}` : ''} ORDER BY RANDOM() LIMIT $${params.length + 1}`,
+        [...params, count]
+      );
+      if (candidates.rowCount < count) {
+        return res.status(400).json({ error: `Only ${candidates.rowCount} accessible problems match those filters; ${count} are required.` });
+      }
+      problemIds = candidates.rows.map(problem => problem.id);
+      selectedProblemElos = Object.fromEntries(candidates.rows.map(problem => [problem.id, problem.elo]));
+    } else {
+      if (!Array.isArray(problemIds) || problemIds.length === 0 || problemIds.length > 200) {
+        return res.status(400).json({ error: 'problemIds must contain between 1 and 200 problem ids' });
+      }
+    }
     if (type === 'target' && problemIds.length !== 8) {
       return res.status(400).json({ error: 'Target tests require exactly 8 problems' });
     }
@@ -1656,9 +1832,9 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
         }
       }
       const result = await client.query(
-        `INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type]
+        `INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type, problem_elo_snapshot)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type, selectedProblemElos]
       );
       await client.query('COMMIT');
       res.json(result.rows[0]);
@@ -1669,6 +1845,8 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
       client.release();
     }
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    console.error('Create test error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -1737,11 +1915,14 @@ app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
     if (!isOwner && !isTeacher) return res.status(403).json({ error: 'Access denied' });
     const duePassed = new Date(attempt.due_date) <= new Date();
     const studentCount = (await pool.query(
-      'SELECT COUNT(*)::int FROM users WHERE role = $1 AND teacher_id = $2',
+      'SELECT COUNT(*)::int FROM users WHERE role = $1 AND teacher_id = $2 AND is_active = true',
       ['student', attempt.created_by]
     )).rows[0].count;
     const submittedCount = (await pool.query(
-      'SELECT COUNT(*)::int FROM test_attempts WHERE test_id = $1',
+      `SELECT COUNT(*)::int
+       FROM test_attempts ta
+       JOIN users u ON u.id = ta.student_id AND u.is_active = true
+       WHERE ta.test_id = $1`,
       [attempt.test_id]
     )).rows[0].count;
     const allSubmitted = studentCount > 0 && submittedCount >= studentCount;
@@ -1936,7 +2117,7 @@ app.get('/api/tests/:id/attempts', authenticateToken, async (req, res) => {
        FROM test_attempts ta 
        JOIN users u ON ta.student_id = u.id 
        JOIN tests t ON t.id = ta.test_id
-       WHERE ta.test_id = $1 AND t.created_by = $2 AND u.teacher_id = $2
+       WHERE ta.test_id = $1 AND t.created_by = $2 AND u.teacher_id = $2 AND u.is_active = true
        ORDER BY ta.score DESC`,
       [req.params.id, req.user.id]
     );
@@ -1958,7 +2139,7 @@ app.get('/api/insights/class', authenticateToken, async (req, res) => {
              (ta.results ->> p.id::text = 'true') AS correct
       FROM test_attempts ta
       JOIN tests t ON t.id = ta.test_id AND t.created_by = $1
-      JOIN users u ON u.id = ta.student_id AND u.role = 'student' AND u.teacher_id = $1
+      JOIN users u ON u.id = ta.student_id AND u.role = 'student' AND u.teacher_id = $1 AND u.is_active = true
       CROSS JOIN LATERAL UNNEST(t.problem_ids) AS selected(problem_id)
       JOIN problems p ON p.id = selected.problem_id
       WHERE ta.results ? p.id::text
@@ -2228,7 +2409,7 @@ app.get('/api/students', authenticateToken, async (req, res) => {
   
   try {
     const result = await pool.query(
-      'SELECT id, username, elo FROM users WHERE role = $1 AND teacher_id = $2 ORDER BY elo DESC',
+      'SELECT id, username, elo FROM users WHERE role = $1 AND teacher_id = $2 AND is_active = true ORDER BY elo DESC',
       ['student', req.user.id]
     );
     const students = result.rows;
@@ -2236,7 +2417,7 @@ app.get('/api/students', authenticateToken, async (req, res) => {
       `SELECT ta.student_id, t.test_type, ta.score
        FROM test_attempts ta
        JOIN tests t ON t.id = ta.test_id
-       JOIN users u ON u.id = ta.student_id AND u.role = 'student' AND u.teacher_id = $1`,
+       JOIN users u ON u.id = ta.student_id AND u.role = 'student' AND u.teacher_id = $1 AND u.is_active = true`,
       [req.user.id]
     );
     const byStudent = {};
@@ -2268,7 +2449,7 @@ app.get('/api/students/:id', authenticateToken, async (req, res) => {
   if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid student ID' });
   try {
     const studentResult = await pool.query(
-      'SELECT id, username, elo FROM users WHERE id = $1 AND role = $2 AND teacher_id = $3',
+      'SELECT id, username, elo FROM users WHERE id = $1 AND role = $2 AND teacher_id = $3 AND is_active = true',
       [studentId, 'student', req.user.id]
     );
     const student = studentResult.rows[0];
@@ -2335,6 +2516,28 @@ app.get('/api/students/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Remove a student from the active roster while preserving their learning history.
+app.delete('/api/students/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Teacher access required' });
+  if (DEMO_MODE) return res.status(403).json({ error: 'Student management is disabled in the shared demo.' });
+  const studentId = Number(req.params.id);
+  if (!Number.isSafeInteger(studentId) || studentId < 1) return res.status(400).json({ error: 'Invalid student ID' });
+  try {
+    const result = await pool.query(
+      `UPDATE users
+       SET is_active = false, token_version = token_version + 1
+       WHERE id = $1 AND role = 'student' AND teacher_id = $2 AND is_active = true
+       RETURNING id, username`,
+      [studentId, req.user.id]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'Active student not found' });
+    res.json({ removed: true, student: result.rows[0] });
+  } catch (error) {
+    console.error('Remove student error:', error);
+    res.status(500).json({ error: 'Could not remove this student.' });
+  }
+});
+
 // Register a student (teacher only)
 app.post('/api/students', authenticateToken, async (req, res) => {
   if (req.user.role !== 'teacher') {
@@ -2342,8 +2545,14 @@ app.post('/api/students', authenticateToken, async (req, res) => {
   }
   try {
     const { username, password } = req.body;
-    if (!username || !password) {
+    if (typeof username !== 'string' || !username.trim() || typeof password !== 'string' || !password) {
       return res.status(400).json({ error: 'Username and password required' });
+    }
+    if (Array.from(password).length < 12) {
+      return res.status(400).json({ error: 'Password must be at least 12 characters.' });
+    }
+    if (Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(400).json({ error: 'Password must be at most 72 UTF-8 bytes.' });
     }
     const passwordHash = await bcrypt.hash(password, 10);
     const result = await pool.query(
@@ -2361,6 +2570,103 @@ app.post('/api/students', authenticateToken, async (req, res) => {
 });
 
 // Serve the built React app from the API origin in the one-service production setup.
+const publicSiteUrl = (process.env.PUBLIC_SITE_URL || 'https://mathcounts-test-platform.onrender.com').replace(/\/+$/, '');
+const publicBaseUrl = new URL(publicSiteUrl);
+if (!['http:', 'https:'].includes(publicBaseUrl.protocol)) {
+  throw new Error('PUBLIC_SITE_URL must use HTTP or HTTPS');
+}
+
+app.get('/robots.txt', (_req, res) => {
+  res.type('text/plain').send(`User-agent: *\nAllow: /problems/\nSitemap: ${publicSiteUrl}/sitemap.xml\n`);
+});
+
+app.get('/sitemap.xml', async (_req, res) => {
+  try {
+    const result = DEMO_MODE
+      ? await pool.query(
+        `SELECT id FROM problems WHERE source = 'Fictional demo catalog'
+         AND created_by = (SELECT id FROM users WHERE username = $1 AND role = 'teacher')
+         ORDER BY id`,
+        [process.env.DEMO_TEACHER_USERNAME]
+      )
+      : await pool.query('SELECT id FROM problems WHERE created_by IS NULL ORDER BY id');
+    const urls = result.rows.map(problem => `<url><loc>${escapeHtml(publicSiteUrl)}/problems/${problem.id}</loc></url>`).join('');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}</urlset>`);
+  } catch (error) {
+    console.error('Problem sitemap error:', error);
+    res.status(500).type('text/plain').send('Could not build sitemap');
+  }
+});
+
+app.get('/problems/:id(\\d+)', async (req, res) => {
+  try {
+    const problem = await getPublicProblemMetadata(Number(req.params.id));
+    if (!problem) {
+      res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+      return res.status(404).type('html').send('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><title>Problem not found</title></head><body><main><h1>Problem not found</h1><p>This problem record is unavailable.</p><a href="/">Return to MATHCOUNTS Test Admin</a></main></body></html>');
+    }
+    const canIndexPage = problem.created_by == null || (DEMO_MODE && problem.source === 'Fictional demo catalog');
+    const name = publicProblemName(problem);
+    const title = `${name} | MATHCOUNTS Test Admin`;
+    const description = [
+      name,
+      `Year ${problem.year ?? 'not listed'}`,
+      `Level ${problem.level || 'not listed'}`,
+      `Round ${problem.round || 'not listed'}`,
+      `Problem ${problem.problem_number ?? problem.id}`,
+    ].join(' · ');
+    const page = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="${canIndexPage ? 'index,follow' : 'noindex,nofollow'}">
+  <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(description)}">
+  <link rel="canonical" href="${escapeHtml(publicSiteUrl)}/problems/${problem.id}">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="${escapeHtml(title)}">
+  <meta property="og:description" content="${escapeHtml(description)}">
+  <meta property="og:url" content="${escapeHtml(publicSiteUrl)}/problems/${problem.id}">
+  <style>
+    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1f2937;background:#f1f6fd}
+    body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box}
+    main{width:min(100%,680px);background:#fff;border:1px solid #dbe3ef;border-radius:18px;padding:clamp(24px,5vw,40px);box-shadow:0 12px 32px #1f29371a}
+    h1{font-size:clamp(1.5rem,4vw,2rem);line-height:1.2;margin:0 0 8px;color:#183b70}
+    p{line-height:1.6;color:#536174;margin:0 0 24px}
+    dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin:0}
+    dl div{border:1px solid #e2e8f0;border-radius:12px;padding:14px}
+    dt{font-size:.8rem;color:#65748a;margin-bottom:5px}
+    dd{margin:0;font-weight:650}
+    footer{margin-top:24px;font-size:.9rem}
+    a{color:#2456a6;font-weight:600}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${escapeHtml(name)}</h1>
+    <p>Catalog record ${problem.id}. The problem statement is available only through authorized practice access.</p>
+    <dl>
+      <div><dt>Problem ID</dt><dd>${problem.id}</dd></div>
+      <div><dt>Year</dt><dd>${escapeHtml(problem.year ?? '—')}</dd></div>
+      <div><dt>Level</dt><dd>${escapeHtml(problem.level || '—')}</dd></div>
+      <div><dt>Round</dt><dd>${escapeHtml(problem.round || '—')}</dd></div>
+      <div><dt>Number</dt><dd>${escapeHtml(problem.problem_number ?? '—')}</dd></div>
+      <div><dt>Elo</dt><dd>${escapeHtml(problem.elo ?? '—')}</dd></div>
+    </dl>
+    <footer><a href="/">Open MATHCOUNTS Test Admin</a></footer>
+  </main>
+</body>
+</html>`;
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return res.type('html').send(page);
+  } catch (error) {
+    console.error('Public problem page error:', error);
+    return res.status(500).type('text/plain').send('Could not load problem page');
+  }
+});
+
 if (fs.existsSync(frontendDistDir)) {
   app.use(express.static(frontendDistDir, { index: false }));
   app.get('*', (req, res, next) => {
