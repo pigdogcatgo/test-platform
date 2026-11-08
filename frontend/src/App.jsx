@@ -93,6 +93,8 @@ const App = () => {
   const [expandedFolders, setExpandedFolders] = useState(() => new Set()); // folder names (create-test)
   const [adminExpandedFolders, setAdminExpandedFolders] = useState(() => new Set()); // folder IDs expanded in admin (empty = all collapsed)
   const [newTest, setNewTest] = useState({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
+  const [testSelectionMode, setTestSelectionMode] = useState('manual');
+  const [randomCriteria, setRandomCriteria] = useState({ count: '8', minElo: '', maxElo: '', year: '', level: '', round: '' });
   const [createTestError, setCreateTestError] = useState('');
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
@@ -109,6 +111,14 @@ const App = () => {
   const [classEloError, setClassEloError] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const [selectedStudent, setSelectedStudent] = useState(null);
+  const [studentRemovalOpen, setStudentRemovalOpen] = useState(false);
+  const [studentRemovalBusy, setStudentRemovalBusy] = useState(false);
+  const [studentRemovalError, setStudentRemovalError] = useState('');
+  const [accountReturnView, setAccountReturnView] = useState('teacher-dashboard');
+  const [accountForm, setAccountForm] = useState({ username: '', currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountError, setAccountError] = useState('');
+  const [accountNotice, setAccountNotice] = useState('');
   const [leaderboardSortBy, setLeaderboardSortBy] = useState('cumulative'); // 'cumulative' | 'elo'
   const [attemptDetails, setAttemptDetails] = useState(null);
   const [submittingTest, setSubmittingTest] = useState(false);
@@ -655,12 +665,22 @@ const App = () => {
       setCreateTestError('Add a test name and due date to continue.');
       return;
     }
-    if (newTest.problemIds.length === 0) {
+    if (testSelectionMode === 'manual' && newTest.problemIds.length === 0) {
       setCreateTestError(`Select at least one problem to create a ${newTest.testType === 'target' ? 'Target' : 'Sprint'} test.`);
       return;
     }
-    if (newTest.testType === 'target' && newTest.problemIds.length !== 8) {
+    if (testSelectionMode === 'manual' && newTest.testType === 'target' && newTest.problemIds.length !== 8) {
       setCreateTestError('Target tests need exactly 8 problems.');
+      return;
+    }
+    if (testSelectionMode === 'random' && (!/^\d+$/.test(randomCriteria.count) || Number(randomCriteria.count) < 1 || Number(randomCriteria.count) > 200 || (newTest.testType === 'target' && Number(randomCriteria.count) !== 8))) {
+      setCreateTestError(newTest.testType === 'target' ? 'Random Target tests need exactly 8 problems.' : 'Choose between 1 and 200 random problems.');
+      return;
+    }
+    const eloCriteriaValid = [randomCriteria.minElo, randomCriteria.maxElo].every(value => value === '' || (/^\d+$/.test(value) && Number(value) >= 0 && Number(value) <= 3000))
+      && (randomCriteria.minElo === '' || randomCriteria.maxElo === '' || Number(randomCriteria.minElo) <= Number(randomCriteria.maxElo));
+    if (testSelectionMode === 'random' && !eloCriteriaValid) {
+      setCreateTestError('Enter whole-number Elo limits from 0 to 3000, with the minimum no higher than the maximum.');
       return;
     }
 
@@ -668,16 +688,75 @@ const App = () => {
     try {
       await api.post('/api/tests', {
         name: newTest.name,
-        problemIds: newTest.problemIds,
+        ...(testSelectionMode === 'random'
+          ? { randomCriteria: { ...randomCriteria, count: Number(randomCriteria.count) } }
+          : { problemIds: newTest.problemIds }),
         dueDate: newTest.dueDate,
         timeLimit: newTest.timeLimit,
         testType: newTest.testType
       });
       setNewTest({ name: '', problemIds: [], dueDate: '', timeLimit: 30, testType: 'sprint' });
+      setTestSelectionMode('manual');
+      setRandomCriteria({ count: '8', minElo: '', maxElo: '', year: '', level: '', round: '' });
       loadUserData();
       setView('teacher-dashboard');
     } catch (error) {
       setCreateTestError(error.response?.data?.error || 'Could not create the test. Please try again.');
+    }
+  };
+
+  const openAccountSettings = () => {
+    setAccountReturnView(view);
+    setAccountForm({ username: '', currentPassword: '', newPassword: '', confirmPassword: '' });
+    setAccountError('');
+    setAccountNotice('');
+    setView('account-settings');
+  };
+
+  const saveAccountSettings = async (event) => {
+    event.preventDefault();
+    if (accountForm.newPassword && accountForm.newPassword !== accountForm.confirmPassword) {
+      setAccountError('The new passwords do not match.');
+      return;
+    }
+    setAccountBusy(true);
+    setAccountError('');
+    try {
+      const payload = { currentPassword: accountForm.currentPassword };
+      if (accountForm.username.trim()) payload.username = accountForm.username.trim();
+      if (accountForm.newPassword) payload.newPassword = accountForm.newPassword;
+      const { data } = await api.put('/api/me', payload);
+      localStorage.setItem('token', data.token);
+      setToken(data.token);
+      setUser(data.user);
+      setAccountForm({ username: '', currentPassword: '', newPassword: '', confirmPassword: '' });
+      setAccountNotice('Account settings saved. Other signed-in sessions have been closed.');
+    } catch (error) {
+      if (error.response?.status === 401 && error.response?.data?.error !== 'Current password is incorrect.') {
+        handleLogout('Your session expired. Sign in again to continue.');
+        return;
+      }
+      setAccountError(error.response?.data?.error || 'Could not save account settings. Please try again.');
+    } finally {
+      setAccountBusy(false);
+    }
+  };
+
+  const removeSelectedStudent = async () => {
+    if (!selectedStudent?.id) return;
+    setStudentRemovalBusy(true);
+    setStudentRemovalError('');
+    try {
+      await api.delete(`/api/students/${selectedStudent.id}`);
+      setStudents(current => current.filter(student => student.id !== selectedStudent.id));
+      setStudentRemovalOpen(false);
+      setSelectedStudentId(null);
+      setSelectedStudent(null);
+      setView('teacher-dashboard');
+    } catch (error) {
+      setStudentRemovalError(error.response?.data?.error || 'Could not remove this student. Please try again.');
+    } finally {
+      setStudentRemovalBusy(false);
     }
   };
 
@@ -773,6 +852,10 @@ const App = () => {
     const password = newStudent.password;
     if (!username || !password) {
       alert('Enter username and password');
+      return;
+    }
+    if (Array.from(password).length < 12 || new TextEncoder().encode(password).length > 72) {
+      alert('Student passwords must be at least 12 characters and no more than 72 UTF-8 bytes.');
       return;
     }
     try {
@@ -904,7 +987,7 @@ if (view === 'student-dashboard' && user) {
       <main className="min-h-screen bg-[#f1f6fd] flex justify-center">
         <div className="w-full max-w-6xl p-6">
 
-        <PracticeHeader audience="Student workspace" demoMode={DEMO_MODE} onLogout={handleLogout} />
+        <PracticeHeader audience="Student workspace" demoMode={DEMO_MODE} onLogout={handleLogout} onSettings={openAccountSettings} />
         <FolioIntro title={`Ready when you are, ${user.username}.`} description="Find your next practice below. Take it one problem at a time." count={availableTests.length} countLabel="tests to explore" />
 
         {dashboardLoadError && (
@@ -1136,7 +1219,7 @@ if (view === 'teacher-dashboard' && user) {
   return (
     <main className="min-h-screen bg-[#f1f6fd]">
       <DemoBanner />
-      <PracticeHeader audience="Teacher workspace" demoMode={DEMO_MODE} onLogout={handleLogout} />
+      <PracticeHeader audience="Teacher workspace" demoMode={DEMO_MODE} onLogout={handleLogout} onSettings={openAccountSettings} />
 
       <div className="max-w-7xl mx-auto px-6 py-8">
         {dashboardLoadError && (
@@ -1545,6 +1628,7 @@ if (view === 'register-students' && user) {
             <input
               type="password"
               placeholder="Password"
+              autoComplete="new-password"
               value={newStudent.password}
               onChange={(e) => setNewStudent({ ...newStudent, password: e.target.value })}
               className="border rounded-lg px-4 py-2 flex-1 min-w-[120px]"
@@ -1557,6 +1641,7 @@ if (view === 'register-students' && user) {
               Add student
             </button>
           </div>
+          <p className="mt-2 text-xs leading-5 text-gray-600">Use at least 12 characters. Passwords are limited to 72 UTF-8 bytes.</p>
         </div>
 
         <div className="bg-white rounded-xl shadow">
@@ -1698,13 +1783,81 @@ if (view === 'student-profile' && user) {
             </div>
           )}
         </div>
+
+        {!DEMO_MODE && <section className="mt-6 rounded-xl border border-red-200 bg-white p-6" aria-labelledby="remove-student-heading">
+          <h2 id="remove-student-heading" className="text-base font-semibold text-gray-900">Remove student</h2>
+          <p className="mt-2 text-sm leading-6 text-gray-600">Remove {selectedStudent.username} from your active roster. Their completed work and ratings will stay in the records.</p>
+          <button type="button" onClick={() => { setStudentRemovalError(''); setStudentRemovalOpen(true); }} className="mt-4 rounded-lg border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50">Remove this student</button>
+        </section>}
       </div>
+      {studentRemovalOpen && <ConfirmationDialog title={`Remove ${selectedStudent.username}?`} description="They will no longer be able to sign in or appear in your active roster. Their completed tests and rating history will be preserved." confirmLabel="Remove student" busyLabel="Removing…" busy={studentRemovalBusy} error={studentRemovalError} onConfirm={removeSelectedStudent} onCancel={() => !studentRemovalBusy && setStudentRemovalOpen(false)} />}
     </div>
   );
 }
 
+if (view === 'account-settings' && user) {
+  return (
+    <main className="min-h-screen bg-[#f1f6fd] px-4 py-8 sm:px-6">
+      <div className="mx-auto max-w-2xl">
+        <DemoBanner />
+        <section className="rounded-2xl bg-white p-6 shadow sm:p-8">
+          <button type="button" onClick={() => { setView(accountReturnView); setAccountNotice(''); }} className="mb-5 text-sm font-medium text-[#2a61ba] hover:underline">← Back</button>
+          <p className="text-sm font-semibold uppercase tracking-wide text-[#2a61ba]">Account</p>
+          <h1 className="mt-1 text-2xl font-bold text-gray-900">Account settings</h1>
+          <p className="mt-2 text-sm leading-6 text-gray-600">Signed in as <strong>{user.username}</strong>. Verify your current password to change your username or password.</p>
+          {accountNotice && <p role="status" className="mt-5 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-900">{accountNotice}</p>}
+          <form onSubmit={saveAccountSettings} className="mt-6 space-y-5">
+            <div>
+              <label htmlFor="account-username" className="mb-1.5 block text-sm font-medium text-gray-700">New username <span className="font-normal text-gray-500">(optional)</span></label>
+              <input id="account-username" autoComplete="username" minLength={3} maxLength={50} value={accountForm.username} onChange={event => setAccountForm({ ...accountForm, username: event.target.value })} className="w-full rounded-lg border border-gray-300 px-3 py-2.5" placeholder={user.username} />
+            </div>
+            <div>
+              <label htmlFor="account-current-password" className="mb-1.5 block text-sm font-medium text-gray-700">Current password</label>
+              <input id="account-current-password" type="password" autoComplete="current-password" required value={accountForm.currentPassword} onChange={event => setAccountForm({ ...accountForm, currentPassword: event.target.value })} className="w-full rounded-lg border border-gray-300 px-3 py-2.5" />
+            </div>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <div>
+                <label htmlFor="account-new-password" className="mb-1.5 block text-sm font-medium text-gray-700">New password <span className="font-normal text-gray-500">(optional)</span></label>
+                <input id="account-new-password" type="password" autoComplete="new-password" minLength={12} value={accountForm.newPassword} onChange={event => setAccountForm({ ...accountForm, newPassword: event.target.value })} className="w-full rounded-lg border border-gray-300 px-3 py-2.5" />
+                <p className="mt-1 text-xs text-gray-500">Use at least 12 characters.</p>
+              </div>
+              <div>
+                <label htmlFor="account-confirm-password" className="mb-1.5 block text-sm font-medium text-gray-700">Confirm new password</label>
+                <input id="account-confirm-password" type="password" autoComplete="new-password" value={accountForm.confirmPassword} onChange={event => setAccountForm({ ...accountForm, confirmPassword: event.target.value })} className="w-full rounded-lg border border-gray-300 px-3 py-2.5" />
+              </div>
+            </div>
+            {accountError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{accountError}</p>}
+            <button type="submit" disabled={accountBusy || !accountForm.currentPassword || (!accountForm.username.trim() && !accountForm.newPassword)} className="w-full rounded-lg bg-[#2a61ba] px-4 py-3 font-semibold text-white hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-50">{accountBusy ? 'Saving…' : 'Save account settings'}</button>
+          </form>
+        </section>
+      </div>
+    </main>
+  );
+}
+
 if (view === 'create-test' && user) {
-  const changeTestType = (type) => setNewTest(current => ({ ...current, testType: type }));
+  const changeTestType = (type) => {
+    setNewTest(current => ({ ...current, testType: type }));
+    if (type === 'target') setRandomCriteria(current => ({ ...current, count: '8' }));
+    else setRandomCriteria(current => ({ ...current, count: current.count === '8' ? '10' : current.count }));
+  };
+  const randomEligibleCount = problems.filter(problem => {
+    const metadata = getCatalogMetadata(problem, DEMO_MODE);
+    const elo = Number(problem.elo);
+    return (!randomCriteria.year || metadata.year === String(randomCriteria.year))
+      && (!randomCriteria.level || metadata.level === randomCriteria.level)
+      && (!randomCriteria.round || metadata.round === randomCriteria.round)
+      && (randomCriteria.minElo === '' || elo >= Number(randomCriteria.minElo))
+      && (randomCriteria.maxElo === '' || elo <= Number(randomCriteria.maxElo));
+  }).length;
+  const randomEloRangeValid = [randomCriteria.minElo, randomCriteria.maxElo].every(value => value === '' || (/^\d+$/.test(value) && Number(value) >= 0 && Number(value) <= 3000))
+    && (randomCriteria.minElo === '' || randomCriteria.maxElo === '' || Number(randomCriteria.minElo) <= Number(randomCriteria.maxElo));
+  const randomSelectionValid = /^\d+$/.test(randomCriteria.count)
+    && Number(randomCriteria.count) >= 1
+    && Number(randomCriteria.count) <= 200
+    && (newTest.testType !== 'target' || Number(randomCriteria.count) === 8)
+    && randomEloRangeValid
+    && randomEligibleCount >= Number(randomCriteria.count);
   const hiddenSelectedProblemCount = newTest.problemIds.filter(
     id => !visibleCatalogProblems.some(problem => problem.id === id)
   ).length;
@@ -1799,8 +1952,56 @@ if (view === 'create-test' && user) {
             </div>
           </fieldset>
 
-          <ProblemCatalogFilters demoMode={DEMO_MODE} filters={catalogFilters} options={catalogOptions} onChange={setCatalogFilters} />
+          <fieldset>
+            <legend className="mb-2 text-sm font-medium text-gray-700">Problem selection</legend>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-4 ${testSelectionMode === 'manual' ? 'border-[#2a61ba] bg-blue-50' : 'border-gray-200'}`}>
+                <input type="radio" name="problemSelectionMode" checked={testSelectionMode === 'manual'} onChange={() => setTestSelectionMode('manual')} className="mt-1" />
+                <span><span className="block font-medium text-gray-800">Choose problems</span><span className="mt-1 block text-sm text-gray-500">Select each problem from the catalog.</span></span>
+              </label>
+              <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-4 ${testSelectionMode === 'random' ? 'border-[#2a61ba] bg-blue-50' : 'border-gray-200'}`}>
+                <input type="radio" name="problemSelectionMode" checked={testSelectionMode === 'random'} onChange={() => setTestSelectionMode('random')} className="mt-1" />
+                <span><span className="block font-medium text-gray-800">Choose randomly</span><span className="mt-1 block text-sm text-gray-500">Let the system select from matching catalog problems.</span></span>
+              </label>
+            </div>
+          </fieldset>
 
+          {testSelectionMode === 'random' && <section className="rounded-xl border border-gray-200 bg-gray-50 p-4 sm:p-5" aria-labelledby="random-criteria-heading">
+            <h2 id="random-criteria-heading" className="font-semibold text-gray-900">Random problem filters</h2>
+            <p className="mt-1 text-sm text-gray-600">Every filter is optional. The selection is made securely when you create the test.</p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div>
+                <label htmlFor="random-count" className="mb-1 block text-sm font-medium text-gray-700">Number of problems</label>
+                <input id="random-count" type="number" min={newTest.testType === 'target' ? 8 : 1} max={newTest.testType === 'target' ? 8 : 200} step="1" value={randomCriteria.count} disabled={newTest.testType === 'target'} onChange={event => setRandomCriteria({ ...randomCriteria, count: event.target.value })} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 disabled:bg-gray-100" />
+                {newTest.testType === 'target' && <p className="mt-1 text-xs text-gray-500">Target tests contain exactly 8 problems.</p>}
+              </div>
+              <div>
+                <label htmlFor="random-min-elo" className="mb-1 block text-sm font-medium text-gray-700">Minimum Elo</label>
+                <input id="random-min-elo" type="number" min="0" max="3000" step="1" value={randomCriteria.minElo} onChange={event => setRandomCriteria({ ...randomCriteria, minElo: event.target.value })} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5" placeholder="Any" />
+              </div>
+              <div>
+                <label htmlFor="random-max-elo" className="mb-1 block text-sm font-medium text-gray-700">Maximum Elo</label>
+                <input id="random-max-elo" type="number" min="0" max="3000" step="1" value={randomCriteria.maxElo} onChange={event => setRandomCriteria({ ...randomCriteria, maxElo: event.target.value })} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5" placeholder="Any" />
+              </div>
+              <div>
+                <label htmlFor="random-year" className="mb-1 block text-sm font-medium text-gray-700">Year</label>
+                <select id="random-year" value={randomCriteria.year} onChange={event => setRandomCriteria({ ...randomCriteria, year: event.target.value })} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5"><option value="">Any year</option>{catalogOptions.years.map(year => <option key={year} value={year}>{year}</option>)}</select>
+              </div>
+              <div>
+                <label htmlFor="random-level" className="mb-1 block text-sm font-medium text-gray-700">Level</label>
+                <select id="random-level" value={randomCriteria.level} onChange={event => setRandomCriteria({ ...randomCriteria, level: event.target.value })} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5"><option value="">Any level</option>{catalogOptions.levels.map(level => <option key={level} value={level}>{level}</option>)}</select>
+              </div>
+              <div>
+                <label htmlFor="random-round" className="mb-1 block text-sm font-medium text-gray-700">Round</label>
+                <select id="random-round" value={randomCriteria.round} onChange={event => setRandomCriteria({ ...randomCriteria, round: event.target.value })} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5"><option value="">Any round</option>{catalogOptions.rounds.map(round => <option key={round} value={round}>{round}</option>)}</select>
+              </div>
+            </div>
+            <p className="mt-4 text-sm text-gray-700" role="status" aria-live="polite">{randomEligibleCount} accessible problems match these filters. {randomEligibleCount < Number(randomCriteria.count) && 'Widen the filters to include enough problems.'}</p>
+          </section>}
+
+          {testSelectionMode === 'manual' && <ProblemCatalogFilters demoMode={DEMO_MODE} filters={catalogFilters} options={catalogOptions} onChange={setCatalogFilters} />}
+
+          {testSelectionMode === 'manual' && <>
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="text-base font-semibold text-gray-800">Choose problems</h2>
             <p className="text-sm text-gray-600" role="status" aria-live="polite">{newTest.problemIds.length} selected{newTest.testType === 'target' ? ' · 8 required' : ' · 200 maximum'}</p>
@@ -1809,7 +2010,8 @@ if (view === 'create-test' && user) {
             Sprint can include 1–200 problems. Target must include exactly 8. Source identifies where a problem came from and does not limit which test type can use it. Filters only change which items are shown; selected problem IDs remain in this test.
             {hiddenSelectedProblemCount > 0 && ` ${hiddenSelectedProblemCount} selected problem${hiddenSelectedProblemCount === 1 ? ' is' : 's are'} currently hidden by the filters.`}
           </p>
-          <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-1" role="region" aria-label="Problem selection">
+          </>}
+          {testSelectionMode === 'manual' && <div className="max-h-96 overflow-y-auto border rounded-lg p-4 space-y-1" role="region" aria-label="Problem selection">
             {(() => {
               const byFolder = {};
               for (const p of visibleCatalogProblems) {
@@ -1898,16 +2100,16 @@ if (view === 'create-test' && user) {
                 );
               });
             })()}
-          </div>
+          </div>}
 
-          {visibleCatalogProblems.length === 0 && (
+          {testSelectionMode === 'manual' && visibleCatalogProblems.length === 0 && (
             <p className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600" role="status">No problems match these filters.</p>
           )}
 
           {createTestError && <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">{createTestError}</p>}
           <button
             type="submit"
-            disabled={newTest.problemIds.length === 0 || (newTest.testType === 'target' && newTest.problemIds.length !== 8) || !newTest.name.trim() || !newTest.dueDate || !Number.isInteger(Number(newTest.timeLimit)) || Number(newTest.timeLimit) < 1 || Number(newTest.timeLimit) > 240}
+            disabled={(testSelectionMode === 'manual' && (newTest.problemIds.length === 0 || (newTest.testType === 'target' && newTest.problemIds.length !== 8))) || (testSelectionMode === 'random' && !randomSelectionValid) || !newTest.name.trim() || !newTest.dueDate || !Number.isInteger(Number(newTest.timeLimit)) || Number(newTest.timeLimit) < 1 || Number(newTest.timeLimit) > 240}
             className="w-full bg-[#2a61ba] hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-50 text-white py-3 rounded-lg font-medium"
           >
             Create Test
@@ -1939,6 +2141,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                 ← Back to Dashboard
               </button>
             )}
+            <button type="button" onClick={openAccountSettings} className="text-sm text-[#2a61ba] hover:underline">Account settings</button>
             <button
               onClick={handleLogout}
               className="text-sm text-[#2a61ba] hover:underline"
@@ -2188,9 +2391,10 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                           <td className="px-4 py-3">{metadata.year || '—'}</td>
                           <td className="px-4 py-3">{metadata.level || '—'}</td>
                           <td className="px-4 py-3">{metadata.round || '—'}</td>
-                          <td className="px-4 py-3">{metadata.number || '—'}</td>
+                          <td className="px-4 py-3">{metadata.number || '—'}{isTeacherAdmin && <a href={`/problems/${problem.id}`} target="_blank" rel="noreferrer" className="ml-3 text-[#2a61ba] hover:underline font-medium">See problem</a>}</td>
                           <td className="px-4 py-3">{metadata.elo}</td>
-                          {!isTeacherAdmin && <td className="px-4 py-3 space-x-2">
+                          {!isTeacherAdmin && <td className="px-4 py-3 space-x-2 whitespace-nowrap">
+                            <a href={`/problems/${problem.id}`} target="_blank" rel="noreferrer" className="text-[#2a61ba] hover:underline font-medium">See problem</a>
                             <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', problem_number: problem.problem_number ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>
                             <button type="button" onClick={() => setProblemToDelete(problem.id)} className="text-red-600 hover:underline font-medium">Delete</button>
                           </td>}
