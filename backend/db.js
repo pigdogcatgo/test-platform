@@ -211,6 +211,8 @@ export async function initDatabase() {
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS teacher_id INTEGER REFERENCES users(id)
     `);
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0');
     await client.query(`
       CREATE TABLE IF NOT EXISTS teacher_settings (
         teacher_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
