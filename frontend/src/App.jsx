@@ -2391,10 +2391,10 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                           <td className="px-4 py-3">{metadata.year || '—'}</td>
                           <td className="px-4 py-3">{metadata.level || '—'}</td>
                           <td className="px-4 py-3">{metadata.round || '—'}</td>
-                          <td className="px-4 py-3">{metadata.number || '—'}{isTeacherAdmin && <a href={`/problems/${problem.id}`} target="_blank" rel="noreferrer" className="ml-3 text-[#2a61ba] hover:underline font-medium">See problem</a>}</td>
+                          <td className="px-4 py-3">{metadata.number || '—'}{isTeacherAdmin && <a href={`/problems/${problem.id}`} className="ml-3 text-[#2a61ba] hover:underline font-medium">See problem</a>}</td>
                           <td className="px-4 py-3">{metadata.elo}</td>
                           {!isTeacherAdmin && <td className="px-4 py-3 space-x-2 whitespace-nowrap">
-                            <a href={`/problems/${problem.id}`} target="_blank" rel="noreferrer" className="text-[#2a61ba] hover:underline font-medium">See problem</a>
+                            <a href={`/problems/${problem.id}`} className="text-[#2a61ba] hover:underline font-medium">See problem</a>
                             <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', problem_number: problem.problem_number ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>
                             <button type="button" onClick={() => setProblemToDelete(problem.id)} className="text-red-600 hover:underline font-medium">Delete</button>
                           </td>}
