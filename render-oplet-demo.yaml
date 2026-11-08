@@ -13,6 +13,8 @@ services:
         value: "true"
       - key: VITE_DEMO_MODE
         value: "true"
+      - key: PUBLIC_SITE_URL
+        value: https://mathcounts-oplet-prototype.onrender.com
       - key: CLIENT_IP_HEADER
         value: cf-connecting-ip
       - key: ENABLE_TEACHER_SIGNUP
