@@ -87,6 +87,7 @@ const App = () => {
   const [timeRemaining, setTimeRemaining] = useState(null);
   const [testDeadlineAt, setTestDeadlineAt] = useState(null);
   const [startingTestId, setStartingTestId] = useState(null);
+  const [startTestError, setStartTestError] = useState('');
   const testSubmitRef = useRef({ activeTest: null, testAnswers: {}, testProblems: [] });
   const handleSubmitTestRef = useRef(() => {});
   
@@ -630,6 +631,7 @@ const App = () => {
 
   const startTest = async (test) => {
     if (startingTestId !== null) return;
+    setStartTestError('');
     const hasAttempt = attempts.find(a => a.test_id === test.id);
     if (hasAttempt) {
       alert('You have already completed this test');
@@ -672,6 +674,11 @@ const App = () => {
       }
       if (error.response?.status === 410) {
         handleExpiredTest(test.id);
+        return;
+      }
+      if (error.response?.status === 409) {
+        setStartTestError(error.response?.data?.error || 'Complete the previous Target stage before starting this one.');
+        loadUserData({ preserveView: true }).catch(() => {});
         return;
       }
       alert(error.response?.data?.error || 'Could not load this test. Please try again.');
@@ -1023,6 +1030,9 @@ if (view === 'student-dashboard' && user) {
         {testExpirationNotice && (
           <div role="status" className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-950">{testExpirationNotice}</div>
         )}
+        {startTestError && (
+          <div role="alert" className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-950">{startTestError}</div>
+        )}
 
         {/* Content */}
         <div className="grid md:grid-cols-2 gap-6">
@@ -1044,20 +1054,22 @@ if (view === 'student-dashboard' && user) {
                     <h3 className="font-semibold text-gray-800 mb-1">
                       {test.name}
                     </h3>
+                    {test.target_stage && <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-[#2a61ba]">Target · Stage {test.target_stage} of 4</p>}
                     <p className="text-sm text-gray-500 mb-3">
                       {test.test_type === 'target' ? 'Target' : 'Sprint'} · {(test.problem_ids || []).length} questions ·{' '}
                       {test.time_limit} min
                     </p>
+                    {test.sequence_locked && <p className="mb-3 rounded-lg bg-gray-100 px-3 py-2 text-xs leading-5 text-gray-700">Complete the previous Target stage to unlock this test.</p>}
                     <p className="mb-3 text-xs leading-5 text-gray-600">{DEMO_MODE ? 'Demo scoring: ' : 'Scoring: '}{test.test_type === 'target' ? '2 points per correct answer.' : '1 point per correct answer.'} ELO updates separately for each problem.</p>
                     {!DEMO_MODE && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">This test submits automatically if you switch to another tab or app. Keep it open in the foreground until you finish.</p>}
                     <button
                       type="button"
                       onClick={() => startTest(test)}
-                      disabled={startingTestId !== null || test.session_expired}
+                      disabled={startingTestId !== null || test.session_expired || test.sequence_locked}
                       aria-busy={startingTestId === test.id}
                       className="w-full bg-[#2a61ba] hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-70 text-white py-2 rounded-lg text-sm font-medium"
                     >
-                      {startingTestId === test.id ? 'Preparing test…' : test.session_expired ? 'Time expired' : 'Start Test'}
+                      {startingTestId === test.id ? 'Preparing test…' : test.sequence_locked ? 'Locked' : test.session_expired ? 'Time expired' : 'Start Test'}
                     </button>
                   </div>
                 ))}
@@ -1094,6 +1106,7 @@ if (view === 'student-dashboard' && user) {
                       <h3 className="font-semibold text-gray-800 mb-1">
                         {test?.name || 'Unknown Test'}
                       </h3>
+                      {test?.target_stage && <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-[#2a61ba]">Target · Stage {test.target_stage} of 4</p>}
                       <p className="text-sm text-gray-500">
                         Score: {attempt.score}/{attempt.total} (
                         {Math.round(
@@ -1274,6 +1287,7 @@ if (view === 'teacher-dashboard' && user) {
                     <h3 className="font-medium text-gray-800 mb-1">
                       {test.name}
                     </h3>
+                    {test.target_stage && <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-[#2a61ba]">Target · Stage {test.target_stage} of 4</p>}
                     <p className="text-sm text-gray-500 mb-3">
                       {(test.problem_ids || []).length} questions • {test.time_limit} min
                     </p>
@@ -1966,7 +1980,7 @@ if (view === 'create-test' && user) {
                 />
                 <div>
                   <span className="font-medium text-gray-800">Target</span>
-                  <p className="text-sm text-gray-500 mt-0.5">8 problems, 2 points each. {DEMO_MODE ? 'Fictional demo scoring: 2× correct answers.' : 'Counts toward MATHCOUNTS score as 2× correct answers.'}</p>
+                  <p className="text-sm text-gray-500 mt-0.5">8 problems become four ordered tests of 2 problems each. Students unlock each test after submitting the one before it. {DEMO_MODE ? 'Fictional demo scoring: 2× correct answers.' : 'Counts toward MATHCOUNTS score as 2× correct answers.'}</p>
                 </div>
               </label>
             </div>
@@ -1993,7 +2007,7 @@ if (view === 'create-test' && user) {
               <div>
                 <label htmlFor="random-count" className="mb-1 block text-sm font-medium text-gray-700">Number of problems</label>
                 <input id="random-count" type="number" min={newTest.testType === 'target' ? 8 : 1} max={newTest.testType === 'target' ? 8 : 200} step="1" value={randomCriteria.count} disabled={newTest.testType === 'target'} onChange={event => setRandomCriteria({ ...randomCriteria, count: event.target.value })} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 disabled:bg-gray-100" />
-                {newTest.testType === 'target' && <p className="mt-1 text-xs text-gray-500">Target tests contain exactly 8 problems.</p>}
+                {newTest.testType === 'target' && <p className="mt-1 text-xs text-gray-500">One Target assignment creates four ordered stages of 2 problems each.</p>}
               </div>
               <div>
                 <label htmlFor="random-min-elo" className="mb-1 block text-sm font-medium text-gray-700">Minimum Elo</label>
@@ -2024,10 +2038,10 @@ if (view === 'create-test' && user) {
           {testSelectionMode === 'manual' && <>
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="text-base font-semibold text-gray-800">Choose problems</h2>
-            <p className="text-sm text-gray-600" role="status" aria-live="polite">{newTest.problemIds.length} selected{newTest.testType === 'target' ? ' · 8 required' : ' · 200 maximum'}</p>
+            <p className="text-sm text-gray-600" role="status" aria-live="polite">{newTest.problemIds.length} selected{newTest.testType === 'target' ? ' · 8 required · split into 4 stages' : ' · 200 maximum'}</p>
           </div>
           <p className="-mt-4 text-xs text-gray-600">
-            Sprint can include 1–200 problems. Target must include exactly 8. Source identifies where a problem came from and does not limit which test type can use it. Filters only change which items are shown; selected problem IDs remain in this test.
+            Sprint can include 1–200 problems. Target includes 8 problems, assigned as four ordered 2-question tests; students must submit each stage before the next unlocks. Source identifies where a problem came from and does not limit which test type can use it. Filters only change which items are shown; selected problem IDs remain in this assignment.
             {hiddenSelectedProblemCount > 0 && ` ${hiddenSelectedProblemCount} selected problem${hiddenSelectedProblemCount === 1 ? ' is' : 's are'} currently hidden by the filters.`}
           </p>
           </>}

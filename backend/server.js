@@ -6,7 +6,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { isIP } from 'net';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
@@ -1781,29 +1781,57 @@ app.get('/api/tests', authenticateToken, async (req, res) => {
         return res.json([]);
       }
       const result = await pool.query(
-        `SELECT t.*,
-                (ts.expires_at IS NOT NULL AND ts.expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP) AS session_expired
+        `SELECT t.id, t.name, t.problem_ids, t.due_date, t.time_limit, t.created_by,
+                t.test_type, t.target_sequence_id, t.target_stage, t.created_at,
+                (ts.expires_at IS NOT NULL AND ts.expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP) AS session_expired,
+                CASE WHEN t.target_sequence_id IS NOT NULL AND t.target_stage > 1 THEN EXISTS (
+                  SELECT 1
+                  FROM tests previous_stage
+                  WHERE previous_stage.target_sequence_id = t.target_sequence_id
+                    AND previous_stage.target_stage < t.target_stage
+                    AND NOT EXISTS (
+                      SELECT 1 FROM test_attempts completed
+                      WHERE completed.test_id = previous_stage.id AND completed.student_id = $2
+                    )
+                ) ELSE false END AS sequence_locked
          FROM tests t
          LEFT JOIN test_sessions ts ON ts.test_id = t.id AND ts.student_id = $2
          WHERE t.created_by = $1
-         ORDER BY t.created_at DESC`,
+         ORDER BY t.created_at DESC, t.target_stage ASC NULLS FIRST`,
         [teacherId, req.user.id]
       );
       return res.json(result.rows);
     }
     if (req.user.role === 'teacher') {
       const result = await pool.query(
-        'SELECT * FROM tests WHERE created_by = $1 ORDER BY created_at DESC',
+        'SELECT * FROM tests WHERE created_by = $1 ORDER BY created_at DESC, target_stage ASC NULLS FIRST',
         [req.user.id]
       );
       return res.json(result.rows);
     }
-    const result = await pool.query('SELECT * FROM tests ORDER BY created_at DESC');
+    const result = await pool.query('SELECT * FROM tests ORDER BY created_at DESC, target_stage ASC NULLS FIRST');
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+async function hasIncompletePreviousTargetStage(client, test, studentId) {
+  if (!test.target_sequence_id || !test.target_stage || test.target_stage <= 1) return false;
+  const result = await client.query(
+    `SELECT 1
+     FROM tests previous_stage
+     WHERE previous_stage.target_sequence_id = $1
+       AND previous_stage.target_stage < $2
+       AND NOT EXISTS (
+         SELECT 1 FROM test_attempts completed
+         WHERE completed.test_id = previous_stage.id AND completed.student_id = $3
+       )
+     LIMIT 1`,
+    [test.target_sequence_id, test.target_stage, studentId]
+  );
+  return result.rowCount > 0;
+}
 
 // Create test (teacher only)
 app.post('/api/tests', authenticateToken, async (req, res) => {
@@ -1934,9 +1962,13 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
         await client.query('SELECT pg_advisory_xact_lock(20261030, 1)');
         await client.query('SELECT pg_advisory_xact_lock(20261031, $1)', [req.user.id]);
         const quota = await client.query(
-          `SELECT COUNT(*)::int AS total_tests,
+          `SELECT COUNT(*) FILTER (
+                    WHERE target_sequence_id IS NULL OR target_stage = 1
+                  )::int AS total_tests,
                   COUNT(*) FILTER (
-                    WHERE created_by = $1 AND created_at >= CURRENT_TIMESTAMP - INTERVAL '1 hour'
+                    WHERE created_by = $1
+                      AND created_at >= CURRENT_TIMESTAMP - INTERVAL '1 hour'
+                      AND (target_sequence_id IS NULL OR target_stage = 1)
                   )::int AS teacher_recent_tests
            FROM tests`,
           [req.user.id]
@@ -1954,13 +1986,33 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
           });
         }
       }
-      const result = await client.query(
-        `INSERT INTO tests (name, problem_ids, due_date, time_limit, created_by, test_type, problem_elo_snapshot)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [name.trim(), problemIds, dueDate, timeLimitMinutes, req.user.id, type, selectedProblemElos]
-      );
+      const targetSequenceId = type === 'target' ? randomUUID() : null;
+      const stageCount = type === 'target' ? 4 : 1;
+      const createdTests = [];
+      for (let stageIndex = 0; stageIndex < stageCount; stageIndex += 1) {
+        const stageProblemIds = type === 'target'
+          ? problemIds.slice(stageIndex * 2, (stageIndex + 1) * 2)
+          : problemIds;
+        const stageEloSnapshot = selectedProblemElos
+          ? Object.fromEntries(stageProblemIds.map(id => [id, selectedProblemElos[id]]))
+          : null;
+        const result = await client.query(
+          `INSERT INTO tests (
+             name, problem_ids, due_date, time_limit, created_by, test_type, problem_elo_snapshot,
+             target_sequence_id, target_stage
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+          [
+            name.trim(), stageProblemIds, dueDate, timeLimitMinutes, req.user.id, type,
+            stageEloSnapshot, targetSequenceId, type === 'target' ? stageIndex + 1 : null,
+          ]
+        );
+        createdTests.push(result.rows[0]);
+      }
       await client.query('COMMIT');
-      res.json(result.rows[0]);
+      res.status(201).json(type === 'target'
+        ? { target_sequence_id: targetSequenceId, tests: createdTests }
+        : createdTests[0]);
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
@@ -2083,7 +2135,7 @@ app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
         student_id: attempt.student_id
       },
       showAnswers,
-      solutionsLink: attempt.solutions_link || null,
+      solutionsLink: showAnswers ? (attempt.solutions_link || null) : null,
       problems
     });
   } catch (error) {
@@ -2106,6 +2158,9 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
       const teacherId = studentRow.rows[0]?.teacher_id;
       if (teacherId == null || teacherId !== test.created_by) {
         return res.status(403).json({ error: 'Access denied' });
+      }
+      if (await hasIncompletePreviousTargetStage(pool, test, req.user.id)) {
+        return res.status(409).json({ error: 'Complete the previous Target stage before loading its questions.' });
       }
       const sessionResult = await pool.query(
         `SELECT submitted_at,
@@ -2152,7 +2207,7 @@ app.get('/api/tests/:id/pdf', authenticateToken, async (req, res) => {
   if (!Number.isSafeInteger(testId) || testId < 1) return res.status(400).send('Invalid test id');
   try {
     const result = await pool.query(
-      `SELECT t.id, t.created_by, t.source_document_id, d.student_data
+      `SELECT t.id, t.created_by, t.source_document_id, t.target_sequence_id, t.target_stage, d.student_data
        FROM tests t
        JOIN source_documents d ON d.id = t.source_document_id
        WHERE t.id = $1 AND d.rights_confirmed = true AND d.created_by = t.created_by`,
@@ -2166,6 +2221,9 @@ app.get('/api/tests/:id/pdf', authenticateToken, async (req, res) => {
     } else if (req.user.role === 'student') {
       const student = await pool.query('SELECT teacher_id FROM users WHERE id = $1', [req.user.id]);
       if (student.rows[0]?.teacher_id !== test.created_by) return res.status(403).send('Forbidden');
+      if (await hasIncompletePreviousTargetStage(pool, test, req.user.id)) {
+        return res.status(409).send('Complete the previous Target stage before opening its PDF');
+      }
       const sessionResult = await pool.query(
         `SELECT submitted_at,
                 expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP AS expired
@@ -2302,7 +2360,7 @@ app.post('/api/tests/:id/start', authenticateToken, async (req, res) => {
   try {
     await client.query('BEGIN');
     const testResult = await client.query(
-      'SELECT id, created_by, time_limit FROM tests WHERE id = $1 FOR SHARE',
+      'SELECT id, created_by, time_limit, target_sequence_id, target_stage FROM tests WHERE id = $1 FOR SHARE',
       [testId]
     );
     const test = testResult.rows[0];
@@ -2314,6 +2372,10 @@ app.post('/api/tests/:id/start', authenticateToken, async (req, res) => {
     if (studentResult.rows[0]?.teacher_id !== test.created_by) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'You can only take tests assigned by your teacher' });
+    }
+    if (await hasIncompletePreviousTargetStage(client, test, req.user.id)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Complete the previous Target stage before starting this one.' });
     }
     const attemptResult = await client.query(
       'SELECT id FROM test_attempts WHERE test_id = $1 AND student_id = $2',
@@ -2391,6 +2453,10 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     if (studentRow.rows[0]?.teacher_id !== test.created_by) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'You can only submit tests assigned by your teacher' });
+    }
+    if (await hasIncompletePreviousTargetStage(client, test, req.user.id)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Complete the previous Target stage before submitting this one.' });
     }
 
     const sessionResult = await client.query(

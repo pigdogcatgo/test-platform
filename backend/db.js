@@ -111,6 +111,16 @@ export async function initDatabase() {
       console.warn('Migration test_type (non-fatal):', migErr.message);
     }
     try {
+      await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS target_sequence_id UUID');
+      await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS target_stage SMALLINT');
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS tests_target_sequence_stage_unique
+                          ON tests(target_sequence_id, target_stage)
+                          WHERE target_sequence_id IS NOT NULL`);
+      console.log('Tests Target sequence columns and index ensured');
+    } catch (migErr) {
+      console.warn('Migration Target sequence (non-fatal):', migErr.message);
+    }
+    try {
       await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS solutions_link TEXT');
       await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS answers_released BOOLEAN DEFAULT false');
       console.log('Tests solutions_link and answers_released columns ensured');
@@ -292,6 +302,15 @@ export async function initDatabase() {
       )
     `);
     await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN NOT NULL DEFAULT false');
+    await client.query("ALTER TABLE tests ADD COLUMN IF NOT EXISTS test_type VARCHAR(20) DEFAULT 'sprint'");
+    await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS problem_elo_snapshot JSONB');
+    // Ensure Target sequencing exists on fresh databases as well as upgrades;
+    // the earlier best-effort migration runs before this table is created.
+    await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS target_sequence_id UUID');
+    await client.query('ALTER TABLE tests ADD COLUMN IF NOT EXISTS target_stage SMALLINT');
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS tests_target_sequence_stage_unique
+                        ON tests(target_sequence_id, target_stage)
+                        WHERE target_sequence_id IS NOT NULL`);
 
     // Private, rights-attested source documents. Keep the original available
     // only to the owning teacher and store a separate question-pages-only copy
