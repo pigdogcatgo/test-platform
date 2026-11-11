@@ -151,7 +151,7 @@ export default function StudentTestPage({
         </section>
 
         <div className="mb-4 rounded-xl border-2 border-amber-500 bg-amber-100 px-4 py-4 text-center text-sm sm:text-base font-semibold text-amber-900 shadow-sm" role="note">
-          Your answers save to your account as you work. If you sign out or leave this page, you can return to the test with the time you had left.
+          Your answers save to your account as you work. Closing this page pauses the test. Your teacher must approve resuming it; your saved time starts counting down when you return.
         </div>
 
         {timeRemaining < 60 && (

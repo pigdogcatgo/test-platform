@@ -405,6 +405,7 @@ export async function initDatabase() {
     await client.query('ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS is_paused BOOLEAN NOT NULL DEFAULT false');
     await client.query('ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS paused_at TIMESTAMPTZ');
     await client.query('ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ');
+    await client.query('ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS resume_approved BOOLEAN NOT NULL DEFAULT false');
     await client.query(`
       UPDATE test_sessions
       SET last_activity_at = COALESCE(last_activity_at, clock_timestamp()),

@@ -1059,7 +1059,7 @@ if (view === 'taking-test' && activeTest) {
         setTestAnswers={updateTestAnswers}
         token={token}
         answerSaveState={answerSaveState}
-        onLogout={() => handleLogout('Your saved test is paused. Sign back in to continue with your remaining time.')}
+        onLogout={() => handleLogout('Your saved test is paused. Ask your teacher to approve resuming it before continuing.')}
         onSubmit={handleSubmitTest}
         submitting={submittingTest}
         submissionError={submissionError}
@@ -1126,17 +1126,17 @@ if (view === 'student-dashboard' && user) {
                       {test.time_limit} min
                     </p>
                     {test.sequence_locked && <p className="mb-3 rounded-lg bg-gray-100 px-3 py-2 text-xs leading-5 text-gray-700">Complete the previous Target stage to unlock this test.</p>}
-                    {test.has_session && !test.session_expired && <p className="mb-3 rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-900">{test.session_paused ? `Paused · answers saved. Choose Resume Test to continue with ${formatRemainingTime(test.session_remaining_ms)} left.` : test.session_interrupted ? `Connection interrupted · your last checkpoint has about ${formatRemainingTime(test.session_remaining_ms)} left. Choose Resume Test to continue.` : `Test in progress · ${formatRemainingTime(test.session_remaining_ms)} remaining. Answers save to your account.`}</p>}
+                    {test.has_session && !test.session_expired && <p className="mb-3 rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-900">{test.resume_approved ? `Your teacher approved resuming. Choose Resume Test to continue with ${formatRemainingTime(test.session_remaining_ms)} left.` : 'Your answers are saved. Ask your teacher to approve resuming this test in Analytics, then refresh this page.'}</p>}
                     <p className="mb-3 text-xs leading-5 text-gray-600">{DEMO_MODE ? 'Demo scoring: ' : 'Scoring: '}{test.test_type === 'target' ? '2 points per correct answer.' : '1 point per correct answer.'} ELO updates separately for each problem.</p>
-                    {!DEMO_MODE && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Answers save as you work. Sign out or leave the page to pause, then choose Resume Test to continue later.</p>}
+                    {!DEMO_MODE && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Answers save as you work. Closing the test pauses it. Your teacher must approve before you can resume.</p>}
                     <button
                       type="button"
                       onClick={() => startTest(test)}
-                      disabled={startingTestId !== null || test.session_expired || test.sequence_locked}
+                      disabled={startingTestId !== null || test.session_expired || test.sequence_locked || (test.has_session && !test.resume_approved)}
                       aria-busy={startingTestId === test.id}
                       className="w-full bg-[#2a61ba] hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-70 text-white py-2 rounded-lg text-sm font-medium"
                     >
-                      {startingTestId === test.id ? 'Preparing test…' : test.sequence_locked ? 'Locked' : test.session_expired ? 'Time expired' : test.has_session ? 'Resume Test' : 'Start Test'}
+                      {startingTestId === test.id ? 'Preparing test…' : test.sequence_locked ? 'Locked' : test.session_expired ? 'Time expired' : test.has_session ? (test.resume_approved ? 'Resume Test' : 'Teacher approval required') : 'Start Test'}
                     </button>
                   </div>
                 ))}
@@ -1624,7 +1624,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
 
           <div className="bg-white rounded-xl shadow p-6">
             <h2 className="text-base font-semibold text-gray-800 mb-2">In-progress and paused tests</h2>
-            <p className="mb-4 text-sm text-gray-600">Students can resume a paused test from their dashboard. If you use Resume for student, the countdown starts immediately with the time left at the last checkpoint, including while the student is signing in.</p>
+            <p className="mb-4 text-sm text-gray-600">Students need your approval to reopen a test. Approve a paused or disconnected session below. The timer stays paused until the student refreshes their dashboard and chooses Resume Test.</p>
             {sessionResumeNotice && <p className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-900" role="status">{sessionResumeNotice}</p>}
             {sessions.length === 0 ? (
               <p className="text-sm text-gray-500">No unfinished student sessions for this test.</p>
@@ -1645,7 +1645,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                         try {
                           const { data } = await api.post(`/api/tests/${test.id}/sessions/${session.student_id}/resume`);
                           await loadTestAnalytics(test.id);
-                          setSessionResumeNotice(`${session.username}'s countdown has started with ${formatRemainingTime(data.remainingMs)} remaining. Time continues while they sign in. Students can also resume paused tests from their dashboard.`);
+                          setSessionResumeNotice(`${session.username} may resume with ${formatRemainingTime(data.remainingMs)} remaining. Ask them to refresh their dashboard and choose Resume Test. The timer is paused until then.`);
                         } catch (error) {
                           setSessionResumeNotice(error.response?.data?.error || 'Could not resume this test. Refresh the analytics and try again.');
                         } finally {
@@ -1654,7 +1654,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                       }}
                       className="rounded-lg bg-[#2a61ba] px-4 py-2 text-sm font-semibold text-white hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      {resumingSessionStudentId === session.student_id ? 'Resuming…' : session.can_resume ? 'Resume for student' : session.session_state === 'active' ? 'In progress' : 'No time left'}
+                      {resumingSessionStudentId === session.student_id ? 'Approving…' : session.resume_approved ? 'Approved' : session.can_resume ? 'Approve resume' : session.session_state === 'active' ? 'In progress' : 'No time left'}
                     </button>
                   </div>
                 ))}

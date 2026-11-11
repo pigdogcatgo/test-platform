@@ -1487,7 +1487,7 @@ app.get('/api/uploads/db/:id', authenticateToken, async (req, res) => {
          LEFT JOIN test_sessions ts ON ts.test_id = t.id AND ts.student_id = $2
          LEFT JOIN test_attempts ta ON ta.test_id = t.id AND ta.student_id = $2
          WHERE p.image_url = $1 AND t.created_by = $3
-           AND ((ts.submitted_at IS NULL AND ts.is_paused = false AND ts.expires_at + INTERVAL '30 seconds' >= CURRENT_TIMESTAMP)
+           AND ((ts.submitted_at IS NULL AND ts.is_paused = false AND ts.last_activity_at >= CURRENT_TIMESTAMP - INTERVAL '30 seconds' AND ts.expires_at + INTERVAL '30 seconds' >= CURRENT_TIMESTAMP)
              OR ta.id IS NOT NULL)
          LIMIT 1`,
         ['/uploads/db/' + id, req.user.id, teacherId]
@@ -1542,7 +1542,7 @@ app.get('/api/uploads/:filename', authenticateToken, async (req, res) => {
            LEFT JOIN test_sessions ts ON ts.test_id = t.id AND ts.student_id = $3
            LEFT JOIN test_attempts ta ON ta.test_id = t.id AND ta.student_id = $3
            WHERE p.image_url = $1 AND t.created_by = $2
-             AND ((ts.submitted_at IS NULL AND ts.is_paused = false AND ts.expires_at + INTERVAL '30 seconds' >= CURRENT_TIMESTAMP)
+             AND ((ts.submitted_at IS NULL AND ts.is_paused = false AND ts.last_activity_at >= CURRENT_TIMESTAMP - INTERVAL '30 seconds' AND ts.expires_at + INTERVAL '30 seconds' >= CURRENT_TIMESTAMP)
                OR ta.id IS NOT NULL)
            LIMIT 1`,
           [imageUrl, teacherId, req.user.id]
@@ -1785,6 +1785,7 @@ app.get('/api/tests', authenticateToken, async (req, res) => {
                 t.test_type, t.target_sequence_id, t.target_stage, t.created_at,
                 (ts.test_id IS NOT NULL) AS has_session,
                 COALESCE(ts.is_paused, false) AS session_paused,
+                COALESCE(ts.resume_approved, false) AS resume_approved,
                 (ts.test_id IS NOT NULL AND (
                   ts.is_paused OR ts.last_activity_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
                 )) AS session_interrupted,
@@ -2272,7 +2273,7 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
         return res.status(409).json({ error: 'Complete the previous Target stage before loading its questions.' });
       }
       const sessionResult = await pool.query(
-        `SELECT submitted_at, is_paused,
+        `SELECT submitted_at, is_paused, (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale,
                 expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP AS expired
          FROM test_sessions WHERE test_id = $1 AND student_id = $2`,
         [testId, req.user.id]
@@ -2280,7 +2281,7 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
       const session = sessionResult.rows[0];
       if (!session) return res.status(409).json({ error: 'Start this test before loading its questions' });
       if (session.submitted_at) return res.status(400).json({ error: 'Test already submitted' });
-      if (session.is_paused) return res.status(409).json({ error: 'Resume this test before loading its questions' });
+      if (session.is_paused || session.stale) return res.status(409).json({ error: 'Ask your teacher to approve resuming this test before loading its questions' });
       if (session.expired) {
         return res.status(410).json({ error: 'The test time limit has passed' });
       }
@@ -2290,14 +2291,14 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
     if (problemIds.length === 0) return res.json([]);
-    const visibility = req.user.role === 'admin' ? '' : ' AND (p.created_by IS NULL OR p.created_by = $3)';
+    const visibility = req.user.role === 'admin' ? '' : ' AND (p.created_by IS NULL OR p.created_by = $2)';
     const sourceColumn = req.user.role === 'student' ? '' : ', p.source';
     const result = await pool.query(
       `SELECT p.id, p.question, p.image_url${sourceColumn}, p.folder_id,
               f.name AS folder_name
        FROM problems p LEFT JOIN folders f ON p.folder_id = f.id
        WHERE p.id = ANY($1)${visibility}`,
-      req.user.role === 'admin' ? [problemIds, testId] : [problemIds, testId, test.created_by]
+      req.user.role === 'admin' ? [problemIds] : [problemIds, test.created_by]
     );
     const problemMap = Object.fromEntries(result.rows.map(p => [p.id, p]));
     const ordered = problemIds.map(id => problemMap[id]).filter(Boolean);
@@ -2335,7 +2336,7 @@ app.get('/api/tests/:id/pdf', authenticateToken, async (req, res) => {
         return res.status(409).send('Complete the previous Target stage before opening its PDF');
       }
       const sessionResult = await pool.query(
-        `SELECT submitted_at, is_paused,
+        `SELECT submitted_at, is_paused, (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale,
                 expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP AS expired
          FROM test_sessions WHERE test_id = $1 AND student_id = $2`,
         [testId, req.user.id]
@@ -2343,7 +2344,7 @@ app.get('/api/tests/:id/pdf', authenticateToken, async (req, res) => {
       const session = sessionResult.rows[0];
       if (!session) return res.status(409).send('Start this test before opening its PDF');
       if (session.submitted_at) return res.status(403).send('Test already submitted');
-      if (session.is_paused) return res.status(409).send('Resume this test before opening its PDF');
+      if (session.is_paused || session.stale) return res.status(409).send('Ask your teacher to approve resuming this test before opening its PDF');
       if (session.expired) return res.status(410).send('Test session expired');
     } else {
       return res.status(403).send('Forbidden');
@@ -2423,13 +2424,13 @@ app.put('/api/tests/:id/progress', authenticateToken, async (req, res) => {
     const validation = validateAnswerPatch(req.body?.answers ?? {}, test.problem_ids);
     if (validation.error) { await client.query('ROLLBACK'); return res.status(400).json({ error: validation.error }); }
     const sessionResult = await client.query(
-      'SELECT submitted_at, is_paused, expires_at FROM test_sessions WHERE test_id = $1 AND student_id = $2 FOR UPDATE',
+      `SELECT submitted_at, is_paused, expires_at, (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale FROM test_sessions WHERE test_id = $1 AND student_id = $2 FOR UPDATE`,
       [testId, req.user.id]
     );
     const session = sessionResult.rows[0];
     if (!session) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Start this test before saving answers' }); }
     if (session.submitted_at) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Test already submitted' }); }
-    if (session.is_paused) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'This test is paused. Resume it before saving more answers.' }); }
+    if (session.is_paused || session.stale) { await client.query('ROLLBACK'); return res.status(409).json({ code: 'TEACHER_APPROVAL_REQUIRED', error: 'This test is paused. Ask your teacher to approve resuming it.' }); }
     if (new Date(session.expires_at).getTime() + 30_000 < Date.now()) {
       await client.query('ROLLBACK');
       return res.status(410).json({ error: 'The test time limit has passed' });
@@ -2488,10 +2489,10 @@ app.post('/api/tests/:id/pause', authenticateToken, async (req, res) => {
     const paused = await client.query(
       `UPDATE test_sessions
        SET saved_answers = saved_answers || $3::jsonb,
-           remaining_ms = CASE WHEN is_paused THEN remaining_ms
+           remaining_ms = CASE WHEN is_paused OR last_activity_at < clock_timestamp() - INTERVAL '30 seconds' THEN remaining_ms
              ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) * 1000)::bigint)
            END,
-           is_paused = true, paused_at = COALESCE(paused_at, clock_timestamp()),
+           is_paused = true, resume_approved = false, paused_at = COALESCE(paused_at, clock_timestamp()),
            last_activity_at = clock_timestamp()
        WHERE test_id = $1 AND student_id = $2
        RETURNING remaining_ms`,
@@ -2540,7 +2541,7 @@ app.get('/api/tests/:id/sessions', authenticateToken, async (req, res) => {
     const test = await pool.query('SELECT id FROM tests WHERE id = $1 AND created_by = $2', [testId, req.user.id]);
     if (!test.rowCount) return res.status(404).json({ error: 'Test not found' });
     const result = await pool.query(
-      `SELECT ts.student_id, u.username, ts.is_paused, ts.last_activity_at,
+      `SELECT ts.student_id, u.username, ts.is_paused, ts.resume_approved, ts.last_activity_at,
               CASE
                 WHEN ts.is_paused THEN GREATEST(0, ts.remaining_ms)
                 WHEN ts.last_activity_at < clock_timestamp() - INTERVAL '30 seconds' THEN
@@ -2564,9 +2565,10 @@ app.get('/api/tests/:id/sessions', authenticateToken, async (req, res) => {
       student_id: row.student_id,
       username: row.username,
       session_state: row.session_state,
+      resume_approved: row.resume_approved,
       remaining_ms: Number(row.remaining_ms || 0),
       last_activity_at: row.last_activity_at,
-      can_resume: row.session_state !== 'active' && Number(row.remaining_ms) > 0
+      can_resume: !row.resume_approved && row.session_state !== 'active' && Number(row.remaining_ms) > 0
     })));
   } catch (error) {
     console.error('Get test sessions error:', error);
@@ -2620,14 +2622,13 @@ app.post('/api/tests/:id/sessions/:studentId/resume', authenticateToken, async (
     }
     await client.query(
       `UPDATE test_sessions
-       SET expires_at = clock_timestamp() + ($3::double precision * INTERVAL '1 millisecond'),
-           remaining_ms = $3, is_paused = false, paused_at = NULL,
-           last_activity_at = clock_timestamp()
+       SET remaining_ms = $3::bigint, is_paused = true, resume_approved = true,
+           paused_at = COALESCE(paused_at, clock_timestamp()), last_activity_at = clock_timestamp()
        WHERE test_id = $1 AND student_id = $2`,
       [testId, studentId, remainingMs]
     );
     await client.query('COMMIT');
-    res.json({ resumed: true, remainingMs });
+    res.json({ approved: true, remainingMs });
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Resume test session error:', error);
@@ -2714,22 +2715,26 @@ app.post('/api/tests/:id/start', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Test already submitted' });
     }
 
-    await client.query(
+    const insertedSession = await client.query(
       `INSERT INTO test_sessions (test_id, student_id, started_at, expires_at, remaining_ms, last_activity_at)
-       VALUES ($1, $2, clock_timestamp(), clock_timestamp() + ($3 * INTERVAL '1 minute'), $3::bigint * 60000, clock_timestamp())
-       ON CONFLICT (test_id, student_id) DO NOTHING`,
+       VALUES ($1, $2, clock_timestamp(), clock_timestamp() + ($3::integer * INTERVAL '1 minute'), $3::integer::bigint * 60000, clock_timestamp())
+       ON CONFLICT (test_id, student_id) DO NOTHING RETURNING test_id`,
       [testId, req.user.id, test.time_limit]
     );
     const sessionResult = await client.query(
       `SELECT
-              is_paused, remaining_ms, saved_answers, last_activity_at,
+              is_paused, resume_approved, remaining_ms, saved_answers, last_activity_at,
               FLOOR(EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) * 1000)::bigint AS current_remaining_ms,
               (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale
        FROM test_sessions WHERE test_id = $1 AND student_id = $2 FOR UPDATE`,
       [testId, req.user.id]
     );
     const session = sessionResult.rows[0];
-    const wasInterrupted = Boolean(session.is_paused || session.stale);
+    if (!insertedSession.rowCount && !session.resume_approved) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'TEACHER_APPROVAL_REQUIRED', error: 'Ask your teacher to approve resuming this test in Analytics.' });
+    }
+    const wasInterrupted = Boolean(session.is_paused || session.stale || session.resume_approved);
     const remainingMs = wasInterrupted
       ? Math.max(0, Number(session.remaining_ms))
       : Math.max(0, Number(session.current_remaining_ms));
@@ -2740,8 +2745,8 @@ app.post('/api/tests/:id/start', authenticateToken, async (req, res) => {
     if (wasInterrupted) {
       await client.query(
         `UPDATE test_sessions
-         SET expires_at = clock_timestamp() + ($3::double precision * INTERVAL '1 millisecond'),
-             remaining_ms = $3, is_paused = false, paused_at = NULL,
+         SET expires_at = clock_timestamp() + ($3::bigint * INTERVAL '1 millisecond'),
+             remaining_ms = $3::bigint, is_paused = false, resume_approved = false, paused_at = NULL,
              last_activity_at = clock_timestamp()
          WHERE test_id = $1 AND student_id = $2`,
         [testId, req.user.id, remainingMs]
@@ -2820,7 +2825,7 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     }
 
     const sessionResult = await client.query(
-      `SELECT submitted_at, is_paused, saved_answers,
+      `SELECT submitted_at, is_paused, saved_answers, (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale,
               expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP AS expired
        FROM test_sessions WHERE test_id = $1 AND student_id = $2 FOR UPDATE`,
       [testId, req.user.id]
@@ -2834,9 +2839,9 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Test already submitted' });
     }
-    if (testSession.is_paused) {
+    if (testSession.is_paused || testSession.stale) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Resume the test before submitting answers' });
+      return res.status(409).json({ error: 'Ask your teacher to approve resuming the test before submitting answers' });
     }
     if (testSession.expired) {
       await client.query('ROLLBACK');
