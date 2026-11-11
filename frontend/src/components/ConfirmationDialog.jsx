@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-export default function ConfirmationDialog({ title, description, confirmLabel, busyLabel, busy = false, error, reviewItems = [], onReviewItem, onConfirm, onCancel }) {
+export default function ConfirmationDialog({ title, description, confirmLabel, busyLabel, busy = false, error, reviewItems = [], onReviewItem, onConfirm, onCancel, cancelLabel = 'Keep working', initialFocus = 'confirm', destructive = false }) {
   const dialogRef = useRef(null);
   const cancelRef = useRef(null);
   const confirmRef = useRef(null);
@@ -8,7 +8,7 @@ export default function ConfirmationDialog({ title, description, confirmLabel, b
 
   useEffect(() => {
     const previousFocus = document.activeElement;
-    confirmRef.current?.focus();
+    (initialFocus === 'cancel' ? cancelRef.current : confirmRef.current)?.focus();
     const handleKeyDown = event => {
       if (event.key === 'Escape' && !busyRef.current) {
         event.preventDefault();
@@ -35,7 +35,7 @@ export default function ConfirmationDialog({ title, description, confirmLabel, b
       document.removeEventListener('keydown', handleKeyDown);
       if (previousFocus instanceof HTMLElement) previousFocus.focus();
     };
-  }, [onCancel]);
+  }, [initialFocus, onCancel]);
 
   useEffect(() => {
     busyRef.current = busy;
@@ -43,8 +43,8 @@ export default function ConfirmationDialog({ title, description, confirmLabel, b
 
   useEffect(() => {
     if (busy) dialogRef.current?.focus();
-    else confirmRef.current?.focus();
-  }, [busy]);
+    else (initialFocus === 'cancel' ? cancelRef.current : confirmRef.current)?.focus();
+  }, [busy, initialFocus]);
 
   return (
     <div
@@ -74,8 +74,8 @@ export default function ConfirmationDialog({ title, description, confirmLabel, b
         )}
         {error && <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{error}</p>}
         <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-          <button ref={cancelRef} type="button" onClick={onCancel} disabled={busy} className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60">Keep working</button>
-          <button ref={confirmRef} type="button" onClick={onConfirm} disabled={busy} className="rounded-lg bg-[#2a61ba] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#20529f] disabled:opacity-60">{busy ? busyLabel : confirmLabel}</button>
+          <button ref={cancelRef} type="button" onClick={onCancel} disabled={busy} className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60">{cancelLabel}</button>
+          <button ref={confirmRef} type="button" onClick={onConfirm} disabled={busy} className={`rounded-lg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 ${destructive ? 'bg-red-700 hover:bg-red-800' : 'bg-[#2a61ba] hover:bg-[#20529f]'}`}>{busy ? busyLabel : confirmLabel}</button>
         </div>
       </section>
     </div>

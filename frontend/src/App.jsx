@@ -108,6 +108,9 @@ const App = () => {
   const [randomCriteria, setRandomCriteria] = useState({ count: '8', minElo: '', maxElo: '', year: '', level: '', round: '' });
   const [createTestError, setCreateTestError] = useState('');
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
+  const [testToDelete, setTestToDelete] = useState(null);
+  const [deleteTestBusy, setDeleteTestBusy] = useState(false);
+  const [deleteTestError, setDeleteTestError] = useState('');
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
   const [resumingSessionStudentId, setResumingSessionStudentId] = useState(null);
   const [sessionResumeNotice, setSessionResumeNotice] = useState('');
@@ -899,6 +902,24 @@ const App = () => {
     }
   };
 
+  const confirmDeleteTest = async () => {
+    if (!testToDelete || deleteTestBusy) return;
+    setDeleteTestBusy(true);
+    setDeleteTestError('');
+    try {
+      await api.delete(`/api/tests/${testToDelete.id}`);
+      setTestToDelete(null);
+      setSelectedTestAnalytics(null);
+      setSessionResumeNotice('');
+      setView('teacher-dashboard');
+      await loadUserData({ preserveView: true });
+    } catch (error) {
+      setDeleteTestError(error.response?.data?.error || 'Could not delete this test. Please try again.');
+    } finally {
+      setDeleteTestBusy(false);
+    }
+  };
+
   const loadTestAnalytics = async (testId) => {
     try {
       const [attemptsResponse, sessionsResponse] = await Promise.all([
@@ -1346,15 +1367,25 @@ if (view === 'teacher-dashboard' && user) {
                         <p className="mt-1 text-xs text-gray-600">These trends include the whole demo class; they are not specific to this test or student.</p>
                       </div>
                     ) : (
-                      <button
-                        onClick={async () => {
-                          await loadTestAnalytics(test.id);
-                          setView('test-analytics');
-                        }}
-                        className="text-sm text-[#2a61ba] font-medium hover:underline"
-                      >
-                        View Analytics →
-                      </button>
+                      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await loadTestAnalytics(test.id);
+                            setView('test-analytics');
+                          }}
+                          className="min-h-10 text-sm text-[#2a61ba] font-medium hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007bb8]"
+                        >
+                          View Analytics →
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setDeleteTestError(''); setTestToDelete(test); }}
+                          className="min-h-10 text-sm font-semibold text-red-700 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+                        >
+                          {test.target_sequence_id ? 'Delete Target assignment' : 'Delete test'}
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}
@@ -1449,6 +1480,30 @@ if (view === 'teacher-dashboard' && user) {
             </div>
           )}
         </section>
+
+        {testToDelete && (() => {
+          const relatedTargetCount = testToDelete.target_sequence_id
+            ? tests.filter(item => item.target_sequence_id === testToDelete.target_sequence_id).length
+            : 0;
+          const deletesTarget = relatedTargetCount > 0;
+          const subject = deletesTarget ? 'this entire Target assignment' : `“${testToDelete.name}”`;
+          const associatedCount = deletesTarget ? `${relatedTargetCount} Target stages` : 'this test';
+          return (
+            <ConfirmationDialog
+              title={`Delete ${deletesTarget ? 'Target assignment' : 'test'}?`}
+              description={`This permanently deletes ${subject} (${associatedCount}), all student attempts and answers, saved sessions, and its analytics. Student and problem Elo ratings and their history will remain unchanged.`}
+              confirmLabel={`Delete ${deletesTarget ? 'Target assignment' : 'test'}`}
+              busyLabel="Deleting…"
+              busy={deleteTestBusy}
+              error={deleteTestError}
+              cancelLabel={deletesTarget ? 'Keep this assignment' : 'Keep this test'}
+              initialFocus="cancel"
+              destructive
+              onConfirm={confirmDeleteTest}
+              onCancel={() => { if (!deleteTestBusy) { setTestToDelete(null); setDeleteTestError(''); } }}
+            />
+          );
+        })()}
 
       </div>
     </main>

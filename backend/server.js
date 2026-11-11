@@ -1792,14 +1792,14 @@ app.get('/api/tests', authenticateToken, async (req, res) => {
                   WHEN ts.test_id IS NULL THEN NULL
                   WHEN ts.is_paused THEN GREATEST(0, ts.remaining_ms)
                   WHEN ts.last_activity_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds' THEN
-                    GREATEST(0, ts.remaining_ms - FLOOR(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - ts.last_activity_at)) * 1000)::bigint)
+                    GREATEST(0, ts.remaining_ms)
                   ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (ts.expires_at - clock_timestamp())) * 1000)::bigint)
                 END AS session_remaining_ms,
                 CASE
                   WHEN ts.test_id IS NULL THEN false
                   WHEN ts.is_paused THEN ts.remaining_ms <= 0
                   WHEN ts.last_activity_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds' THEN
-                    GREATEST(0, ts.remaining_ms - FLOOR(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - ts.last_activity_at)) * 1000)::bigint) <= 0
+                    ts.remaining_ms <= 0
                   ELSE ts.expires_at + INTERVAL '30 seconds' < CURRENT_TIMESTAMP
                 END AS session_expired,
                 CASE WHEN t.target_sequence_id IS NOT NULL AND t.target_stage > 1 THEN EXISTS (
@@ -2066,6 +2066,72 @@ app.post('/api/tests', authenticateToken, async (req, res) => {
     if (error.status) return res.status(error.status).json({ error: error.message });
     console.error('Create test error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Delete a teacher-owned test and all associated attempt/session data. Shared
+// Elo history and the current user/problem ratings are intentionally retained.
+app.delete('/api/tests/:id', authenticateToken, async (req, res) => {
+  if (DEMO_MODE) return res.status(403).json({ error: 'Test deletion is disabled on the fictional demo preview.' });
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: 'Teacher access required' });
+  const testId = Number(req.params.id);
+  if (!Number.isSafeInteger(testId) || testId < 1) return res.status(400).json({ error: 'Invalid test id' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      'SELECT id, target_sequence_id FROM tests WHERE id = $1 AND created_by = $2',
+      [testId, req.user.id]
+    );
+    const test = selected.rows[0];
+    if (!test) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Test not found' });
+    }
+
+    const relatedIds = test.target_sequence_id
+      ? await client.query(
+        'SELECT id FROM tests WHERE target_sequence_id = $1 AND created_by = $2 ORDER BY id',
+        [test.target_sequence_id, req.user.id]
+      )
+      : { rows: [{ id: test.id }] };
+    const testIds = relatedIds.rows.map(row => Number(row.id));
+
+    // Use the same lock as submission so a finishing attempt cannot race the
+    // deletion and recreate an orphaned analytics row.
+    for (const id of testIds) {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('test-submit'), hashtext($1::text))", [id]);
+    }
+    const locked = await client.query(
+      'SELECT id FROM tests WHERE id = ANY($1::int[]) AND created_by = $2 ORDER BY id FOR UPDATE',
+      [testIds, req.user.id]
+    );
+    const lockedIds = locked.rows.map(row => Number(row.id));
+    if (lockedIds.length !== testIds.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'The test assignment changed. Refresh and try again.' });
+    }
+
+    await client.query('DELETE FROM test_attempts WHERE test_id = ANY($1::int[])', [lockedIds]);
+    const deleted = await client.query(
+      'DELETE FROM tests WHERE id = ANY($1::int[]) AND created_by = $2 RETURNING id',
+      [lockedIds, req.user.id]
+    );
+    await client.query('COMMIT');
+    res.json({
+      deleted: true,
+      deletedTestIds: deleted.rows.map(row => Number(row.id)),
+      deletedCount: deleted.rowCount,
+      deletedTargetAssignment: Boolean(test.target_sequence_id),
+      eloHistoryPreserved: true
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Delete test error:', error);
+    res.status(500).json({ error: 'Could not delete this test and its data' });
+  } finally {
+    client.release();
   }
 });
 
@@ -2478,7 +2544,7 @@ app.get('/api/tests/:id/sessions', authenticateToken, async (req, res) => {
               CASE
                 WHEN ts.is_paused THEN GREATEST(0, ts.remaining_ms)
                 WHEN ts.last_activity_at < clock_timestamp() - INTERVAL '30 seconds' THEN
-                  GREATEST(0, ts.remaining_ms - FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - ts.last_activity_at)) * 1000)::bigint)
+                  GREATEST(0, ts.remaining_ms)
                 ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (ts.expires_at - clock_timestamp())) * 1000)::bigint)
               END AS remaining_ms,
               CASE
@@ -2537,8 +2603,7 @@ app.post('/api/tests/:id/sessions/:studentId/resume', authenticateToken, async (
     }
     const sessionResult = await client.query(
       `SELECT is_paused, remaining_ms, last_activity_at,
-              (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale,
-              GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - last_activity_at)) * 1000)::bigint) AS elapsed_since_checkpoint_ms
+              (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale
        FROM test_sessions WHERE test_id = $1 AND student_id = $2 FOR UPDATE`,
       [testId, studentId]
     );
@@ -2548,10 +2613,7 @@ app.post('/api/tests/:id/sessions/:studentId/resume', authenticateToken, async (
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'The student is still connected to this test.' });
     }
-    const elapsed = !session.is_paused && session.stale
-      ? Number(session.elapsed_since_checkpoint_ms || 0)
-      : 0;
-    const remainingMs = Math.max(0, Number(session.remaining_ms) - elapsed);
+    const remainingMs = Math.max(0, Number(session.remaining_ms));
     if (remainingMs <= 0) {
       await client.query('ROLLBACK');
       return res.status(410).json({ error: 'No test time remains to resume.' });
@@ -2662,18 +2724,14 @@ app.post('/api/tests/:id/start', authenticateToken, async (req, res) => {
       `SELECT
               is_paused, remaining_ms, saved_answers, last_activity_at,
               FLOOR(EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) * 1000)::bigint AS current_remaining_ms,
-              (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale,
-              GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - last_activity_at)) * 1000)::bigint) AS elapsed_since_checkpoint_ms
+              (last_activity_at < clock_timestamp() - INTERVAL '30 seconds') AS stale
        FROM test_sessions WHERE test_id = $1 AND student_id = $2 FOR UPDATE`,
       [testId, req.user.id]
     );
     const session = sessionResult.rows[0];
     const wasInterrupted = Boolean(session.is_paused || session.stale);
-    const elapsedSinceCheckpoint = !session.is_paused && session.stale
-      ? Number(session.elapsed_since_checkpoint_ms || 0)
-      : 0;
     const remainingMs = wasInterrupted
-      ? Math.max(0, Number(session.remaining_ms) - elapsedSinceCheckpoint)
+      ? Math.max(0, Number(session.remaining_ms))
       : Math.max(0, Number(session.current_remaining_ms));
     if (remainingMs <= 0) {
       await client.query('ROLLBACK');
