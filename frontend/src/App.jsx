@@ -20,6 +20,10 @@ const DEMO_STUDENT_USERNAME = import.meta.env.VITE_DEMO_STUDENT_USERNAME || 'dem
 const DEMO_TEACHER_PASSWORD = import.meta.env.VITE_DEMO_TEACHER_PASSWORD || 'teacher-preview-26';
 const DEMO_STUDENT_PASSWORD = import.meta.env.VITE_DEMO_STUDENT_PASSWORD || 'student-preview-26';
 const EMPTY_CATALOG_FILTERS = { search: '', year: '', level: '', round: '' };
+const formatRemainingTime = (milliseconds) => {
+  const seconds = Math.max(0, Math.ceil(Number(milliseconds || 0) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+};
 function getCatalogMetadata(problem, demoMode) {
   const source = typeof problem.source === 'string' ? problem.source : '';
   const sourceText = `${source} ${problem.folder_name || ''}`;
@@ -88,8 +92,12 @@ const App = () => {
   const [testDeadlineAt, setTestDeadlineAt] = useState(null);
   const [startingTestId, setStartingTestId] = useState(null);
   const [startTestError, setStartTestError] = useState('');
+  const [answerSaveState, setAnswerSaveState] = useState('saved');
+  const [saveRetrySignal, setSaveRetrySignal] = useState(0);
+  const savedAnswersRef = useRef({});
+  const savedAnswersTestIdRef = useRef(null);
+  const saveQueueRef = useRef(Promise.resolve());
   const testSubmitRef = useRef({ activeTest: null, testAnswers: {}, testProblems: [] });
-  const handleSubmitTestRef = useRef(() => {});
   
   const [editingProblem, setEditingProblem] = useState(null);
   const [problemToDelete, setProblemToDelete] = useState(null);
@@ -101,6 +109,8 @@ const App = () => {
   const [createTestError, setCreateTestError] = useState('');
   const [newStudent, setNewStudent] = useState({ username: '', password: '' });
   const [selectedTestAnalytics, setSelectedTestAnalytics] = useState(null);
+  const [resumingSessionStudentId, setResumingSessionStudentId] = useState(null);
+  const [sessionResumeNotice, setSessionResumeNotice] = useState('');
   const [analyticsSolutionsLink, setAnalyticsSolutionsLink] = useState('');
   const [analyticsAnswersReleased, setAnalyticsAnswersReleased] = useState(false);
   const [selectedProblemIds, setSelectedProblemIds] = useState([]);
@@ -149,7 +159,19 @@ const App = () => {
     setAttemptDetails(null);
   }, []);
 
-  const handleLogout = useCallback((message) => {
+  const handleLogout = useCallback(async (message) => {
+    const currentToken = localStorage.getItem('token');
+    const currentSession = testSubmitRef.current;
+    if (user?.role === 'student' && currentSession.activeTest && currentToken) {
+      try {
+        await axios.post(`${API_URL}/api/tests/${currentSession.activeTest.id}/pause`, { answers: currentSession.testAnswers }, {
+          headers: { Authorization: `Bearer ${currentToken}` },
+          timeout: 2500
+        });
+      } catch (error) {
+        console.warn('Could not checkpoint the test before sign-out; the most recent autosave remains available.', error);
+      }
+    }
     localStorage.removeItem('token');
     setToken(null);
     setUser(null);
@@ -171,16 +193,24 @@ const App = () => {
     setSessionError(null);
     setDashboardLoadError(null);
     setView('login');
-    setActiveTest(null);
     setTestDeadlineAt(null);
     setTestExpirationNotice('');
     setStartingTestId(null);
+    setActiveTest(null);
+    setTestProblems([]);
+    setTestAnswers({});
+    setTimeRemaining(null);
+    setTestDeadlineAt(null);
+    setAnswerSaveState('saved');
+    savedAnswersRef.current = {};
+    savedAnswersTestIdRef.current = null;
+    testSubmitRef.current = { activeTest: null, testAnswers: {}, testProblems: [] };
     for (const key of Object.keys(sessionStorage)) {
       if (key === 'testInProgress' || key.startsWith('testAnswers_')) {
         sessionStorage.removeItem(key);
       }
     }
-  }, [clearDashboardData]);
+  }, [clearDashboardData, user?.role]);
 
   // Create axios instance with useMemo with useMemo to prevent recreation on every render
   const api = useMemo(() => {
@@ -370,6 +400,9 @@ const App = () => {
     setActiveTest(null);
     setTestProblems([]);
     setTestAnswers({});
+    savedAnswersRef.current = {};
+    savedAnswersTestIdRef.current = null;
+    testSubmitRef.current = { activeTest: null, testAnswers: {}, testProblems: [] };
     setTimeRemaining(null);
     setTestDeadlineAt(null);
     setSubmissionError('');
@@ -396,6 +429,9 @@ const App = () => {
       setActiveTest(null);
       setTestProblems([]);
       setTestAnswers({});
+      savedAnswersRef.current = {};
+      savedAnswersTestIdRef.current = null;
+      testSubmitRef.current = { activeTest: null, testAnswers: {}, testProblems: [] };
       setTimeRemaining(null);
       setTestDeadlineAt(null);
       setView('student-dashboard');
@@ -417,8 +453,6 @@ const App = () => {
     }
   }, [activeTest, testAnswers, testProblems, api, loadUserData, handleLogout, handleExpiredTest]);
 
-  handleSubmitTestRef.current = handleSubmitTest;
-
   // The server provides remaining time; performance.now keeps the countdown immune to wall-clock changes.
   useEffect(() => {
     if (!activeTest || timeRemaining === null || testDeadlineAt === null) return;
@@ -436,107 +470,96 @@ const App = () => {
     return () => clearTimeout(timer);
   }, [timeRemaining, activeTest, testDeadlineAt, handleSubmitTest]);
 
-  // Persist test answers so they survive refresh/reopen
+  // Save changed answers to the server in order so an older request cannot
+  // overwrite a newer answer for the same problem.
   useEffect(() => {
-    if (view === 'taking-test' && activeTest && Object.keys(testAnswers).length > 0) {
-      sessionStorage.setItem('testAnswers_' + activeTest.id, JSON.stringify(testAnswers));
+    if (view !== 'taking-test' || !activeTest || savedAnswersTestIdRef.current !== activeTest.id) return;
+    const answerPatch = {};
+    for (const problem of testProblems) {
+      const value = String(testAnswers[problem.id] ?? '');
+      if (savedAnswersRef.current[problem.id] !== value) answerPatch[problem.id] = value;
     }
-  }, [view, activeTest, testAnswers]);
-
-  // Restore in-progress test when student reopens tab or refreshes
-  useEffect(() => {
-    if (user?.role !== 'student' || !tests.length) return;
-    if (view === 'taking-test' && activeTest) return;
-    const raw = sessionStorage.getItem('testInProgress');
-    if (!raw) return;
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
+    if (!Object.keys(answerPatch).length) {
+      setAnswerSaveState(current => current === 'saving' ? 'saved' : current);
       return;
     }
-    const { testId, problemIds = [] } = data;
-    const test = tests.find(t => t.id === testId);
-    if (!test) return;
-    const requestToken = token;
     let cancelled = false;
-    (async () => {
-      try {
-        const { data: session } = await api.post(`/api/tests/${testId}/start`);
-        if (cancelled || !requestToken || localStorage.getItem('token') !== requestToken) return;
-        const { data: probs } = await api.get(`/api/tests/${testId}/problems`);
-        if (cancelled || !requestToken || localStorage.getItem('token') !== requestToken) return;
-        const ordered = problemIds.map(id => probs.find(p => p.id === id)).filter(Boolean);
-        const savedAnswers = sessionStorage.getItem('testAnswers_' + testId);
-        const answers = savedAnswers ? JSON.parse(savedAnswers) : {};
-        setActiveTest(test);
-        setTestProblems(ordered.length ? ordered : probs);
-        setTestAnswers(answers);
-        const remainingMs = Math.max(0, Number(session.remainingMs) || 0);
+    const timer = window.setTimeout(() => {
+      setAnswerSaveState('saving');
+      const testId = activeTest.id;
+      saveQueueRef.current = saveQueueRef.current.catch(() => {}).then(async () => {
+        if (cancelled || savedAnswersTestIdRef.current !== testId) return;
+        await api.put(`/api/tests/${testId}/progress`, { answers: answerPatch });
+        if (savedAnswersTestIdRef.current !== testId) return;
+        savedAnswersRef.current = { ...savedAnswersRef.current, ...answerPatch };
+        const latest = testSubmitRef.current.activeTest?.id === testId
+          ? testSubmitRef.current.testAnswers
+          : {};
+        const hasUnsavedAnswers = testProblems.some(problem =>
+          savedAnswersRef.current[problem.id] !== String(latest[problem.id] ?? '')
+        );
+        setAnswerSaveState(hasUnsavedAnswers ? 'saving' : 'saved');
+        // Re-run the comparison after the in-flight snapshot is committed. This
+        // catches a quick edit back to an older value while that save was pending.
+        setSaveRetrySignal(value => value + 1);
+      }).catch(error => {
+        if (!cancelled && savedAnswersTestIdRef.current === testId) {
+          console.error('Could not save test answers:', error);
+          setAnswerSaveState('error');
+        }
+      });
+    }, 350);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [activeTest, api, saveRetrySignal, testAnswers, testProblems, view]);
+
+  useEffect(() => {
+    if (answerSaveState !== 'error' || view !== 'taking-test') return undefined;
+    const retry = window.setInterval(() => setSaveRetrySignal(value => value + 1), 5000);
+    return () => window.clearInterval(retry);
+  }, [answerSaveState, view]);
+
+  // A lightweight heartbeat checkpoints remaining time even when a student is
+  // thinking and has not changed an answer recently.
+  useEffect(() => {
+    if (view !== 'taking-test' || !activeTest) return undefined;
+    const heartbeat = window.setInterval(() => {
+      api.put(`/api/tests/${activeTest.id}/progress`, { answers: {} }).then(({ data }) => {
+        const remainingMs = Math.max(0, Number(data.remainingMs) || 0);
         setTestDeadlineAt(performance.now() + remainingMs);
         setTimeRemaining(Math.ceil(remainingMs / 1000));
-        setView('taking-test');
-      } catch (error) {
-        if (cancelled) return;
-        if (error.response?.status === 401) handleLogout('Your session expired. Sign in again to continue.');
-        else if (error.response?.status === 410) {
-          handleExpiredTest(testId);
+      }).catch(error => {
+        if (error.response?.status !== 409 && error.response?.status !== 410) {
+          setAnswerSaveState('error');
         }
-        else console.error('Could not restore the active test:', error);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [user?.role, tests, api, view, activeTest, token, handleLogout, loadUserData, handleExpiredTest]);
+      });
+    }, 10000);
+    return () => window.clearInterval(heartbeat);
+  }, [activeTest, api, view]);
 
-  // Keep ref updated so beforeunload can submit with latest answers
+  // Keep the latest answers ready for page-exit and sign-out checkpointing.
   useEffect(() => {
     if (view === 'taking-test' && activeTest) {
       testSubmitRef.current = { activeTest, testAnswers, testProblems };
     }
   }, [view, activeTest, testAnswers, testProblems]);
 
-  // Lockdown: auto-submit on leave / tab switch
+  // Page exits pause the server clock and checkpoint the latest answer state.
   useEffect(() => {
-    // The shared prototype is for exploration, so changing tabs or using another
-    // app must not irreversibly consume the one shared student account's attempt.
-    // Production exam behavior keeps its existing lockdown policy.
-    if (DEMO_MODE || view !== 'taking-test' || !activeTest) return;
-    let leftWhileHidden = false;
-    const onBeforeUnload = (e) => {
-      const { activeTest: at, testAnswers: ta, testProblems: tp } = testSubmitRef.current;
-      if (at && ta) {
-        const payload = {};
-        for (const p of tp || []) {
-          payload[p.id] = (ta[p.id] ?? '').trim();
-        }
-        if (Object.keys(payload).length > 0 || Object.keys(ta).length > 0) {
-          const t = localStorage.getItem('token');
-          if (t) {
-            const body = Object.keys(payload).length > 0 ? payload : ta;
-            fetch(`${API_URL}/api/tests/${at.id}/submit`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
-              body: JSON.stringify({ answers: body }),
-              keepalive: true
-            });
-          }
-        }
-      }
-      e.preventDefault();
-      e.returnValue = '';
+    if (view !== 'taking-test' || !activeTest) return undefined;
+    const onPageHide = () => {
+      const { activeTest: test, testAnswers: answers } = testSubmitRef.current;
+      const currentToken = localStorage.getItem('token');
+      if (!test || !currentToken) return;
+      fetch(`${API_URL}/api/tests/${test.id}/pause`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
+        body: JSON.stringify({ answers }),
+        keepalive: true
+      }).catch(() => {});
     };
-    const onVisibilityChange = () => {
-      if (document.hidden) leftWhileHidden = true;
-      else if (leftWhileHidden) {
-        leftWhileHidden = false;
-        handleSubmitTestRef.current?.();
-      }
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pagehide', onPageHide);
     return () => {
-      window.removeEventListener('beforeunload', onBeforeUnload);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('pagehide', onPageHide);
     };
   }, [view, activeTest]);
 
@@ -640,26 +663,30 @@ const App = () => {
 
     setStartingTestId(test.id);
     const requestToken = token;
+    let startedSession = null;
     try {
       const { data: session } = await api.post(`/api/tests/${test.id}/start`);
+      startedSession = session;
       if (!requestToken || localStorage.getItem('token') !== requestToken) return;
       const { data: testProbs } = await api.get(`/api/tests/${test.id}/problems`);
       if (!requestToken || localStorage.getItem('token') !== requestToken) return;
       const folderIds = [...new Set(testProbs.map(p => getCatalogMetadata(p, DEMO_MODE).group))];
       const allSameFolder = folderIds.length <= 1;
       const ordered = allSameFolder ? testProbs : [...testProbs].sort(() => Math.random() - 0.5);
-      sessionStorage.setItem('testInProgress', JSON.stringify({
-        testId: test.id,
-        problemIds: ordered.map(p => p.id)
-      }));
+      sessionStorage.removeItem('testInProgress');
       sessionStorage.removeItem('testAnswers_' + test.id);
       
       setActiveTest(test);
       setTestProblems(ordered);
+      const savedAnswers = session.answers && typeof session.answers === 'object' ? session.answers : {};
+      savedAnswersRef.current = savedAnswers;
+      savedAnswersTestIdRef.current = test.id;
+      testSubmitRef.current = { activeTest: test, testAnswers: savedAnswers, testProblems: ordered };
+      setAnswerSaveState('saved');
       const remainingMs = Math.max(0, Number(session.remainingMs) || 0);
       setTestDeadlineAt(performance.now() + remainingMs);
       setTimeRemaining(Math.ceil(remainingMs / 1000));
-      setTestAnswers({});
+      setTestAnswers(savedAnswers);
       setView('taking-test');
       try {
         document.documentElement.requestFullscreen?.();
@@ -668,6 +695,9 @@ const App = () => {
       }
     } catch (error) {
       if (localStorage.getItem('token') !== requestToken) return;
+      if (startedSession && requestToken) {
+        await api.post(`/api/tests/${test.id}/pause`, { answers: startedSession.answers || {} }).catch(() => {});
+      }
       if (error.response?.status === 401) {
         handleLogout('Your session expired. Sign in again to continue.');
         return;
@@ -681,10 +711,19 @@ const App = () => {
         loadUserData({ preserveView: true }).catch(() => {});
         return;
       }
-      alert(error.response?.data?.error || 'Could not load this test. Please try again.');
+      setStartTestError(error.response?.data?.error || (error.response ? 'Could not start this test. Please retry; saved work is kept with your account.' : 'Could not reach the server. Check your connection; saved work is kept with your account.'));
     } finally {
       setStartingTestId(null);
     }
+  };
+
+  const updateTestAnswers = (nextAnswers) => {
+    const answers = typeof nextAnswers === 'function'
+      ? nextAnswers(testSubmitRef.current.testAnswers)
+      : nextAnswers;
+    testSubmitRef.current = { ...testSubmitRef.current, testAnswers: answers };
+    setAnswerSaveState('saving');
+    setTestAnswers(answers);
   };
 
   const createTest = async () => {
@@ -862,8 +901,12 @@ const App = () => {
 
   const loadTestAnalytics = async (testId) => {
     try {
-      const { data } = await api.get(`/api/tests/${testId}/attempts`);
-      setSelectedTestAnalytics({ testId, attempts: data });
+      const [attemptsResponse, sessionsResponse] = await Promise.all([
+        api.get(`/api/tests/${testId}/attempts`),
+        api.get(`/api/tests/${testId}/sessions`)
+      ]);
+      setSelectedTestAnalytics({ testId, attempts: attemptsResponse.data, sessions: sessionsResponse.data });
+      setSessionResumeNotice('');
       const t = tests.find(x => x.id === testId);
       if (t) {
         setAnalyticsSolutionsLink(t.solutions_link ?? '');
@@ -992,8 +1035,10 @@ if (view === 'taking-test' && activeTest) {
         timeRemaining={timeRemaining}
         testProblems={testProblems}
         testAnswers={testAnswers}
-        setTestAnswers={setTestAnswers}
+        setTestAnswers={updateTestAnswers}
         token={token}
+        answerSaveState={answerSaveState}
+        onLogout={() => handleLogout('Your saved test is paused. Sign back in to continue with your remaining time.')}
         onSubmit={handleSubmitTest}
         submitting={submittingTest}
         submissionError={submissionError}
@@ -1060,8 +1105,9 @@ if (view === 'student-dashboard' && user) {
                       {test.time_limit} min
                     </p>
                     {test.sequence_locked && <p className="mb-3 rounded-lg bg-gray-100 px-3 py-2 text-xs leading-5 text-gray-700">Complete the previous Target stage to unlock this test.</p>}
+                    {test.has_session && !test.session_expired && <p className="mb-3 rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-900">{test.session_paused ? `Paused · answers saved. Choose Resume Test to continue with ${formatRemainingTime(test.session_remaining_ms)} left.` : test.session_interrupted ? `Connection interrupted · your last checkpoint has about ${formatRemainingTime(test.session_remaining_ms)} left. Choose Resume Test to continue.` : `Test in progress · ${formatRemainingTime(test.session_remaining_ms)} remaining. Answers save to your account.`}</p>}
                     <p className="mb-3 text-xs leading-5 text-gray-600">{DEMO_MODE ? 'Demo scoring: ' : 'Scoring: '}{test.test_type === 'target' ? '2 points per correct answer.' : '1 point per correct answer.'} ELO updates separately for each problem.</p>
-                    {!DEMO_MODE && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">This test submits automatically if you switch to another tab or app. Keep it open in the foreground until you finish.</p>}
+                    {!DEMO_MODE && <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Answers save as you work. Sign out or leave the page to pause, then choose Resume Test to continue later.</p>}
                     <button
                       type="button"
                       onClick={() => startTest(test)}
@@ -1069,7 +1115,7 @@ if (view === 'student-dashboard' && user) {
                       aria-busy={startingTestId === test.id}
                       className="w-full bg-[#2a61ba] hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-70 text-white py-2 rounded-lg text-sm font-medium"
                     >
-                      {startingTestId === test.id ? 'Preparing test…' : test.sequence_locked ? 'Locked' : test.session_expired ? 'Time expired' : 'Start Test'}
+                      {startingTestId === test.id ? 'Preparing test…' : test.sequence_locked ? 'Locked' : test.session_expired ? 'Time expired' : test.has_session ? 'Resume Test' : 'Start Test'}
                     </button>
                   </div>
                 ))}
@@ -1434,6 +1480,7 @@ if (DEMO_MODE && view === 'test-analytics' && user?.role === 'teacher') {
 if (view === 'test-analytics' && user && selectedTestAnalytics) {
   const test = tests.find(t => t.id === selectedTestAnalytics.testId);
   const attempts = selectedTestAnalytics.attempts || [];
+  const sessions = selectedTestAnalytics.sessions || [];
   const problemIds = test?.problem_ids || [];
 
   // Student accuracies (already have score/total per attempt)
@@ -1518,6 +1565,46 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                 Save settings
               </button>
             </div>
+          </div>
+
+          <div className="bg-white rounded-xl shadow p-6">
+            <h2 className="text-base font-semibold text-gray-800 mb-2">In-progress and paused tests</h2>
+            <p className="mb-4 text-sm text-gray-600">Students can resume a paused test from their dashboard. If you use Resume for student, the countdown starts immediately with the time left at the last checkpoint, including while the student is signing in.</p>
+            {sessionResumeNotice && <p className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-900" role="status">{sessionResumeNotice}</p>}
+            {sessions.length === 0 ? (
+              <p className="text-sm text-gray-500">No unfinished student sessions for this test.</p>
+            ) : (
+              <div className="space-y-3">
+                {sessions.map(session => (
+                  <div key={session.student_id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 p-3">
+                    <div>
+                      <p className="font-medium text-gray-800">{session.username}</p>
+                      <p className="text-sm text-gray-600">{session.session_state === 'active' ? 'Active now' : session.session_state === 'paused' ? 'Paused' : 'Connection lost'} · {formatRemainingTime(session.remaining_ms)} remaining</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!session.can_resume || resumingSessionStudentId !== null}
+                      onClick={async () => {
+                        setResumingSessionStudentId(session.student_id);
+                        setSessionResumeNotice('');
+                        try {
+                          const { data } = await api.post(`/api/tests/${test.id}/sessions/${session.student_id}/resume`);
+                          await loadTestAnalytics(test.id);
+                          setSessionResumeNotice(`${session.username}'s countdown has started with ${formatRemainingTime(data.remainingMs)} remaining. Time continues while they sign in. Students can also resume paused tests from their dashboard.`);
+                        } catch (error) {
+                          setSessionResumeNotice(error.response?.data?.error || 'Could not resume this test. Refresh the analytics and try again.');
+                        } finally {
+                          setResumingSessionStudentId(null);
+                        }
+                      }}
+                      className="rounded-lg bg-[#2a61ba] px-4 py-2 text-sm font-semibold text-white hover:bg-[#20529f] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {resumingSessionStudentId === session.student_id ? 'Resuming…' : session.can_resume ? 'Resume for student' : session.session_state === 'active' ? 'In progress' : 'No time left'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-xl shadow p-6">

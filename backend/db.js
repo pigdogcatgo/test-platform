@@ -391,9 +391,28 @@ export async function initDatabase() {
         started_at TIMESTAMPTZ NOT NULL,
         expires_at TIMESTAMPTZ NOT NULL,
         submitted_at TIMESTAMPTZ,
+        saved_answers JSONB NOT NULL DEFAULT '{}'::jsonb,
+        remaining_ms BIGINT NOT NULL DEFAULT 0,
+        is_paused BOOLEAN NOT NULL DEFAULT false,
+        paused_at TIMESTAMPTZ,
+        last_activity_at TIMESTAMPTZ,
         PRIMARY KEY (test_id, student_id),
         CHECK (expires_at > started_at)
       )
+    `);
+    await client.query("ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS saved_answers JSONB NOT NULL DEFAULT '{}'::jsonb");
+    await client.query('ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS remaining_ms BIGINT NOT NULL DEFAULT 0');
+    await client.query('ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS is_paused BOOLEAN NOT NULL DEFAULT false');
+    await client.query('ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS paused_at TIMESTAMPTZ');
+    await client.query('ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ');
+    await client.query(`
+      UPDATE test_sessions
+      SET last_activity_at = COALESCE(last_activity_at, clock_timestamp()),
+          remaining_ms = CASE
+            WHEN is_paused THEN remaining_ms
+            ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) * 1000)::bigint)
+          END
+      WHERE last_activity_at IS NULL OR remaining_ms = 0
     `);
     
     // ELO history table

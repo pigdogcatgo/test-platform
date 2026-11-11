@@ -18,6 +18,8 @@ export default function StudentTestPage({
   testAnswers,
   setTestAnswers,
   token,
+  answerSaveState = 'saved',
+  onLogout,
   pdfUrl,
   onSubmit,
   submitting,
@@ -80,6 +82,14 @@ export default function StudentTestPage({
               </div>
             </div>
           </div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 pt-3">
+            <p className={`text-xs ${answerSaveState === 'error' ? 'text-red-700' : 'text-gray-500'}`} role="status" aria-live="polite">
+              {answerSaveState === 'saving' ? 'Saving answers…' : answerSaveState === 'error' ? 'Connection issue. Your answers will retry automatically; keep this page open until saved.' : 'Answers saved to your account.'}
+            </p>
+            <button type="button" onClick={onLogout} disabled={submitting} className="min-h-10 rounded-lg border border-gray-300 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007bb8] disabled:cursor-not-allowed disabled:opacity-50">
+              Save and sign out
+            </button>
+          </div>
         </header>
 
         <section className="mb-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm" aria-label="Test progress" aria-live="polite">
@@ -141,9 +151,7 @@ export default function StudentTestPage({
         </section>
 
         <div className="mb-4 rounded-xl border-2 border-amber-500 bg-amber-100 px-4 py-4 text-center text-sm sm:text-base font-semibold text-amber-900 shadow-sm" role="note">
-          {demoMode
-            ? 'Shared demo: you may switch tabs or apps; the timer keeps running. Your draft answers are saved in this browser tab until you submit.'
-            : 'Keep this page open and in the foreground. Switching tabs automatically submits your answers when you return. Reloading or closing the page can also submit them.'}
+          Your answers save to your account as you work. If you sign out or leave this page, you can return to the test with the time you had left.
         </div>
 
         {timeRemaining < 60 && (
@@ -193,6 +201,7 @@ export default function StudentTestPage({
                   value={testAnswers[problem.id] || ''}
                   onFocus={() => { if (pdfBacked) selectProblem(problem.id, false); }}
                   onChange={event => setTestAnswers({ ...testAnswers, [problem.id]: event.target.value })}
+                  maxLength={256}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 text-center text-base focus:border-[#2a61ba] focus:outline-none sm:text-sm"
                   placeholder="e.g. 42, 3/4, √2, √2/2"
                   autoComplete="off"
