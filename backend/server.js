@@ -1335,6 +1335,10 @@ function problemCatalogMetadata(body, source) {
   };
 }
 
+function problemWithoutRights({ rights_basis, rights_reference, rights_reviewed_at, ...problem }) {
+  return problem;
+}
+
 // Get all available problems with their folder and source metadata
 app.get('/api/problems', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
@@ -1352,7 +1356,7 @@ app.get('/api/problems', authenticateToken, async (req, res) => {
         WHERE ${sql}
         ORDER BY COALESCE(f.name, 'zzz'), p.id
       `, params);
-    res.json(result.rows);
+    res.json(result.rows.map(problemWithoutRights));
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -1375,7 +1379,8 @@ app.get('/api/problems/:id/view', authenticateToken, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT p.id, p.question, p.image_url, p.year, p.level, p.round, p.problem_number, p.elo
+      `SELECT p.id, p.question, p.image_url, p.image_alt, p.image_is_statement,
+              p.year, p.level, p.round, p.problem_number, p.elo
        FROM problems p
        WHERE p.id = $1 AND ${accessSql}`,
       params
@@ -1383,7 +1388,9 @@ app.get('/api/problems/:id/view', authenticateToken, async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'Problem not found' });
     res.setHeader('Cache-Control', 'private, no-store');
     // questionHtml escapes catalog text and inserts only KaTeX-generated markup for math.
-    return res.json({ ...result.rows[0], questionHtml: renderProblemMath(result.rows[0].question) });
+    const problem = result.rows[0];
+    const questionHtml = problem.image_is_statement ? escapeHtml(problem.question) : renderProblemMath(problem.question);
+    return res.json({ ...problem, questionHtml });
   } catch (error) {
     console.error('Authorized problem view error:', error);
     return res.status(500).json({ error: 'Could not load problem' });
@@ -1704,7 +1711,15 @@ app.put('/api/problems/:id', authenticateToken, async (req, res) => {
     await client.query('BEGIN');
     const fid = await validateProblemFolder(client, req.user, folderId);
     const { sql, params } = problemWriteWhere(req.user);
-    const problemCond = sql.replace(/p\./g, '').replace(/\$1/g, params.length ? '$12' : '$1');
+    const existing = await client.query(
+      `SELECT image_is_statement FROM problems WHERE id = $1 AND ${shiftSqlParameters(sql, 1)} FOR UPDATE`,
+      [req.params.id, ...params]
+    );
+    if (!existing.rowCount) throw validationError(404, 'Problem not found');
+    if (existing.rows[0].image_is_statement) {
+      throw validationError(409, 'This contest problem uses a reviewed original statement and answer key.');
+    }
+    const problemCond = shiftSqlParameters(sql, 11);
     const sourceStr = typeof source === 'string' ? source.trim() || null : null;
     const catalogMetadata = problemCatalogMetadata(req.body, sourceStr);
     const result = await client.query(
@@ -2218,7 +2233,7 @@ app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
     const problemIds = attempt.problem_ids || [];
     let problems = [];
     if (showAnswers && problemIds.length > 0) {
-      const probsRows = await pool.query('SELECT id, question, answer, image_url FROM problems WHERE id = ANY($1)', [problemIds]);
+      const probsRows = await pool.query('SELECT id, question, answer, image_url, image_alt, image_is_statement FROM problems WHERE id = ANY($1)', [problemIds]);
       const probMap = Object.fromEntries(probsRows.rows.map(p => [p.id, p]));
       for (const pid of problemIds) {
         const p = probMap[pid];
@@ -2227,6 +2242,8 @@ app.get('/api/attempts/:id/details', authenticateToken, async (req, res) => {
           problem_id: pid,
           question: p.question,
           image_url: p.image_url,
+          image_alt: p.image_alt,
+          image_is_statement: p.image_is_statement,
           student_answer: answers[pid] ?? '',
           correct: results[pid] === true,
           correct_answer: showAnswers ? p.answer : undefined
@@ -2294,7 +2311,8 @@ app.get('/api/tests/:id/problems', authenticateToken, async (req, res) => {
     const visibility = req.user.role === 'admin' ? '' : ' AND (p.created_by IS NULL OR p.created_by = $2)';
     const sourceColumn = req.user.role === 'student' ? '' : ', p.source';
     const result = await pool.query(
-      `SELECT p.id, p.question, p.image_url${sourceColumn}, p.folder_id,
+      `SELECT p.id, p.question, p.image_url, p.image_alt, p.image_is_statement,
+              p.answer_format, p.answer_decimals, p.answer_unit${sourceColumn}, p.folder_id,
               f.name AS folder_name
        FROM problems p LEFT JOIN folders f ON p.folder_id = f.id
        WHERE p.id = ANY($1)${visibility}`,
@@ -2884,7 +2902,10 @@ app.post('/api/tests/:id/submit', authenticateToken, async (req, res) => {
     
     const TOLERANCE = 0.001;
     for (const problem of problems) {
-      const isCorrect = compareAnswers(answers[problem.id], problem.answer, TOLERANCE);
+      const isCorrect = compareAnswers(
+        answers[problem.id], problem.answer, TOLERANCE,
+        problem.answer_format, problem.answer_decimals, problem.answer_unit
+      );
       results[problem.id] = isCorrect;
       
       if (isCorrect) score++;
@@ -3046,7 +3067,7 @@ app.get('/api/students/:id', authenticateToken, async (req, res) => {
       const problemIds = a.problem_ids || [];
       if (problemIds.length === 0) continue;
       const probsResult = await pool.query(
-        'SELECT id, question, answer FROM problems WHERE id = ANY($1)',
+        'SELECT id, question, image_url, image_alt, image_is_statement FROM problems WHERE id = ANY($1)',
         [problemIds]
       );
       const probMap = Object.fromEntries(probsResult.rows.map(p => [p.id, p]));
@@ -3062,6 +3083,8 @@ app.get('/api/students/:id', authenticateToken, async (req, res) => {
           problem_id: pid,
           question: p.question,
           image_url: p.image_url,
+          image_alt: p.image_alt,
+          image_is_statement: p.image_is_statement,
           correct,
           student_answer: correct ? null : studentAnswer,
           test_name: a.test_name,
@@ -3261,12 +3284,27 @@ app.get('/problems/:id(\\d+)', async (req, res) => {
 
         const image = document.createElement('img');
         image.className = 'problem-image';
-        image.alt = 'Problem diagram';
+        image.alt = problemData.image_alt || 'Problem diagram';
+        if (problemData.image_is_statement) {
+          const textVersion = document.createElement('details');
+          textVersion.open = window.matchMedia('(max-width: 639px)').matches;
+          const summary = document.createElement('summary');
+          summary.textContent = 'Text version';
+          textVersion.append(summary, statement);
+          if (problemData.image_alt && problemData.image_alt !== problemData.question) {
+            const description = document.createElement('p');
+            description.textContent = problemData.image_alt;
+            textVersion.appendChild(description);
+          }
+          imageContainer.before(textVersion);
+          image.alt = 'Original problem statement. A text version is available above.';
+          image.style.maxHeight = 'none';
+        }
         image.loading = 'lazy';
         imageContainer.appendChild(image);
         const imageUrl = problemData.image_url;
         if (imageUrl.startsWith('/uploads/')) {
-          const apiUrl = imageUrl.replace(/^\/uploads\//, '/api/uploads/');
+          const apiUrl = '/api' + imageUrl;
           fetch(apiUrl, { headers: { Authorization: 'Bearer ' + token } })
             .then(response => {
               if (!response.ok) throw new Error('image unavailable');

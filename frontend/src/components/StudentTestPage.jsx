@@ -1,13 +1,27 @@
 import { useCallback, useMemo, useState } from 'react';
 import ConfirmationDialog from './ConfirmationDialog';
 import LatexRenderer from './LatexRenderer';
-import ProblemImage from './ProblemImage';
+import ProblemStatement from './ProblemStatement';
 import SourcePdfViewer from './SourcePdfViewer';
 
 function formatTime(seconds) {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+function answerFormatHint(problem) {
+  switch (problem.answer_format) {
+    case 'integer': return 'Enter an integer.';
+    case 'reduced_fraction': return 'Enter a fraction in lowest terms, such as 3/4.';
+    case 'mixed_number': return 'Enter a mixed number with a space, such as 2 1/4.';
+    case 'exact_value': return 'Enter the exact value. You can type sqrt(2), cbrt(5), or pi.';
+    case 'fixed_decimal':
+      if (problem.answer_decimals === 0) return 'Enter a whole number.';
+      return `Enter a decimal with exactly ${problem.answer_decimals} ${problem.answer_decimals === 1 ? 'place' : 'places'}.`;
+    case 'scientific': return 'Enter scientific notation, such as 2.5 × 10^3.';
+    default: return '';
+  }
 }
 
 export default function StudentTestPage({
@@ -179,43 +193,48 @@ export default function StudentTestPage({
             </div>
           )}
           <div className={`${pdfBacked ? `${mobilePanel === 'answers' ? 'block' : 'hidden'} lg:block ` : ''}space-y-4`}>
-            {testProblems.map((problem, index) => (
-              <section key={problem.id} id={`question-${problem.id}`} className={`question-sheet scroll-mt-28 rounded-xl bg-white p-4 shadow sm:p-6 ${pdfBacked && String(activeProblem?.id) === String(problem.id) ? 'ring-2 ring-[#2a61ba]' : ''}`} aria-labelledby={`question-heading-${problem.id}`}>
-                <div className="mb-4">
-                  <div className="question-index"><span aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><p>Question {index + 1} of {testProblems.length}</p></div>
-                  {pdfBacked && <h2 id={`question-heading-${problem.id}`} className="sr-only">Question {index + 1}</h2>}
-                  {!pdfBacked && <h2 id={`question-heading-${problem.id}`} className="text-base font-semibold text-gray-800 mt-1"><LatexRenderer text={problem.question} /></h2>}
-                  {!pdfBacked && problem.image_url && <ProblemImage url={problem.image_url} token={token} />}
-                  {pdfBacked && Number(problem.pdfPage ?? problem.source_page ?? problem.sourcePage) > 0 && <p className="text-xs text-gray-500 mt-1">Source PDF page {problem.pdfPage ?? problem.source_page ?? problem.sourcePage}</p>}
-                  {pdfBacked && problem.question && (
-                    <details className="mt-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-                      <summary className="cursor-pointer text-sm font-medium text-[#2a61ba]">Read question text</summary>
-                      <div className="mt-2 text-sm leading-6 text-gray-800"><LatexRenderer text={problem.question} /></div>
-                    </details>
-                  )}
-                </div>
-                <label htmlFor={`answer-${problem.id}`} className="sr-only">Answer for question {index + 1}</label>
-                <input
-                  id={`answer-${problem.id}`}
-                  type="text"
-                  value={testAnswers[problem.id] || ''}
-                  onFocus={() => { if (pdfBacked) selectProblem(problem.id, false); }}
-                  onChange={event => setTestAnswers({ ...testAnswers, [problem.id]: event.target.value })}
-                  maxLength={256}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 text-center text-base focus:border-[#2a61ba] focus:outline-none sm:text-sm"
-                  placeholder="e.g. 42, 3/4, √2, √2/2"
-                  autoComplete="off"
-                  autoCapitalize="off"
-                  spellCheck="false"
-                />
-                {(testAnswers[problem.id] || '').trim() && (
-                  <div className="mt-2 flex items-center gap-2 text-sm text-gray-500">
-                    <span>Your entered answer:</span>
-                    <code className="rounded border border-gray-200 bg-[#f1f6fd] px-2 py-1 font-mono text-gray-800">{String(testAnswers[problem.id]).trim()}</code>
+            {testProblems.map((problem, index) => {
+              const unitHint = problem.answer_unit && (problem.answer_unit === '$' ? 'Answer in dollars.' : `Answer unit: ${problem.answer_unit}.`);
+              const hint = [unitHint, answerFormatHint(problem)].filter(Boolean).join(' ');
+              return (
+                <section key={problem.id} id={`question-${problem.id}`} className={`question-sheet scroll-mt-28 rounded-xl bg-white p-4 shadow sm:p-6 ${pdfBacked && String(activeProblem?.id) === String(problem.id) ? 'ring-2 ring-[#2a61ba]' : ''}`} aria-labelledby={`question-heading-${problem.id}`}>
+                  <div className="mb-4">
+                    <div className="question-index"><span aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><p>Question {index + 1} of {testProblems.length}</p></div>
+                    <h2 id={`question-heading-${problem.id}`} className="sr-only">Question {index + 1}</h2>
+                    {!pdfBacked && <div className="mt-1 text-base font-semibold text-gray-800"><ProblemStatement problem={problem} token={token} /></div>}
+                    {pdfBacked && Number(problem.pdfPage ?? problem.source_page ?? problem.sourcePage) > 0 && <p className="text-xs text-gray-500 mt-1">Source PDF page {problem.pdfPage ?? problem.source_page ?? problem.sourcePage}</p>}
+                    {pdfBacked && problem.question && (
+                      <details className="mt-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                        <summary className="cursor-pointer text-sm font-medium text-[#2a61ba]">Read question text</summary>
+                        <div className="mt-2 text-sm leading-6 text-gray-800"><LatexRenderer text={problem.question} /></div>
+                      </details>
+                    )}
                   </div>
-                )}
-              </section>
-            ))}
+                  <label htmlFor={`answer-${problem.id}`} className="sr-only">Answer for question {index + 1}</label>
+                  {hint && <p id={`answer-hint-${problem.id}`} className="mb-2 text-sm text-gray-700">{hint}</p>}
+                  <input
+                    id={`answer-${problem.id}`}
+                    aria-describedby={hint ? `answer-hint-${problem.id}` : undefined}
+                    type="text"
+                    value={testAnswers[problem.id] || ''}
+                    onFocus={() => { if (pdfBacked) selectProblem(problem.id, false); }}
+                    onChange={event => setTestAnswers({ ...testAnswers, [problem.id]: event.target.value })}
+                    maxLength={256}
+                    className="w-full rounded-lg border border-gray-300 px-4 py-3 text-center text-base focus:border-[#2a61ba] focus:outline-none sm:text-sm"
+                    placeholder={hint ? undefined : "e.g. 42, 3/4, √2, √2/2"}
+                    autoComplete="off"
+                    autoCapitalize="off"
+                    spellCheck="false"
+                  />
+                  {(testAnswers[problem.id] || '').trim() && (
+                    <div className="mt-2 flex items-center gap-2 text-sm text-gray-500">
+                      <span>Your entered answer:</span>
+                      <code className="rounded border border-gray-200 bg-[#f1f6fd] px-2 py-1 font-mono text-gray-800">{String(testAnswers[problem.id]).trim()}</code>
+                    </div>
+                  )}
+                </section>
+              );
+            })}
           </div>
         </div>
 

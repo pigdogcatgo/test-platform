@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import axios from 'axios';
 import { API_URL } from './config';
-import ProblemImage from './components/ProblemImage';
+import ProblemStatement from './components/ProblemStatement';
 import StudentTestPage from './components/StudentTestPage';
 import { AuthLayout, PasswordField } from './components/AuthLayout';
 import AccessibleDialog from './components/AccessibleDialog';
 import ConfirmationDialog from './components/ConfirmationDialog';
-import LatexRenderer from './components/LatexRenderer';
 import DemoBanner from './components/DemoBanner';
 import ProblemCatalogFilters from './components/ProblemCatalogFilters';
 import ProblemDetailPage from './components/ProblemDetailPage';
@@ -1285,8 +1284,7 @@ if (view === 'student-dashboard' && user) {
                   {attemptDetails.problems.map((item, idx) => (
                     <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>
                       <p className="text-xs text-gray-500 mb-1">Question {idx + 1}</p>
-                      <div className="text-sm text-gray-800 mb-2"><LatexRenderer text={item.question} /></div>
-                      {item.image_url && <ProblemImage url={item.image_url} token={token} />}
+                      <div className="text-sm text-gray-800 mb-2"><ProblemStatement problem={item} token={token} /></div>
                       <p className="text-sm mt-2">
                         <span className="font-medium">Your answer:</span> {String(item.student_answer || '(blank)')}
                         {item.correct ? (
@@ -1733,8 +1731,7 @@ if (view === 'test-analytics' && user && selectedTestAnalytics) {
                     {attemptDetails.problems.map((item, idx) => (
                       <div key={item.problem_id} className={`border rounded-lg p-4 ${item.correct ? 'border-green-200 bg-green-50/50' : 'border-red-200 bg-red-50/50'}`}>
                         <p className="text-xs text-gray-500 mb-1">Question {idx + 1}</p>
-                        <div className="text-sm text-gray-800 mb-2"><LatexRenderer text={item.question} /></div>
-                        {item.image_url && <ProblemImage url={item.image_url} token={token} />}
+                        <div className="text-sm text-gray-800 mb-2"><ProblemStatement problem={item} token={token} /></div>
                         <p className="text-sm mt-2">
                           <span className="font-medium">Answer:</span> {String(item.student_answer || '(blank)')}
                           {item.correct ? (
@@ -1937,13 +1934,8 @@ if (view === 'student-profile' && user) {
                     <div className="flex-1 min-w-0">
                       <p className="text-xs text-gray-500 mb-1">{item.test_name} • {new Date(item.completed_at).toLocaleDateString()}</p>
                       <div className="text-sm text-gray-800">
-                        <LatexRenderer text={item.question} />
+                        <ProblemStatement problem={item} token={token} />
                       </div>
-                      {item.image_url && (
-                        <div className="mt-2">
-                          <ProblemImage url={item.image_url} token={token} />
-                        </div>
-                      )}
                       {!item.correct && item.student_answer != null && (
                         <p className="text-sm mt-2 text-red-600">
                           Your answer: <span className="font-medium">{String(item.student_answer)}</span>
@@ -2565,7 +2557,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                         const metadata = getCatalogMetadata(problem, DEMO_MODE);
                         return <tr key={problem.id} className="border-t">
                           {!isTeacherAdmin && <td className="px-4 py-3"><input type="checkbox" checked={selectedProblemIds.includes(problem.id)} onChange={event => setSelectedProblemIds(previous => event.target.checked ? [...new Set([...previous, problem.id])] : previous.filter(id => id !== problem.id))} aria-label={`Select problem ${problem.id}`} className="rounded" /></td>}
-                          {!isTeacherAdmin && <td className="px-4 py-3 max-w-md"><LatexRenderer text={problem.question} />{problem.image_url && <ProblemImage url={problem.image_url} token={token} />}</td>}
+                          {!isTeacherAdmin && <td className="px-4 py-3 max-w-md"><ProblemStatement problem={problem} token={token} /></td>}
                           {!isTeacherAdmin && <td className="px-4 py-3">{problem.answer}</td>}
                           {!isTeacherAdmin && <td className="px-4 py-3">{problem.source ?? '—'}</td>}
                           <td className="px-4 py-3">{metadata.year || '—'}</td>
@@ -2575,7 +2567,7 @@ if ((view === 'admin-dashboard' || view === 'teacher-admin') && user) {
                           <td className="px-4 py-3">{metadata.elo}</td>
                           {!isTeacherAdmin && <td className="px-4 py-3 space-x-2 whitespace-nowrap">
                             <a href={`/problems/${problem.id}`} onClick={event => { event.preventDefault(); openProblemView(problem.id); }} className="text-[#2a61ba] hover:underline font-medium">See problem</a>
-                            <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', problem_number: problem.problem_number ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>
+                            {!problem.image_is_statement && <button type="button" onClick={() => setEditingProblem({ ...problem, image_url: problem.image_url ?? '', source: problem.source ?? '', year: problem.year ?? '', level: problem.level ?? '', round: problem.round ?? '', problem_number: problem.problem_number ?? '', folder_id: problem.folder_id ?? null })} className="text-[#2a61ba] hover:underline font-medium">Edit</button>}
                             <button type="button" onClick={() => setProblemToDelete(problem.id)} className="text-red-600 hover:underline font-medium">Delete</button>
                           </td>}
                         </tr>;

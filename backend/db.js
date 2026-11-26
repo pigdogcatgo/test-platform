@@ -274,6 +274,17 @@ export async function initDatabase() {
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS level VARCHAR(50)');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS round VARCHAR(50)');
     await client.query('ALTER TABLE problems ADD COLUMN IF NOT EXISTS problem_number INTEGER');
+    await client.query(`
+      ALTER TABLE problems
+        ADD COLUMN IF NOT EXISTS image_alt TEXT,
+        ADD COLUMN IF NOT EXISTS image_is_statement BOOLEAN NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS answer_format TEXT,
+        ADD COLUMN IF NOT EXISTS answer_decimals SMALLINT,
+        ADD COLUMN IF NOT EXISTS answer_unit TEXT,
+        ADD COLUMN IF NOT EXISTS rights_basis TEXT,
+        ADD COLUMN IF NOT EXISTS rights_reference TEXT,
+        ADD COLUMN IF NOT EXISTS rights_reviewed_at TIMESTAMPTZ
+    `);
     const metadataRows = await client.query(`
       SELECT p.id, p.source, f.name AS folder_name
       FROM problems p LEFT JOIN folders f ON f.id = p.folder_id

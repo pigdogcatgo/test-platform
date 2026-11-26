@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import ProblemImage from './ProblemImage';
-import LatexRenderer from './LatexRenderer';
+import ProblemStatement from './ProblemStatement';
 
 export default function ProblemDetailPage({ problemId, api, token, onBack }) {
   const [problem, setProblem] = useState(null);
@@ -62,10 +61,9 @@ export default function ProblemDetailPage({ problemId, api, token, onBack }) {
           {problem && (
             <section className="mt-7 border-t border-gray-200 pt-6" aria-labelledby="problem-statement-title">
               <h2 id="problem-statement-title" className="text-base font-semibold text-gray-900">Problem statement</h2>
-              <div className="mt-3 whitespace-pre-wrap text-[1.05rem] leading-8 text-gray-800">
-                <LatexRenderer text={problem.question} />
+              <div className="mt-3 text-[1.05rem] leading-8 text-gray-800">
+                <ProblemStatement problem={problem} token={token} />
               </div>
-              {problem.image_url && <ProblemImage url={problem.image_url} token={token} />}
             </section>
           )}
         </article>
